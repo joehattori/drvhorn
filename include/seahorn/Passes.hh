@@ -111,6 +111,9 @@ llvm::Pass *createCHAPass();
 llvm::ModulePass *createDebugVerifierPass(int instanceID, llvm::StringRef name);
 llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
+
+llvm::Pass *createAcpiSetupAndAssertPass();
+llvm::Pass *createHandleKmallocPass();
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

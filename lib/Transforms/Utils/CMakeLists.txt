@@ -17,4 +17,6 @@ add_llvm_library(SeaTransformsUtils DISABLE_LLVM_LINK_LLVM_DYLIB
   OneAssumePerBlock.cc
   SliceFunctions.cc
   DebugVerifier.cc
+  Acpi.cc
+  HandleKmalloc.cc
   )

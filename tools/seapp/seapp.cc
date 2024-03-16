@@ -285,6 +285,11 @@ static llvm::cl::opt<bool> PrintStats("seapp-stats",
                                       llvm::cl::desc("Print statistics"),
                                       llvm::cl::init(false));
 
+static llvm::cl::opt<bool>
+    Acpi("dd-acpi",
+               llvm::cl::desc("Target an ACPI driver"),
+               llvm::cl::init(false));
+
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
   std::string filename = str;
@@ -493,6 +498,11 @@ int main(int argc, char **argv) {
 
     // -- Create a main function if we do not have one.
     pm_wrapper.add(seahorn::createDummyMainFunctionPass());
+
+    if (Acpi) {
+      // pm_wrapper.add(seahorn::createAcpiSetupAndAssertPass());
+      pm_wrapper.add(seahorn::createHandleKmallocPass());
+    }
 
     // -- promote verifier specific functions to special names
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());

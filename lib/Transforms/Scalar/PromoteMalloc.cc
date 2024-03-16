@@ -1,7 +1,6 @@
 #include "llvm/Pass.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
-#include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "boost/range.hpp"

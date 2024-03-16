@@ -217,8 +217,7 @@ bool LowerGvInitializers::runOnModule(Module &M) {
           errs() << "LowerGvInitializers: created a store " << *SI << "\n");
       change = true;
     } else if (ety->isStructTy())
-      WARN << "not lowering an initializer for a global struct:  "
-           << gv->getName();
+      LOG("lower-gv-init", errs() << "not lowering an initializer for a global struct: " << gv->getName() << "\n");
   }
 
   if (LowerGlobalCtors) {

@@ -111,34 +111,6 @@ public:
     // our favourite exit code
     B.CreateRet(ConstantInt::get(intTy, 42));
 
-    // GlobalVariable *LLVMUsed = M.getGlobalVariable("llvm.used");
-    // std::vector<Constant*> MergedVars;
-    // if (LLVMUsed) {
-    //   // Collect the existing members of llvm.used
-    //   ConstantArray *Inits = cast<ConstantArray>(LLVMUsed->getInitializer());
-    //   for (unsigned I = 0, E = Inits->getNumOperands(); I != E; ++I) {
-    //     Value* V = Inits->getOperand(I)->stripPointerCasts();
-    //     MergedVars.push_back(Inits->getOperand(I));
-    //   }
-    //   LLVMUsed->eraseFromParent();
-    // }
-
-    // Type *i8PTy = Type::getInt8PtrTy(ctx);
-    // // Add uses for our data
-    // //MergedVars.push_back (ConstantExpr::getBitCast(cast<llvm::Constant>(F),
-    // i8PTy));
-    // // XXX: this shouldn't be necessary but for some reason DCE
-    // //       does not like my main and deletes it
-    // MergedVars.push_back
-    // (ConstantExpr::getBitCast(cast<llvm::Constant>(main), i8PTy));
-
-    // // Recreate llvm.used.
-    // ArrayType *ATy = ArrayType::get(i8PTy, MergedVars.size());
-    // LLVMUsed = new llvm::GlobalVariable(
-    //     M, ATy, false, llvm::GlobalValue::AppendingLinkage,
-    //     llvm::ConstantArray::get(ATy, MergedVars), "llvm.used");
-    // LLVMUsed->setSection("llvm.metadata");
-
     return true;
   }
 

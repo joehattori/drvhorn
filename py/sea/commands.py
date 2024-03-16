@@ -311,6 +311,8 @@ class Seapp(sea.LimitedCmd):
                          default='none')
         ap.add_argument ('--entry', dest='entry', help='Make entry point if main does not exist',
                          default=None, metavar='str')
+        ap.add_argument ('--dd-acpi', dest='acpi', help='Target an ACPI driver',
+                         default=False, action='store_true')
         ap.add_argument ('--externalize-addr-taken-functions',
                          help='Externalize uses of address-taken functions',
                          dest='enable_ext_funcs', default=False,
@@ -472,6 +474,9 @@ class Seapp(sea.LimitedCmd):
 
             if args.entry is not None:
                 argv.append ('--entry-point={0}'.format (args.entry))
+
+            if args.acpi:
+                argv.append ('--dd-acpi')
 
             if args.kill_vaarg:
                 argv.append('--kill-vaarg=true')
@@ -1693,3 +1698,5 @@ Fpcf = sea.SeqCmd('fpcf', 'clang|fat-bnd-check|fec|unroll|cut-loops|opt|horn --s
                  [Clang(), FatBoundsCheck()] + FECrab.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
 Spf = sea.SeqCmd('spf', 'clang|add-branch-sentinel|fat-bnd-check|fe|unroll|cut-loops|opt|horn --solve',
                  [Clang(), AddBranchSentinel(), FatBoundsCheck()] + FrontEnd.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
+DD = sea.SeqCmd('dd', 'Linux device driver verification: alias for pp|ms|opt|horn --solve',
+                 [Seapp(), MixedSem(), Seaopt(), Seahorn(solve=True)])
