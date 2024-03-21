@@ -500,7 +500,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createDummyMainFunctionPass());
 
     if (Acpi) {
-      // pm_wrapper.add(seahorn::createAcpiSetupAndAssertPass());
+      pm_wrapper.add(seahorn::createAcpiSetupPass());
       pm_wrapper.add(seahorn::createHandleKmallocPass());
     }
 

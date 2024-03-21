@@ -112,7 +112,7 @@ llvm::ModulePass *createDebugVerifierPass(int instanceID, llvm::StringRef name);
 llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
 
-llvm::Pass *createAcpiSetupAndAssertPass();
+llvm::Pass *createAcpiSetupPass();
 llvm::Pass *createHandleKmallocPass();
 } // namespace seahorn
 

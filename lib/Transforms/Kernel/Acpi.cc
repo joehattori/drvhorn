@@ -9,11 +9,11 @@ using namespace llvm;
 
 namespace seahorn {
 
-class AcpiSetupAndAssert : public ModulePass {
+class AcpiSetup : public ModulePass {
 public:
   static char ID;
 
-  AcpiSetupAndAssert() : ModulePass(ID) {}
+  AcpiSetup() : ModulePass(ID) {}
 
   bool runOnModule(Module &M) override {
     Function *main = M.getFunction("main");
@@ -32,10 +32,10 @@ public:
     return true;
   }
 
-  virtual StringRef getPassName() const override { return "AcpiSetupAndAssert"; }
+  virtual StringRef getPassName() const override { return "AcpiSetup"; }
 };
 
-char AcpiSetupAndAssert::ID = 0;
+char AcpiSetup::ID = 0;
 
-Pass *createAcpiSetupAndAssertPass() { return new AcpiSetupAndAssert(); }
+Pass *createAcpiSetupPass() { return new AcpiSetup(); }
 }

@@ -3,6 +3,7 @@ set (USED_LIBS
   SeaInstrumentation
   SeaTransformsScalar
   SeaTransformsUtils
+  SeaTransformsKernel
   SeaAnalysis
   SeaSmt
   ${SEA_DSA_LIBS}

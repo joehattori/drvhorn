@@ -1,6 +1,7 @@
 set (USED_LIBS 
   SeaTransformsScalar
   SeaTransformsUtils
+  SeaTransformsKernel
   SeaInstrumentation  
   SeaAnalysis
   SeaSmt

@@ -6,6 +6,7 @@
 #include "boost/range.hpp"
 
 #include <iostream>
+#include <algorithm>
 
 using namespace llvm;
 
@@ -47,18 +48,11 @@ public:
 private:
   bool isKmallocCall(const CallInst *call) {
     const Function *fn = call->getCalledFunction();
-    if (!fn) {
-      if (call->getCalledOperand())
-        fn = dyn_cast<const Function>(call->getCalledOperand()->stripPointerCasts());
-      else
-        return false;
-    }
+    if (!fn)
+      return false;
     StringRef fn_name = fn->getName();
-    for (const auto &kmalloc_name : kmalloc_names) {
-      if (fn_name.equals(kmalloc_name))
-        return true;
-    }
-    return false;
+    return std::any_of(std::begin(kmalloc_names), std::end(kmalloc_names),
+                       [&fn_name](StringRef name) { return fn_name.equals(name); });
   }
 
   FunctionCallee createKmallocStub(Module &M) {
