@@ -290,6 +290,11 @@ static llvm::cl::opt<bool>
                llvm::cl::desc("Target an ACPI driver"),
                llvm::cl::init(false));
 
+static llvm::cl::opt<std::string>
+    EntryPoint("entry-point",
+               llvm::cl::desc("Entry point if main does not exist"),
+               llvm::cl::init(""));
+
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
   std::string filename = str;
@@ -496,12 +501,13 @@ int main(int argc, char **argv) {
     // -- Externalize some user-selected functions
     pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
 
-    // -- Create a main function if we do not have one.
-    pm_wrapper.add(seahorn::createDummyMainFunctionPass());
-
     if (Acpi) {
-      pm_wrapper.add(seahorn::createAcpiSetupPass());
-      pm_wrapper.add(seahorn::createHandleKmallocPass());
+      pm_wrapper.add(seahorn::createKernelSetupPass());
+      pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
+      pm_wrapper.add(seahorn::createRemoveNonEssentialCalls());
+    } else {
+      // -- Create a main function if we do not have one.
+      pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
     }
 
     // -- promote verifier specific functions to special names
@@ -697,7 +703,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createSliceFunctionsPass());
 
     // -- Create a main function if we sliced it away
-    pm_wrapper.add(seahorn::createDummyMainFunctionPass());
+    pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
 
     // AG: Dangerous. Promotes verifier.assume() to llvm.assume()
     if (PromoteAssumptions)

@@ -17,15 +17,11 @@
 
 using namespace llvm;
 
-static llvm::cl::opt<std::string>
-    EntryPoint("entry-point",
-               llvm::cl::desc("Entry point if main does not exist"),
-               llvm::cl::init(""));
-
 namespace seahorn {
 
 class DummyMainFunction : public ModulePass {
   DenseMap<const Type *, FunctionCallee> m_ndfn;
+  std::string entry_point;
 
   FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,
                                  std::string prefix) {
@@ -53,7 +49,7 @@ class DummyMainFunction : public ModulePass {
 public:
   static char ID;
 
-  DummyMainFunction() : ModulePass(ID) {}
+  DummyMainFunction(std::string entry) : ModulePass(ID), entry_point(entry) {}
 
   bool runOnModule(Module &M) override {
 
@@ -64,8 +60,8 @@ public:
     }
 
     Function *Entry = nullptr;
-    if (EntryPoint != "")
-      Entry = M.getFunction(EntryPoint);
+    if (entry_point != "")
+      Entry = M.getFunction(entry_point);
 
     // --- Create main
     LLVMContext &ctx = M.getContext();
@@ -125,6 +121,8 @@ public:
 
 char DummyMainFunction::ID = 0;
 
-Pass *createDummyMainFunctionPass() { return new DummyMainFunction(); }
+Pass *createDummyMainFunctionPass(std::string entry) {
+  return new DummyMainFunction(entry);
+}
 
 } // namespace seahorn
