@@ -109,15 +109,6 @@ u32 acpi_get_table(char *signature, u32 instance, struct acpi_table_header **out
     return status;
 }
 
-void setup() {
-    acpi_gbl_root_table_list.tables = initial_tables;
-    acpi_gbl_root_table_list.current_table_count = 1;
-    acpi_gbl_root_table_list.max_table_count = ACPI_MAX_TABLES;
-
-    acpi_gbl_root_table_list.tables[0].signature.integer = 0x324d5054; // 2MPT
-    acpi_gbl_root_table_list.tables[0].validation_count = 0;
-}
-
 void mutex_dummy_lock() {
     // should not be called
     __VERIFIER_error();
@@ -128,7 +119,6 @@ int crb_acpi_add(struct acpi_device *device) {
     struct acpi_table_tpm2 *buf;
     u32 *priv;
 
-    setup();
     mutex_dummy_lock();
     status = acpi_get_table("TPM2", 1, (struct acpi_table_header **)&buf);
     if (status)
