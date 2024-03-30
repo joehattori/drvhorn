@@ -6,11 +6,58 @@
 #include "boost/range.hpp"
 
 #include <algorithm>
-#include <iostream>
+#include <optional>
 
 using namespace llvm;
 
 namespace seahorn {
+
+struct MemAllocConversion {
+  enum MemAllocType {
+    Kmalloc,
+    KmallocLarge,
+    KmallocNode,
+    KmallocLargeNode,
+    PcpuAlloc
+  };
+
+  CallInst *call = nullptr;
+  MemAllocType type;
+
+  MemAllocConversion(CallInst *inst) {
+    if (!inst)
+      return;
+    Function *fn = inst->getCalledFunction();
+    if (!fn)
+      return;
+    StringRef name = fn->getName();
+    if (name.equals("__kmalloc"))
+      type = Kmalloc;
+    else if (name.equals("kmalloc_large"))
+      type = KmallocLarge;
+    else if (name.equals("__kmalloc_node"))
+      type = KmallocNode;
+    else if (name.equals("kmalloc_large_node"))
+      type = KmallocLargeNode;
+    else if (name.equals("pcpu_alloc"))
+      type = PcpuAlloc;
+    else
+      return;
+    call = inst;
+  }
+
+  SmallVector<Value *, 2> getArgs() const {
+    switch (type) {
+    case Kmalloc:
+    case KmallocLarge:
+    case KmallocNode:
+    case KmallocLargeNode:
+      return {call->getArgOperand(0), call->getArgOperand(1)};
+    case PcpuAlloc:
+      return {call->getArgOperand(0), call->getArgOperand(3)};
+    }
+  }
+};
 
 class KernelSetup : public ModulePass {
 public:
@@ -23,22 +70,12 @@ public:
   virtual StringRef getPassName() const override { return "KernelSetup"; }
 
 private:
-  bool isKmallocCall(const CallInst *call) {
-    const Function *fn = call->getCalledFunction();
-    if (!fn)
-      return false;
-    StringRef fn_name = fn->getName();
-    return std::any_of(
-        std::begin(kmalloc_names), std::end(kmalloc_names),
-        [&fn_name](StringRef name) { return fn_name.equals(name); });
-  }
-
   FunctionCallee createKmallocStub(Module &M) {
     LLVMContext &ctx = M.getContext();
     // void pointer type.
     Type *retType = Type::getInt8PtrTy(ctx);
-    std::vector<Type *> argTypes = {Type::getInt32Ty(ctx),
-                                    Type::getInt32Ty(ctx)};
+    SmallVector<Type *, 2> argTypes = {Type::getInt32Ty(ctx),
+                                       Type::getInt32Ty(ctx)};
     FunctionType *funcType = FunctionType::get(retType, argTypes, false);
     return M.getOrInsertFunction("malloc_stub", funcType);
   }
@@ -46,30 +83,31 @@ private:
   bool handleKmalloc(Module &M) {
     FunctionCallee stub = createKmallocStub(M);
 
-    std::vector<CallInst *> calls;
+    std::vector<MemAllocConversion> conversions;
     for (Function &fn : M) {
       for (Instruction &inst : instructions(fn)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isKmallocCall(call))
-            calls.push_back(call);
-        }
+        MemAllocConversion conv(dyn_cast<CallInst>(&inst));
+        if (conv.call)
+          conversions.push_back(conv);
       }
     }
 
-    for (CallInst *call : calls) {
+    for (const MemAllocConversion &conv : conversions) {
+      CallInst *call = conv.call;
       IRBuilder<> B(call);
-      std::vector<Value *> args(call->arg_begin(), call->arg_end());
-      // malloc_stub takes two arguments.
-      args.resize(2);
-      CallInst *new_call = B.CreateCall(stub, args);
+      CallInst *new_call = B.CreateCall(stub, conv.getArgs());
       call->replaceAllUsesWith(new_call);
       call->eraseFromParent();
     }
-    return !calls.empty();
-  }
 
-  StringRef kmalloc_names[4] = {"__kmalloc", "kmalloc_large", "__kmalloc_node",
-                                "kmalloc_large_node"};
+    for (StringRef name : {"__kmalloc", "kmalloc_large", "__kmalloc_node",
+                           "kmalloc_large_node", "pcpu_alloc"}) {
+      if (Function *fn = M.getFunction(name))
+        fn->eraseFromParent();
+    }
+
+    return !conversions.empty();
+  }
 };
 
 char KernelSetup::ID = 0;

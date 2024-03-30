@@ -18,6 +18,7 @@ public:
 
   bool runOnModule(Module &M) override {
     std::vector<CallInst *> callsToRemove;
+    std::set<StringRef> fnNamesToRemove;
     for (Function &fn : M) {
       for (Instruction &inst : instructions(fn)) {
         CallInst *call = dyn_cast<CallInst>(&inst);
@@ -27,12 +28,21 @@ public:
         if (!fn)
           continue;
         StringRef name = fn->getName();
-        if (shouldRemove(name))
+        if (shouldRemove(name)) {
           callsToRemove.push_back(call);
+          fnNamesToRemove.insert(name);
+        }
       }
     }
+
     for (CallInst *call : callsToRemove)
       call->eraseFromParent();
+
+    for (StringRef name : fnNamesToRemove) {
+      Function *fn = M.getFunction(name);
+      fn->eraseFromParent();
+    }
+
     return !callsToRemove.empty();
   }
 

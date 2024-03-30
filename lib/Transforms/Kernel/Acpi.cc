@@ -11,13 +11,13 @@
 
 #include <iostream>
 
-// index of struct acpi_table_desc in struct acpi_table_list
+// indices of fields in struct acpi_table_list
 #define ACPI_TABLE_DESC_INDEX 0
 #define CURRENT_TABLE_COUNT_INDEX 1
 #define MAX_TABLE_COUNT_INDEX 2
-// index of u32 validation_count in struct acpi_table_desc
-#define VALIDATION_COUNT_INDEX 2
+// indices of fields in struct acpi_table_desc
 #define SIGNATURE_INDEX 3
+#define VALIDATION_COUNT_INDEX 6
 
 using namespace llvm;
 
@@ -130,10 +130,8 @@ private:
     // // 0x324d5054: int of "2MPT", reversed "TPM2"
     Value *signaturePtr =
         B.CreateStructGEP(descType, firstTableDescPtr, SIGNATURE_INDEX);
-    StructType *acpiNameUnionType =
-        StructType::getTypeByName(ctx, "union.acpi_name_union");
-    Value *intSignaturePtr =
-        B.CreateStructGEP(acpiNameUnionType, signaturePtr, 0);
+    Value *intSignaturePtr = B.CreateStructGEP(
+        signaturePtr->getType()->getPointerElementType(), signaturePtr, 0);
     Constant *tpm2Int = ConstantInt::get(i32Ty, 0x324d5054);
     B.CreateStore(tpm2Int, intSignaturePtr);
   }
