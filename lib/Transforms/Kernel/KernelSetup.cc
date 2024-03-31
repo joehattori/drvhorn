@@ -5,9 +5,9 @@
 #include "llvm/Pass.h"
 
 #include "boost/range.hpp"
+#include "seahorn/Support/SeaDebug.h"
 
 #include <algorithm>
-#include <iostream>
 #include <optional>
 
 using namespace llvm;
@@ -73,6 +73,7 @@ public:
   bool runOnModule(Module &M) override {
     handleKmalloc(M);
     handleInlineAssembly(M);
+    insertMain(M);
     return true;
   }
 
@@ -149,6 +150,18 @@ private:
       call->replaceAllUsesWith(task);
       call->eraseFromParent();
     }
+  }
+
+  void insertMain(Module &M) {
+    if (M.getFunction("main")) {
+      LOG("ACPI", errs() << "ACPI: Main already exists.\n");
+      return;
+    }
+
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    ArrayRef<Type *> params;
+    Function::Create(FunctionType::get(i32Ty, params, false),
+                     GlobalValue::LinkageTypes::ExternalLinkage, "main", &M);
   }
 };
 

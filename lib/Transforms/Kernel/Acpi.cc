@@ -6,9 +6,6 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 
-#include "seahorn/Analysis/SeaBuiltinsInfo.hh"
-#include "seahorn/Support/SeaDebug.h"
-
 #include <iostream>
 
 // indices of fields in struct acpi_table_list
@@ -30,9 +27,7 @@ public:
   AcpiSetup(std::string entry) : ModulePass(ID), entry_point(entry) {}
 
   bool runOnModule(Module &M) override {
-    Function *main = insertMain(M);
-    if (!main)
-      return false;
+    Function *main = M.getFunction("main");
     acpiInitialization(M, main);
     CallInst *call = insertEntryCall(M, main);
     buildErrorPathAssertion(M, main, call);
@@ -67,19 +62,6 @@ private:
         makeNewNondetFn(M, *type, ndfn.size(), "verifier.nondet.");
     ndfn[type] = res;
     return res;
-  }
-
-  Function *insertMain(Module &M) {
-    if (M.getFunction("main")) {
-      LOG("ACPI", errs() << "ACPI: Main already exists.\n");
-      return nullptr;
-    }
-
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    ArrayRef<Type *> params;
-    return Function::Create(FunctionType::get(i32Ty, params, false),
-                            GlobalValue::LinkageTypes::ExternalLinkage, "main",
-                            &M);
   }
 
   void acpiInitialization(Module &M, Function *main) {
@@ -194,4 +176,4 @@ private:
 char AcpiSetup::ID = 0;
 
 Pass *createAcpiSetupPass(std::string entry) { return new AcpiSetup(entry); }
-}
+} // namespace seahorn
