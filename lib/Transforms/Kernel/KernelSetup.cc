@@ -1,14 +1,19 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Pass.h"
 
 #include "boost/range.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <optional>
 
 using namespace llvm;
+
+#define currentTaskAsm "movl ${1:P}, $0"
+#define currentTaskConstraints "=r,im,~{dirflag},~{fpsr},~{flags}"
 
 namespace seahorn {
 
@@ -65,7 +70,11 @@ public:
 
   KernelSetup() : ModulePass(ID) {}
 
-  bool runOnModule(Module &M) override { return handleKmalloc(M); }
+  bool runOnModule(Module &M) override {
+    handleKmalloc(M);
+    handleInlineAssembly(M);
+    return true;
+  }
 
   virtual StringRef getPassName() const override { return "KernelSetup"; }
 
@@ -80,7 +89,7 @@ private:
     return M.getOrInsertFunction("malloc_stub", funcType);
   }
 
-  bool handleKmalloc(Module &M) {
+  void handleKmalloc(Module &M) {
     FunctionCallee stub = createKmallocStub(M);
 
     std::vector<MemAllocConversion> conversions;
@@ -105,8 +114,41 @@ private:
       if (Function *fn = M.getFunction(name))
         fn->eraseFromParent();
     }
+  }
 
-    return !conversions.empty();
+  void handleInlineAssembly(Module &M) { handleCurrentTask(M); }
+
+  bool isCurrentTaskCall(CallInst *call) {
+    if (!call->isTailCall())
+      return false;
+    InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm)
+      return false;
+    std::string asmStr = inlineAsm->getAsmString();
+    std::string constraints = inlineAsm->getConstraintString();
+    if (asmStr == currentTaskAsm && constraints == currentTaskConstraints) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  void handleCurrentTask(Module &M) {
+    std::vector<CallInst *> currentTaskCalls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isCurrentTaskCall(call))
+            currentTaskCalls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : currentTaskCalls) {
+      Value *task = call->getArgOperand(0);
+      call->replaceAllUsesWith(task);
+      call->eraseFromParent();
+    }
   }
 };
 
