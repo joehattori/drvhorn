@@ -503,11 +503,14 @@ int main(int argc, char **argv) {
 
     if (Acpi) {
       pm_wrapper.add(seahorn::createKernelSetupPass());
-      pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
-      pm_wrapper.add(seahorn::createRemoveNonEssentialCalls());
     } else {
       // -- Create a main function if we do not have one.
       pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
+    }
+
+    if (Acpi) {
+      pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
+      pm_wrapper.add(llvm::createGlobalDCEPass());
     }
 
     // -- promote verifier specific functions to special names

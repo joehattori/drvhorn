@@ -63,7 +63,7 @@ static const char *dummy_hid = "device";
 
 #define __same_type(a, b) __builtin_types_compatible_p(typeof(a), typeof(b))
 #define offsetof(TYPE, MEMBER)    __builtin_offsetof(TYPE, MEMBER)
-# define static_assert _Static_assert
+#define static_assert _Static_assert
 #define container_of(ptr, type, member) ({                \
     void *__mptr = (void *)(ptr);                    \
     static_assert(__same_type(*(ptr), ((type *)0)->member) ||    \
@@ -210,11 +210,6 @@ u32 acpi_tb_get_table(struct acpi_table_desc *table_desc, struct acpi_table_head
     return 0;
 }
 
-void mutex_dummy_lock() {
-    // should not be called
-    __VERIFIER_error();
-}
-
 u32 acpi_get_table(char *signature, u32 instance, struct acpi_table_header **out_table) {
     if (!signature || !out_table)
         return 0x1001;
@@ -222,7 +217,6 @@ u32 acpi_get_table(char *signature, u32 instance, struct acpi_table_header **out
     struct acpi_table_desc *table_desc;
     u32 status = 1;
 
-    mutex_dummy_lock();
     for (i = 0, j = 0; i < acpi_gbl_root_table_list.current_table_count; i++) {
         table_desc = &acpi_gbl_root_table_list.tables[i];
 

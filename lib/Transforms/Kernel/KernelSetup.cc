@@ -15,6 +15,8 @@ using namespace llvm;
 #define currentTaskAsm "movl ${1:P}, $0"
 #define currentTaskConstraints "=r,im,~{dirflag},~{fpsr},~{flags}"
 
+#define barrierConstraints "~{memory},~{dirflag},~{fpsr},~{flags}"
+
 namespace seahorn {
 
 struct MemAllocConversion {
@@ -74,6 +76,7 @@ public:
     handleKmalloc(M);
     handleInlineAssembly(M);
     insertMain(M);
+    updateFunctionLinkage(M);
     return true;
   }
 
@@ -117,21 +120,19 @@ private:
     }
   }
 
-  void handleInlineAssembly(Module &M) { handleCurrentTask(M); }
+  void handleInlineAssembly(Module &M) {
+    handleCurrentTask(M);
+    handleBarrier(M);
+  }
 
-  bool isCurrentTaskCall(CallInst *call) {
+  bool isCurrentTaskCall(const CallInst *call) {
     if (!call->isTailCall())
       return false;
     InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm)
       return false;
-    std::string asmStr = inlineAsm->getAsmString();
-    std::string constraints = inlineAsm->getConstraintString();
-    if (asmStr == currentTaskAsm && constraints == currentTaskConstraints) {
-      return true;
-    } else {
-      return false;
-    }
+    return inlineAsm->getAsmString() == currentTaskAsm &&
+           inlineAsm->getConstraintString() == currentTaskConstraints;
   }
 
   void handleCurrentTask(Module &M) {
@@ -152,6 +153,32 @@ private:
     }
   }
 
+  bool isBarrierCall(const CallInst *call) {
+    if (!call->isTailCall())
+      return false;
+    InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm || !inlineAsm->hasSideEffects())
+      return false;
+    return inlineAsm->getAsmString().empty() &&
+           inlineAsm->getConstraintString() == barrierConstraints;
+  }
+
+  void handleBarrier(Module &M) {
+    std::vector<CallInst *> barrierCalls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isBarrierCall(call))
+            barrierCalls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : barrierCalls) {
+      call->eraseFromParent();
+    }
+  }
+
   void insertMain(Module &M) {
     if (M.getFunction("main")) {
       LOG("ACPI", errs() << "ACPI: Main already exists.\n");
@@ -162,6 +189,15 @@ private:
     ArrayRef<Type *> params;
     Function::Create(FunctionType::get(i32Ty, params, false),
                      GlobalValue::LinkageTypes::ExternalLinkage, "main", &M);
+  }
+
+  void updateFunctionLinkage(Module &M) {
+    for (Function &F : M) {
+      if (F.isDeclaration())
+        continue;
+      if (!F.getName().equals("main"))
+        F.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+    }
   }
 };
 
