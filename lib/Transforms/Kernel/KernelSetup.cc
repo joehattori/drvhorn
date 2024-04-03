@@ -21,6 +21,9 @@ using namespace llvm;
 #define variableTestBitAsmConstraints                                          \
   "={@ccc},*m,Ir,~{memory},~{dirflag},~{fpsr},~{flags}"
 
+#define archAtomicIncAsm "incl $0"
+#define archAtomicIncConstraints "=*m,*m,~{memory},~{dirflag},~{fpsr},~{flags}"
+
 namespace seahorn {
 
 struct MemAllocConversion {
@@ -128,6 +131,7 @@ private:
     handleCurrentTask(M);
     handleBarrier(M);
     handleVariableTestBit(M);
+    handleArchAtomicInc(M);
   }
 
   bool isCurrentTaskCall(const CallInst *call) {
@@ -213,6 +217,37 @@ private:
       Value *isolated = B.CreateAnd(shifted, 1);
       Value *isSet = B.CreateICmpNE(isolated, B.getInt32(0));
       call->replaceAllUsesWith(isSet);
+      call->eraseFromParent();
+    }
+  }
+
+  bool isArchAtomicIncCall(const CallInst *call) {
+    if (!call->isTailCall())
+      return false;
+    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm || !inlineAsm->hasSideEffects())
+      return false;
+    return inlineAsm->getAsmString() == archAtomicIncAsm &&
+           inlineAsm->getConstraintString() == archAtomicIncConstraints;
+  }
+
+  void handleArchAtomicInc(Module &M) {
+    std::vector<CallInst *> atomicIncCalls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isArchAtomicIncCall(call))
+            atomicIncCalls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : atomicIncCalls) {
+      IRBuilder<> B(call);
+      Value *val = call->getArgOperand(0);
+
+      Value *inc = B.CreateAdd(val, B.getInt32(1));
+      call->replaceAllUsesWith(inc);
       call->eraseFromParent();
     }
   }
