@@ -21,8 +21,9 @@ using namespace llvm;
 #define variableTestBitAsmConstraints                                          \
   "={@ccc},*m,Ir,~{memory},~{dirflag},~{fpsr},~{flags}"
 
-#define archAtomicIncAsm "incl $0"
-#define archAtomicIncConstraints "=*m,*m,~{memory},~{dirflag},~{fpsr},~{flags}"
+#define inclAsm "incl $0"
+#define declAsmPrefix "decl $0"
+#define xaddlAsmPrefix "xaddl $0, $1"
 
 namespace seahorn {
 
@@ -131,7 +132,9 @@ private:
     handleCurrentTask(M);
     handleBarrier(M);
     handleVariableTestBit(M);
-    handleArchAtomicInc(M);
+    handleIncl(M);
+    handleDecl(M);
+    handleXAddl(M);
   }
 
   bool isCurrentTaskCall(const CallInst *call) {
@@ -221,33 +224,91 @@ private:
     }
   }
 
-  bool isArchAtomicIncCall(const CallInst *call) {
+  bool isInclCall(const CallInst *call) {
     if (!call->isTailCall())
       return false;
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
-    return inlineAsm->getAsmString() == archAtomicIncAsm &&
-           inlineAsm->getConstraintString() == archAtomicIncConstraints;
+    return inlineAsm->getAsmString() == inclAsm;
   }
 
-  void handleArchAtomicInc(Module &M) {
-    std::vector<CallInst *> atomicIncCalls;
+  void handleIncl(Module &M) {
+    std::vector<CallInst *> calls;
     for (Function &F : M) {
       for (Instruction &inst : instructions(F)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isArchAtomicIncCall(call))
-            atomicIncCalls.push_back(call);
+          if (isInclCall(call))
+            calls.push_back(call);
         }
       }
     }
 
-    for (CallInst *call : atomicIncCalls) {
+    for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
-
       Value *inc = B.CreateAdd(val, B.getInt32(1));
       call->replaceAllUsesWith(inc);
+      call->eraseFromParent();
+    }
+  }
+
+  bool isDeclCall(const CallInst *call) {
+    if (!call->isTailCall())
+      return false;
+    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm || !inlineAsm->hasSideEffects())
+      return false;
+    return !inlineAsm->getAsmString().rfind(declAsmPrefix, 0);
+  }
+
+  void handleDecl(Module &M) {
+    std::vector<CallInst *> calls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isDeclCall(call))
+            calls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *val = call->getArgOperand(0);
+      Value *dec = B.CreateSub(val, B.getInt32(1));
+      call->replaceAllUsesWith(dec);
+      call->eraseFromParent();
+    }
+  }
+
+  bool isXAddlCall(const CallInst *call) {
+    if (!call->isTailCall())
+      return false;
+    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm || !inlineAsm->hasSideEffects())
+      return false;
+    return !inlineAsm->getAsmString().rfind(xaddlAsmPrefix, 0);
+  }
+
+  void handleXAddl(Module &M) {
+    std::vector<CallInst *> xaddCalls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isXAddlCall(call))
+            xaddCalls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : xaddCalls) {
+      IRBuilder<> B(call);
+      Value *ptr = call->getArgOperand(0);
+      Value *inc = call->getArgOperand(1);
+      Value *old = B.CreateAtomicRMW(AtomicRMWInst::Add, ptr, inc, MaybeAlign(),
+                                     AtomicOrdering::SequentiallyConsistent);
+      call->replaceAllUsesWith(old);
       call->eraseFromParent();
     }
   }
