@@ -17,9 +17,8 @@ using namespace llvm;
 
 #define barrierConstraints "~{memory},~{dirflag},~{fpsr},~{flags}"
 
-#define variableTestBitAsmPrefix " btl  $2,$1"
-#define variableTestBitAsmConstraints                                          \
-  "={@ccc},*m,Ir,~{memory},~{dirflag},~{fpsr},~{flags}"
+#define bitTestAsmPrefix " btl  $2,$1"
+#define bitTestAndSetAsmPrefix " btsl  $1,$0"
 
 #define inclAsm "incl $0"
 #define declAsmPrefix "decl $0"
@@ -131,15 +130,14 @@ private:
   void handleInlineAssembly(Module &M) {
     handleCurrentTask(M);
     handleBarrier(M);
-    handleVariableTestBit(M);
+    handleBitTest(M);
+    handleBitTestAndSet(M);
     handleIncl(M);
     handleDecl(M);
     handleXAddl(M);
   }
 
   bool isCurrentTaskCall(const CallInst *call) {
-    if (!call->isTailCall())
-      return false;
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm)
       return false;
@@ -166,8 +164,6 @@ private:
   }
 
   bool isBarrierCall(const CallInst *call) {
-    if (!call->isTailCall())
-      return false;
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
@@ -190,43 +186,77 @@ private:
       call->eraseFromParent();
   }
 
-  bool isVariableTestBitCall(const CallInst *call) {
-    if (!call->isTailCall())
-      return false;
+  Value *bitAddr(IRBuilder<> &B, Value *base, Value *offset) {
+    Value *idx = B.CreateAShr(offset, B.getInt32(8));
+    return B.CreateAdd(base, idx);
+  }
+
+  bool isBitTestCall(const CallInst *call) {
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
-    return !inlineAsm->getAsmString().rfind(variableTestBitAsmPrefix, 0) &&
-           inlineAsm->getConstraintString() == variableTestBitAsmConstraints;
+    return !inlineAsm->getAsmString().rfind(bitTestAsmPrefix, 0);
   }
 
-  void handleVariableTestBit(Module &M) {
-    std::vector<CallInst *> variableTestBitCalls;
+  void handleBitTest(Module &M) {
+    std::vector<CallInst *> calls;
     for (Function &F : M) {
       for (Instruction &inst : instructions(F)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isVariableTestBitCall(call))
-            variableTestBitCalls.push_back(call);
+          if (isBitTestCall(call))
+            calls.push_back(call);
         }
       }
     }
 
-    for (CallInst *call : variableTestBitCalls) {
+    LLVMContext &ctx = M.getContext();
+    for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(0);
-      Value *idx = call->getArgOperand(1);
+      Value *offset = call->getArgOperand(1);
 
-      Value *shifted = B.CreateLShr(addr, idx);
-      Value *isolated = B.CreateAnd(shifted, 1);
-      Value *isSet = B.CreateICmpNE(isolated, B.getInt32(0));
+      Value *pos = bitAddr(B, addr, offset);
+      Value *loaded = B.CreateLoad(Type::getInt1Ty(ctx), pos);
+      Value *bit = B.CreateAnd(loaded, 1);
+      Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
       call->replaceAllUsesWith(isSet);
       call->eraseFromParent();
     }
   }
 
-  bool isInclCall(const CallInst *call) {
-    if (!call->isTailCall())
+  bool isBitTestAndSetCall(const CallInst *call) {
+    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
+    return !inlineAsm->getAsmString().rfind(bitTestAndSetAsmPrefix, 0);
+  }
+
+  void handleBitTestAndSet(Module &M) {
+    std::vector<CallInst *> calls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isBitTestAndSetCall(call))
+            calls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *addr = call->getArgOperand(0);
+      Value *offset = call->getArgOperand(1);
+
+      Value *pos = bitAddr(B, addr, offset);
+      Value *old =
+          B.CreateAtomicRMW(AtomicRMWInst::Or, pos, B.getInt1(1), MaybeAlign(),
+                            AtomicOrdering::SequentiallyConsistent);
+      call->replaceAllUsesWith(old);
+      call->eraseFromParent();
+    }
+  }
+
+  bool isInclCall(const CallInst *call) {
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
@@ -254,8 +284,6 @@ private:
   }
 
   bool isDeclCall(const CallInst *call) {
-    if (!call->isTailCall())
-      return false;
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
@@ -283,8 +311,6 @@ private:
   }
 
   bool isXAddlCall(const CallInst *call) {
-    if (!call->isTailCall())
-      return false;
     const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
     if (!inlineAsm || !inlineAsm->hasSideEffects())
       return false;
