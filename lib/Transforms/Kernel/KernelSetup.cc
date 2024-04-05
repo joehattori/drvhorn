@@ -19,6 +19,7 @@ using namespace llvm;
 
 #define bitTestAsmPrefix " btl  $2,$1"
 #define bitTestAndSetAsmPrefix " btsl  $1,$0"
+#define bitTestAndResetAsmPrefix " btrl  $1,$0"
 
 #define inclAsm "incl $0"
 #define declAsmPrefix "decl $0"
@@ -132,6 +133,7 @@ private:
     handleBarrier(M);
     handleBitTest(M);
     handleBitTestAndSet(M);
+    handleBitTestAndReset(M);
     handleIncl(M);
     handleDecl(M);
     handleXAddl(M);
@@ -250,6 +252,38 @@ private:
       Value *pos = bitAddr(B, addr, offset);
       Value *old =
           B.CreateAtomicRMW(AtomicRMWInst::Or, pos, B.getInt1(1), MaybeAlign(),
+                            AtomicOrdering::SequentiallyConsistent);
+      call->replaceAllUsesWith(old);
+      call->eraseFromParent();
+    }
+  }
+
+  bool isBitTestAndResetCall(const CallInst *call) {
+    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
+    if (!inlineAsm || !inlineAsm->hasSideEffects())
+      return false;
+    return !inlineAsm->getAsmString().rfind(bitTestAndResetAsmPrefix, 0);
+  }
+
+  void handleBitTestAndReset(Module &M) {
+    std::vector<CallInst *> calls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isBitTestAndResetCall(call))
+            calls.push_back(call);
+        }
+      }
+    }
+
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *addr = call->getArgOperand(0);
+      Value *offset = call->getArgOperand(1);
+
+      Value *pos = bitAddr(B, addr, offset);
+      Value *old =
+          B.CreateAtomicRMW(AtomicRMWInst::And, pos, B.getInt1(0), MaybeAlign(),
                             AtomicOrdering::SequentiallyConsistent);
       call->replaceAllUsesWith(old);
       call->eraseFromParent();
