@@ -24,6 +24,7 @@ using namespace llvm;
 #define inclAsm "incl $0"
 #define declAsmPrefix "decl $0"
 #define xaddlAsmPrefix "xaddl $0, $1"
+#define movlAsm "movl $1, $0"
 
 namespace seahorn {
 
@@ -137,54 +138,53 @@ private:
     handleIncl(M);
     handleDecl(M);
     handleXAddl(M);
-  }
-
-  bool isCurrentTaskCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm)
-      return false;
-    return inlineAsm->getAsmString() == currentTaskAsm &&
-           inlineAsm->getConstraintString() == currentTaskConstraints;
+    handleMovl(M);
   }
 
   void handleCurrentTask(Module &M) {
-    std::vector<CallInst *> currentTaskCalls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isCurrentTaskCall(call))
-            currentTaskCalls.push_back(call);
-        }
-      }
-    }
-
-    for (CallInst *call : currentTaskCalls) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, currentTaskAsm, false, currentTaskConstraints);
+    for (CallInst *call : calls) {
       Value *task = call->getArgOperand(0);
       call->replaceAllUsesWith(task);
       call->eraseFromParent();
     }
   }
 
-  bool isBarrierCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return inlineAsm->getAsmString().empty() &&
-           inlineAsm->getConstraintString() == barrierConstraints;
-  }
+  std::vector<CallInst *>
+  getTargetAsmCalls(Module &M, const std::string &asmStr, bool isPrefix,
+                    const std::string &constraints = "") {
+    auto isTargetAsm = [&](const CallInst *call) {
+      const InlineAsm *inlineAsm =
+          dyn_cast<InlineAsm>(call->getCalledOperand());
+      if (!inlineAsm)
+        return false;
+      if (isPrefix)
+        return !inlineAsm->getAsmString().rfind(asmStr, 0) &&
+               (constraints.empty() ||
+                inlineAsm->getConstraintString() == constraints);
+      else
+        return inlineAsm->getAsmString() == asmStr &&
+               (constraints.empty() ||
+                inlineAsm->getConstraintString() == constraints);
+    };
 
-  void handleBarrier(Module &M) {
-    std::vector<CallInst *> barrierCalls;
+    std::vector<CallInst *> calls;
     for (Function &F : M) {
       for (Instruction &inst : instructions(F)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isBarrierCall(call))
-            barrierCalls.push_back(call);
+          if (isTargetAsm(call))
+            calls.push_back(call);
         }
       }
     }
+    return calls;
+  }
 
-    for (CallInst *call : barrierCalls)
+  void handleBarrier(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, "", false, barrierConstraints);
+    for (CallInst *call : calls)
       call->eraseFromParent();
   }
 
@@ -193,25 +193,10 @@ private:
     return B.CreateAdd(base, idx);
   }
 
-  bool isBitTestCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return !inlineAsm->getAsmString().rfind(bitTestAsmPrefix, 0);
-  }
-
   void handleBitTest(Module &M) {
-    std::vector<CallInst *> calls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isBitTestCall(call))
-            calls.push_back(call);
-        }
-      }
-    }
-
     LLVMContext &ctx = M.getContext();
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, bitTestAsmPrefix, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(0);
@@ -226,24 +211,9 @@ private:
     }
   }
 
-  bool isBitTestAndSetCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return !inlineAsm->getAsmString().rfind(bitTestAndSetAsmPrefix, 0);
-  }
-
   void handleBitTestAndSet(Module &M) {
-    std::vector<CallInst *> calls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isBitTestAndSetCall(call))
-            calls.push_back(call);
-        }
-      }
-    }
-
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, bitTestAndSetAsmPrefix, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(0);
@@ -258,24 +228,9 @@ private:
     }
   }
 
-  bool isBitTestAndResetCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return !inlineAsm->getAsmString().rfind(bitTestAndResetAsmPrefix, 0);
-  }
-
   void handleBitTestAndReset(Module &M) {
-    std::vector<CallInst *> calls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isBitTestAndResetCall(call))
-            calls.push_back(call);
-        }
-      }
-    }
-
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, bitTestAndResetAsmPrefix, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(0);
@@ -290,24 +245,8 @@ private:
     }
   }
 
-  bool isInclCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return inlineAsm->getAsmString() == inclAsm;
-  }
-
   void handleIncl(Module &M) {
-    std::vector<CallInst *> calls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isInclCall(call))
-            calls.push_back(call);
-        }
-      }
-    }
-
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, inclAsm, false);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
@@ -317,24 +256,8 @@ private:
     }
   }
 
-  bool isDeclCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return !inlineAsm->getAsmString().rfind(declAsmPrefix, 0);
-  }
-
   void handleDecl(Module &M) {
-    std::vector<CallInst *> calls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isDeclCall(call))
-            calls.push_back(call);
-        }
-      }
-    }
-
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, declAsmPrefix, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
@@ -344,31 +267,30 @@ private:
     }
   }
 
-  bool isXAddlCall(const CallInst *call) {
-    const InlineAsm *inlineAsm = dyn_cast<InlineAsm>(call->getCalledOperand());
-    if (!inlineAsm || !inlineAsm->hasSideEffects())
-      return false;
-    return !inlineAsm->getAsmString().rfind(xaddlAsmPrefix, 0);
-  }
-
   void handleXAddl(Module &M) {
-    std::vector<CallInst *> xaddCalls;
-    for (Function &F : M) {
-      for (Instruction &inst : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          if (isXAddlCall(call))
-            xaddCalls.push_back(call);
-        }
-      }
-    }
-
-    for (CallInst *call : xaddCalls) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, xaddlAsmPrefix, true);
+    for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *ptr = call->getArgOperand(0);
       Value *inc = call->getArgOperand(1);
       Value *old = B.CreateAtomicRMW(AtomicRMWInst::Add, ptr, inc, MaybeAlign(),
                                      AtomicOrdering::SequentiallyConsistent);
       call->replaceAllUsesWith(old);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleMovl(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, movlAsm, false);
+    LLVMContext &ctx = M.getContext();
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *dst = call->getArgOperand(0);
+      Value *src = call->getArgOperand(1);
+
+      LoadInst *load = B.CreateLoad(Type::getInt32Ty(ctx), src);
+      StoreInst *store = B.CreateStore(load, dst);
+      call->replaceAllUsesWith(store);
       call->eraseFromParent();
     }
   }
