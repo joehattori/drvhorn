@@ -25,6 +25,7 @@ using namespace llvm;
 #define declAsmPrefix "decl $0"
 #define xaddlAsmPrefix "xaddl $0, $1"
 #define movlAsm "movl $1, $0"
+#define addlAsm "addl $1, $0"
 
 namespace seahorn {
 
@@ -139,6 +140,7 @@ private:
     handleDecl(M);
     handleXAddl(M);
     handleMovl(M);
+    handleAddl(M);
   }
 
   void handleCurrentTask(Module &M) {
@@ -291,6 +293,19 @@ private:
       LoadInst *load = B.CreateLoad(Type::getInt32Ty(ctx), src);
       StoreInst *store = B.CreateStore(load, dst);
       call->replaceAllUsesWith(store);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAddl(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, addlAsm, false);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *dst = call->getArgOperand(0);
+      Value *src = call->getArgOperand(1);
+
+      Value *add = B.CreateAdd(dst, src);
+      call->replaceAllUsesWith(add);
       call->eraseFromParent();
     }
   }
