@@ -26,6 +26,9 @@ using namespace llvm;
 #define xaddlAsmPrefix "xaddl $0, $1"
 #define movlAsm "movl $1, $0"
 #define addlAsm "addl $1, $0"
+#define atomicFetchAndUnlessAsmPrefix "cmpxchgl $3, $1"
+#define atomicFetchAndUnlessAsmConstraints                                     \
+  "={@ccz},=*m,={ax},r,*m,2,~{memory},~{dirflag},~{fpsr},~{flags}"
 
 namespace seahorn {
 
@@ -141,6 +144,7 @@ private:
     handleXAddl(M);
     handleMovl(M);
     handleAddl(M);
+    handleAtomicFetchAndUnless(M);
   }
 
   void handleCurrentTask(Module &M) {
@@ -201,8 +205,8 @@ private:
         getTargetAsmCalls(M, bitTestAsmPrefix, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
-      Value *addr = call->getArgOperand(0);
-      Value *offset = call->getArgOperand(1);
+      Value *addr = call->getArgOperand(1);
+      Value *offset = call->getArgOperand(2);
 
       Value *pos = bitAddr(B, addr, offset);
       Value *loaded = B.CreateLoad(Type::getInt1Ty(ctx), pos);
@@ -306,6 +310,35 @@ private:
 
       Value *add = B.CreateAdd(dst, src);
       call->replaceAllUsesWith(add);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAtomicFetchAndUnless(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, atomicFetchAndUnlessAsmPrefix, true,
+                          atomicFetchAndUnlessAsmConstraints);
+    LLVMContext &ctx = M.getContext();
+    Type *i8Ty = Type::getInt8Ty(ctx);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *acc = call->getArgOperand(0);
+      Value *cmp = call->getArgOperand(3);
+      Value *new_ = call->getArgOperand(1);
+      AtomicCmpXchgInst *inst = B.CreateAtomicCmpXchg(
+          acc, cmp, new_, MaybeAlign(), AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+
+      // convert {ty, i1} to {i8, ty}
+      Value *val = B.CreateExtractValue(inst, {0});
+      Value *isSuccess = B.CreateExtractValue(inst, {1});
+      StructType *type = cast<StructType>(call->getType());
+      Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
+      Value *converted =
+          B.CreateInsertValue(UndefValue::get(type), castedSuccess, {0});
+      Value *completed = B.CreateInsertValue(converted, val, {1});
+
+      call->replaceAllUsesWith(completed);
       call->eraseFromParent();
     }
   }
