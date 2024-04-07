@@ -2,6 +2,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Pass.h"
 
 #include "boost/range.hpp"
@@ -29,6 +30,7 @@ using namespace llvm;
 #define atomicFetchAndUnlessAsmPrefix "cmpxchgl $3, $1"
 #define atomicFetchAndUnlessAsmConstraints                                     \
   "={@ccz},=*m,={ax},r,*m,2,~{memory},~{dirflag},~{fpsr},~{flags}"
+#define ffsAsm "rep; bsf $1,$0"
 
 namespace seahorn {
 
@@ -145,6 +147,7 @@ private:
     handleMovl(M);
     handleAddl(M);
     handleAtomicFetchAndUnless(M);
+    handleFFS(M);
   }
 
   void handleCurrentTask(Module &M) {
@@ -339,6 +342,21 @@ private:
       Value *completed = B.CreateInsertValue(converted, val, {1});
 
       call->replaceAllUsesWith(completed);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleFFS(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, ffsAsm, false);
+    LLVMContext &ctx = M.getContext();
+    Function *cttz =
+        Intrinsic::getDeclaration(&M, Intrinsic::cttz, {Type::getInt32Ty(ctx)});
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *v = call->getArgOperand(0);
+      Value *zero = B.getFalse();
+      Value *cttzCall = B.CreateCall(cttz, {v, zero});
+      call->replaceAllUsesWith(cttzCall);
       call->eraseFromParent();
     }
   }
