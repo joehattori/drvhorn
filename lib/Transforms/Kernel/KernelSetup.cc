@@ -67,6 +67,8 @@ using namespace llvm;
 #define CALL0_ASM "call ${0:P}"
 #define CALL1_ASM "call ${1:P}"
 #define NATIVE_SAVE_FL_ASM "# __raw_save_flags;pushf ; pop $0"
+#define CLI_ASM "cli"
+
 #define ATOMIC64_COUNTER_INDEX 0
 
 namespace seahorn {
@@ -193,6 +195,7 @@ private:
     handleAtomic64Read(M);
     handleAtomic64Set(M);
     handleNativeSaveFL(M);
+    handleCLI(M);
   }
 
   std::vector<CallInst *>
@@ -520,6 +523,13 @@ private:
       call->replaceAllUsesWith(ret);
       call->eraseFromParent();
     }
+  }
+
+  void handleCLI(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CLI_ASM, false);
+    // simply ignore the CLI instruction.
+    for (CallInst *call : calls)
+      call->eraseFromParent();
   }
 
   void insertMain(Module &M) {
