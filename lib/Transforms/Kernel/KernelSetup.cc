@@ -1,3 +1,4 @@
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
@@ -65,7 +66,7 @@ using namespace llvm;
   "reg=$0, type=10 ;.purgem extable_type_reg; .popsection;"
 #define CALL0_ASM "call ${0:P}"
 #define CALL1_ASM "call ${1:P}"
-
+#define NATIVE_SAVE_FL_ASM "# __raw_save_flags;pushf ; pop $0"
 #define ATOMIC64_COUNTER_INDEX 0
 
 namespace seahorn {
@@ -134,6 +135,8 @@ public:
   virtual StringRef getPassName() const override { return "KernelSetup"; }
 
 private:
+  DenseMap<const Type *, FunctionCallee> ndfn;
+
   FunctionCallee createKmallocStub(Module &M) {
     LLVMContext &ctx = M.getContext();
     // void pointer type.
@@ -189,6 +192,7 @@ private:
     handleNativeWriteMSRSafe(M);
     handleAtomic64Read(M);
     handleAtomic64Set(M);
+    handleNativeSaveFL(M);
   }
 
   std::vector<CallInst *>
@@ -504,6 +508,20 @@ private:
     }
   }
 
+  void handleNativeSaveFL(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, NATIVE_SAVE_FL_ASM, false);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      // return a nondet unsigned long for now.
+      FunctionCallee ndf = getNondetFn(i32Ty, M);
+      Value *ret = B.CreateCall(ndf);
+      call->replaceAllUsesWith(ret);
+      call->eraseFromParent();
+    }
+  }
+
   void insertMain(Module &M) {
     if (M.getFunction("main")) {
       LOG("ACPI", errs() << "ACPI: Main already exists.\n");
@@ -523,6 +541,29 @@ private:
       if (!F.getName().equals("main"))
         F.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
+  }
+
+  FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,
+                                 std::string prefix) {
+    std::string name;
+    unsigned c = num;
+    do {
+      name = prefix + std::to_string(c++);
+    } while (m.getNamedValue(name));
+    FunctionCallee res = m.getOrInsertFunction(name, &type);
+    return res;
+  }
+
+  FunctionCallee getNondetFn(Type *type, Module &M) {
+    auto it = ndfn.find(type);
+    if (it != ndfn.end()) {
+      return it->second;
+    }
+
+    FunctionCallee res =
+        makeNewNondetFn(M, *type, ndfn.size(), "verifier.nondet.");
+    ndfn[type] = res;
+    return res;
   }
 };
 
