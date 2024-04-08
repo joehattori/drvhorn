@@ -39,6 +39,18 @@ using namespace llvm;
   ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
   "6651f-6641f;.popsection;.pushsection .altinstr_replacement, 'ax';# ALT: "   \
   "replacement 1;6641:;popcntl $1, $0;6651:;.popsection;"
+#define nativeReadMSRSafeAsm                                                   \
+  "1: rdmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
+  "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
+  ".Lfound, 0;.set .Lregnr, 0;.irp "                                           \
+  "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
+  "\\reg, %\\rs;.set .Lfound, .Lfound+1;.long \\type + (.Lregnr << "           \
+  "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.set .Lregnr, 0;.irp "              \
+  "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
+  "ifc \\reg, %\\rs;.set .Lfound, .Lfound+1;.long \\type + (.Lregnr << "       \
+  "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
+  "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
+  "reg=$0, type=11 ;.purgem extable_type_reg; .popsection;"
 
 namespace seahorn {
 
@@ -157,6 +169,7 @@ private:
     handleAtomicFetchAndUnless(M);
     handleFFS(M);
     handleHWeight(M);
+    handleNativeReadMSRSafe(M);
   }
 
   std::vector<CallInst *>
@@ -390,6 +403,25 @@ private:
       Value *v = call->getArgOperand(0);
       Value *ctpopCall = B.CreateCall(ctpop, {v});
       call->replaceAllUsesWith(ctpopCall);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleNativeReadMSRSafe(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, nativeReadMSRSafeAsm, false);
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt8Ty(ctx);
+    Type *i64Ty = Type::getInt8Ty(ctx);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      StructType *type = cast<StructType>(call->getType());
+      // return {success, 0} for now.
+      Value *empty = B.CreateInsertValue(UndefValue::get(type),
+                                         Constant::getNullValue(i32Ty), {0});
+      Value *retVal =
+          B.CreateInsertValue(empty, Constant::getNullValue(i64Ty), {1});
+      call->replaceAllUsesWith(retVal);
       call->eraseFromParent();
     }
   }
