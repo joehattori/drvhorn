@@ -69,6 +69,7 @@ using namespace llvm;
 
 #define CALL0 "call ${0:P}"
 #define CALL1 "call ${1:P}"
+#define CALL2 "call ${2:P}"
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 #define CLI "cli"
 #define STI "sti"
@@ -203,6 +204,8 @@ private:
 
     handleAtomic64Read(M);
     handleAtomic64Set(M);
+    handleAtomic64AddReturn(M);
+    handleAtomic64SubReturn(M);
     handleCmpxchgl(M);
     handleCmpxchg8b(M);
 
@@ -548,6 +551,56 @@ private:
           B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
       Value *set = B.CreateStore(i, counterPtr);
       call->replaceAllUsesWith(set);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAtomic64AddReturn(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL2, false);
+    LLVMContext &ctx = M.getContext();
+    StructType *atomic64Type =
+        StructType::getTypeByName(ctx, "struct.atomic64_t");
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    for (CallInst *call : calls) {
+      if (!call->getNumOperands())
+        continue;
+      Value *op = call->getOperand(0);
+      if (!op->hasName() || !op->getName().equals("atomic64_add_return_cx8"))
+        continue;
+      Value *i = call->getOperand(2);
+      Value *v = call->getOperand(3);
+      IRBuilder<> B(call);
+      Value *counterPtr =
+          B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
+      Value *counter = B.CreateLoad(i64Ty, counterPtr);
+      Value *add = B.CreateAdd(counter, i);
+      B.CreateStore(add, counterPtr);
+      call->replaceAllUsesWith(add);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAtomic64SubReturn(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL2, false);
+    LLVMContext &ctx = M.getContext();
+    StructType *atomic64Type =
+        StructType::getTypeByName(ctx, "struct.atomic64_t");
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    for (CallInst *call : calls) {
+      if (!call->getNumOperands())
+        continue;
+      Value *op = call->getOperand(0);
+      if (!op->hasName() || !op->getName().equals("atomic64_sub_return_cx8"))
+        continue;
+      Value *i = call->getOperand(2);
+      Value *v = call->getOperand(3);
+      IRBuilder<> B(call);
+      Value *counterPtr =
+          B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
+      Value *counter = B.CreateLoad(i64Ty, counterPtr);
+      Value *sub = B.CreateSub(counter, i);
+      B.CreateStore(sub, counterPtr);
+      call->replaceAllUsesWith(sub);
       call->eraseFromParent();
     }
   }
