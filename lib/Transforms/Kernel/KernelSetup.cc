@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <regex>
 
 using namespace llvm;
 
@@ -31,6 +32,13 @@ using namespace llvm;
 #define atomicFetchAndUnlessAsmConstraints                                     \
   "={@ccz},=*m,={ax},r,*m,2,~{memory},~{dirflag},~{fpsr},~{flags}"
 #define ffsAsm "rep; bsf $1,$0"
+#define hweightAsm                                                             \
+  "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
+  "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
+  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection .altinstructions,'a'; "  \
+  ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement, 'ax';# ALT: "   \
+  "replacement 1;6641:;popcntl $1, $0;6651:;.popsection;"
 
 namespace seahorn {
 
@@ -148,32 +156,33 @@ private:
     handleAddl(M);
     handleAtomicFetchAndUnless(M);
     handleFFS(M);
-  }
-
-  void handleCurrentTask(Module &M) {
-    std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, currentTaskAsm, false, currentTaskConstraints);
-    for (CallInst *call : calls) {
-      Value *task = call->getArgOperand(0);
-      call->replaceAllUsesWith(task);
-      call->eraseFromParent();
-    }
+    handleHWeight(M);
   }
 
   std::vector<CallInst *>
   getTargetAsmCalls(Module &M, const std::string &asmStr, bool isPrefix,
                     const std::string &constraints = "") {
+    auto formatInlineAsm = [](std::string s) {
+      std::regex newLine("\n");
+      s = std::regex_replace(s, newLine, ";");
+      std::regex tab("\t");
+      s = std::regex_replace(s, tab, "");
+      std::regex quote("\"");
+      return std::regex_replace(s, quote, "'");
+    };
+
     auto isTargetAsm = [&](const CallInst *call) {
       const InlineAsm *inlineAsm =
           dyn_cast<InlineAsm>(call->getCalledOperand());
       if (!inlineAsm)
         return false;
+      std::string formatted = formatInlineAsm(inlineAsm->getAsmString());
       if (isPrefix)
-        return !inlineAsm->getAsmString().rfind(asmStr, 0) &&
+        return !formatted.rfind(asmStr, 0) &&
                (constraints.empty() ||
                 inlineAsm->getConstraintString() == constraints);
       else
-        return inlineAsm->getAsmString() == asmStr &&
+        return formatted == asmStr &&
                (constraints.empty() ||
                 inlineAsm->getConstraintString() == constraints);
     };
@@ -188,6 +197,16 @@ private:
       }
     }
     return calls;
+  }
+
+  void handleCurrentTask(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, currentTaskAsm, false, currentTaskConstraints);
+    for (CallInst *call : calls) {
+      Value *task = call->getArgOperand(0);
+      call->replaceAllUsesWith(task);
+      call->eraseFromParent();
+    }
   }
 
   void handleBarrier(Module &M) {
@@ -357,6 +376,20 @@ private:
       Value *zero = B.getFalse();
       Value *cttzCall = B.CreateCall(cttz, {v, zero});
       call->replaceAllUsesWith(cttzCall);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleHWeight(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, hweightAsm, false);
+    LLVMContext &ctx = M.getContext();
+    Function *ctpop = Intrinsic::getDeclaration(&M, Intrinsic::ctpop,
+                                                {Type::getInt32Ty(ctx)});
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *v = call->getArgOperand(0);
+      Value *ctpopCall = B.CreateCall(ctpop, {v});
+      call->replaceAllUsesWith(ctpopCall);
       call->eraseFromParent();
     }
   }

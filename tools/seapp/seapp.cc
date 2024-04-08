@@ -501,7 +501,8 @@ int main(int argc, char **argv) {
     // -- Externalize some user-selected functions
     pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
 
-    if (Acpi) {
+    bool isKernel = Acpi;
+    if (isKernel) {
       pm_wrapper.add(seahorn::createKernelSetupPass());
     } else {
       // -- Create a main function if we do not have one.
@@ -511,6 +512,8 @@ int main(int argc, char **argv) {
     if (Acpi) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
       pm_wrapper.add(llvm::createGlobalDCEPass());
+      pm_wrapper.add(llvm::createDeadArgEliminationPass());
+      pm_wrapper.add(llvm::createAggressiveDCEPass());
       pm_wrapper.add(seahorn::createKernelDebugPass());
     }
 
