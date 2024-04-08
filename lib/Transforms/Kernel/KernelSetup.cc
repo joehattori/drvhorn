@@ -64,6 +64,10 @@ using namespace llvm;
   "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
   "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
   "reg=$0, type=10 ;.purgem extable_type_reg; .popsection;"
+#define WRMSR_ASM                                                              \
+  "1: wrmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
+  ".long (2b) - .; .long 8 ; .popsection;"
+
 #define CALL0_ASM "call ${0:P}"
 #define CALL1_ASM "call ${1:P}"
 #define NATIVE_SAVE_FL_ASM "# __raw_save_flags;pushf ; pop $0"
@@ -180,21 +184,27 @@ private:
   void handleInlineAssembly(Module &M) {
     handleCurrentTask(M);
     handleBarrier(M);
+
     handleBitTest(M);
     handleBitTestAndSet(M);
     handleBitTestAndReset(M);
+    handleFFS(M);
+    handleHWeight(M);
+
     handleIncl(M);
     handleDecl(M);
     handleXAddl(M);
     handleMovl(M);
     handleAddl(M);
-    handleAtomicFetchAndUnless(M);
-    handleFFS(M);
-    handleHWeight(M);
+
     handleNativeReadMSRSafe(M);
     handleNativeWriteMSRSafe(M);
+    handleWRMSR(M);
+
+    handleAtomicFetchAndUnless(M);
     handleAtomic64Read(M);
     handleAtomic64Set(M);
+
     handleNativeSaveFL(M);
     handleCLI(M);
     handleSTI(M);
@@ -458,6 +468,19 @@ private:
   void handleNativeWriteMSRSafe(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, NATIVE_WRITE_MSR_SAFE_ASM, false);
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt8Ty(ctx);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      // return 0 (success) for now.
+      Value *zero = Constant::getNullValue(i32Ty);
+      call->replaceAllUsesWith(zero);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleWRMSR(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, WRMSR_ASM, false);
     LLVMContext &ctx = M.getContext();
     Type *i32Ty = Type::getInt8Ty(ctx);
     for (CallInst *call : calls) {
