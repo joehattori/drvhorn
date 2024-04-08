@@ -73,6 +73,7 @@ using namespace llvm;
 #define NATIVE_SAVE_FL_ASM "# __raw_save_flags;pushf ; pop $0"
 #define CLI_ASM "cli"
 #define STI_ASM "sti"
+#define RDPMC_ASM "rdpmc"
 
 #define ATOMIC64_COUNTER_INDEX 0
 
@@ -208,6 +209,7 @@ private:
     handleNativeSaveFL(M);
     handleCLI(M);
     handleSTI(M);
+    handleRDPMC(M);
   }
 
   std::vector<CallInst *>
@@ -562,6 +564,19 @@ private:
     // simply ignore the STI instruction.
     for (CallInst *call : calls)
       call->eraseFromParent();
+  }
+
+  void handleRDPMC(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, RDPMC_ASM, false);
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      // return a nondet unsigned long long for now.
+      FunctionCallee ndf = getNondetFn(i64Ty, M);
+      Value *ret = B.CreateCall(ndf);
+      call->replaceAllUsesWith(ret);
+      call->eraseFromParent();
+    }
   }
 
   void insertMain(Module &M) {
