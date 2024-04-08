@@ -68,6 +68,7 @@ using namespace llvm;
 #define CALL1_ASM "call ${1:P}"
 #define NATIVE_SAVE_FL_ASM "# __raw_save_flags;pushf ; pop $0"
 #define CLI_ASM "cli"
+#define STI_ASM "sti"
 
 #define ATOMIC64_COUNTER_INDEX 0
 
@@ -196,6 +197,7 @@ private:
     handleAtomic64Set(M);
     handleNativeSaveFL(M);
     handleCLI(M);
+    handleSTI(M);
   }
 
   std::vector<CallInst *>
@@ -528,6 +530,13 @@ private:
   void handleCLI(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, CLI_ASM, false);
     // simply ignore the CLI instruction.
+    for (CallInst *call : calls)
+      call->eraseFromParent();
+  }
+
+  void handleSTI(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, STI_ASM, false);
+    // simply ignore the STI instruction.
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
