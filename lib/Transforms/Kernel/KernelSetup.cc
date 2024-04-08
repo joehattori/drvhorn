@@ -14,32 +14,32 @@
 
 using namespace llvm;
 
-#define currentTaskAsm "movl ${1:P}, $0"
-#define currentTaskConstraints "=r,im,~{dirflag},~{fpsr},~{flags}"
+#define CURRENT_TASK_ASM "movl ${1:P}, $0"
+#define CURRENT_TASK_CONSTRAINTS "=r,im,~{dirflag},~{fpsr},~{flags}"
 
-#define barrierConstraints "~{memory},~{dirflag},~{fpsr},~{flags}"
+#define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
 
-#define bitTestAsmPrefix " btl  $2,$1"
-#define bitTestAndSetAsmPrefix " btsl  $1,$0"
-#define bitTestAndResetAsmPrefix " btrl  $1,$0"
+#define BIT_TEST_ASM_PREFIX " btl  $2,$1"
+#define BIT_TEST_AND_SET_ASM_PREFIX " btsl  $1,$0"
+#define BIT_TEST_AND_RESET_ASM_PREFIX " btrl  $1,$0"
 
-#define inclAsm "incl $0"
-#define declAsmPrefix "decl $0"
-#define xaddlAsmPrefix "xaddl $0, $1"
-#define movlAsm "movl $1, $0"
-#define addlAsm "addl $1, $0"
-#define atomicFetchAndUnlessAsmPrefix "cmpxchgl $3, $1"
-#define atomicFetchAndUnlessAsmConstraints                                     \
+#define INCL_ASM "incl $0"
+#define DECL_ASM_PREFIX "decl $0"
+#define XADDL_ASM_PREFIX "xaddl $0, $1"
+#define MOVL_ASM "movl $1, $0"
+#define ADDL_ASM "addl $1, $0"
+#define ATOMIC_FETCH_AND_UNLESS_ASM_PREFIX "cmpxchgl $3, $1"
+#define ATOMIC_FETCH_AND_UNLESS_ASM_CONSTRAINTS                                \
   "={@ccz},=*m,={ax},r,*m,2,~{memory},~{dirflag},~{fpsr},~{flags}"
-#define ffsAsm "rep; bsf $1,$0"
-#define hweightAsm                                                             \
+#define FFS_ASM "rep; bsf $1,$0"
+#define HWEIGHT_ASM                                                            \
   "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
   "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection .altinstructions,'a'; "  \
   ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
   "6651f-6641f;.popsection;.pushsection .altinstr_replacement, 'ax';# ALT: "   \
   "replacement 1;6641:;popcntl $1, $0;6651:;.popsection;"
-#define nativeReadMSRSafeAsm                                                   \
+#define NATIVE_READ_MSR_SAFE_ASM                                               \
   "1: rdmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
   "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
   ".Lfound, 0;.set .Lregnr, 0;.irp "                                           \
@@ -51,7 +51,7 @@ using namespace llvm;
   "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
   "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
   "reg=$0, type=11 ;.purgem extable_type_reg; .popsection;"
-#define nativeWriteMSRSafeAsm                                                  \
+#define NATIVE_WRITE_MSR_SAFE_ASM                                              \
   "1: wrmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
   "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
   ".Lfound, 0;.set .Lregnr, 0;.irp "                                           \
@@ -63,6 +63,10 @@ using namespace llvm;
   "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
   "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
   "reg=$0, type=10 ;.purgem extable_type_reg; .popsection;"
+#define CALL0_ASM "call ${0:P}"
+#define CALL1_ASM "call ${1:P}"
+
+#define ATOMIC64_COUNTER_INDEX 0
 
 namespace seahorn {
 
@@ -183,6 +187,8 @@ private:
     handleHWeight(M);
     handleNativeReadMSRSafe(M);
     handleNativeWriteMSRSafe(M);
+    handleAtomic64Read(M);
+    handleAtomic64Set(M);
   }
 
   std::vector<CallInst *>
@@ -227,7 +233,7 @@ private:
 
   void handleCurrentTask(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, currentTaskAsm, false, currentTaskConstraints);
+        getTargetAsmCalls(M, CURRENT_TASK_ASM, false, CURRENT_TASK_CONSTRAINTS);
     for (CallInst *call : calls) {
       Value *task = call->getArgOperand(0);
       call->replaceAllUsesWith(task);
@@ -237,7 +243,7 @@ private:
 
   void handleBarrier(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, "", false, barrierConstraints);
+        getTargetAsmCalls(M, "", false, BARRIER_CONSTRAINTS);
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
@@ -250,7 +256,7 @@ private:
   void handleBitTest(Module &M) {
     LLVMContext &ctx = M.getContext();
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, bitTestAsmPrefix, true);
+        getTargetAsmCalls(M, BIT_TEST_ASM_PREFIX, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(1);
@@ -267,7 +273,7 @@ private:
 
   void handleBitTestAndSet(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, bitTestAndSetAsmPrefix, true);
+        getTargetAsmCalls(M, BIT_TEST_AND_SET_ASM_PREFIX, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(0);
@@ -284,7 +290,7 @@ private:
 
   void handleBitTestAndReset(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, bitTestAndResetAsmPrefix, true);
+        getTargetAsmCalls(M, BIT_TEST_AND_RESET_ASM_PREFIX, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *addr = call->getArgOperand(0);
@@ -300,7 +306,7 @@ private:
   }
 
   void handleIncl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, inclAsm, false);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, INCL_ASM, false);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
@@ -311,7 +317,7 @@ private:
   }
 
   void handleDecl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, declAsmPrefix, true);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, DECL_ASM_PREFIX, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
@@ -322,7 +328,8 @@ private:
   }
 
   void handleXAddl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, xaddlAsmPrefix, true);
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, XADDL_ASM_PREFIX, true);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *ptr = call->getArgOperand(0);
@@ -335,7 +342,7 @@ private:
   }
 
   void handleMovl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, movlAsm, false);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, MOVL_ASM, false);
     LLVMContext &ctx = M.getContext();
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
@@ -350,7 +357,7 @@ private:
   }
 
   void handleAddl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, addlAsm, false);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, ADDL_ASM, false);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *dst = call->getArgOperand(0);
@@ -364,8 +371,8 @@ private:
 
   void handleAtomicFetchAndUnless(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, atomicFetchAndUnlessAsmPrefix, true,
-                          atomicFetchAndUnlessAsmConstraints);
+        getTargetAsmCalls(M, ATOMIC_FETCH_AND_UNLESS_ASM_PREFIX, true,
+                          ATOMIC_FETCH_AND_UNLESS_ASM_CONSTRAINTS);
     LLVMContext &ctx = M.getContext();
     Type *i8Ty = Type::getInt8Ty(ctx);
     for (CallInst *call : calls) {
@@ -392,7 +399,7 @@ private:
   }
 
   void handleFFS(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, ffsAsm, false);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, FFS_ASM, false);
     LLVMContext &ctx = M.getContext();
     Function *cttz =
         Intrinsic::getDeclaration(&M, Intrinsic::cttz, {Type::getInt32Ty(ctx)});
@@ -407,7 +414,7 @@ private:
   }
 
   void handleHWeight(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, hweightAsm, false);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, HWEIGHT_ASM, false);
     LLVMContext &ctx = M.getContext();
     Function *ctpop = Intrinsic::getDeclaration(&M, Intrinsic::ctpop,
                                                 {Type::getInt32Ty(ctx)});
@@ -422,7 +429,7 @@ private:
 
   void handleNativeReadMSRSafe(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, nativeReadMSRSafeAsm, false);
+        getTargetAsmCalls(M, NATIVE_READ_MSR_SAFE_ASM, false);
     LLVMContext &ctx = M.getContext();
     Type *i32Ty = Type::getInt8Ty(ctx);
     Type *i64Ty = Type::getInt8Ty(ctx);
@@ -441,7 +448,7 @@ private:
 
   void handleNativeWriteMSRSafe(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, nativeWriteMSRSafeAsm, false);
+        getTargetAsmCalls(M, NATIVE_WRITE_MSR_SAFE_ASM, false);
     LLVMContext &ctx = M.getContext();
     Type *i32Ty = Type::getInt8Ty(ctx);
     for (CallInst *call : calls) {
@@ -449,6 +456,50 @@ private:
       // return 0 (success) for now.
       Value *zero = Constant::getNullValue(i32Ty);
       call->replaceAllUsesWith(zero);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAtomic64Read(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL1_ASM, false);
+    LLVMContext &ctx = M.getContext();
+    StructType *atomic64Type =
+        StructType::getTypeByName(ctx, "struct.atomic64_t");
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    for (CallInst *call : calls) {
+      if (!call->getNumOperands())
+        continue;
+      Value *op = call->getOperand(0);
+      if (!op->hasName() || !op->getName().equals("atomic64_read_cx8"))
+        continue;
+      Value *v = call->getOperand(1);
+      IRBuilder<> B(call);
+      Value *counterPtr =
+          B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
+      Value *counter = B.CreateLoad(i64Ty, counterPtr);
+      call->replaceAllUsesWith(counter);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAtomic64Set(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL0_ASM, false);
+    LLVMContext &ctx = M.getContext();
+    StructType *atomic64Type =
+        StructType::getTypeByName(ctx, "struct.atomic64_t");
+    for (CallInst *call : calls) {
+      if (!call->getNumOperands())
+        continue;
+      Value *op = call->getOperand(0);
+      if (!op->hasName() || !op->getName().equals("atomic64_set_cx8"))
+        continue;
+      Value *v = call->getOperand(1);
+      Value *i = call->getOperand(2);
+      IRBuilder<> B(call);
+      Value *counterPtr =
+          B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
+      Value *set = B.CreateStore(i, counterPtr);
+      call->replaceAllUsesWith(set);
       call->eraseFromParent();
     }
   }
