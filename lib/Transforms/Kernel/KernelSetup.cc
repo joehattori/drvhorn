@@ -20,6 +20,7 @@ using namespace llvm;
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
 #define SPLIT_U64_CONSTRAINTS "={ax},={dx},A,~{dirflag},~{fpsr},~{flags}"
+#define BUILD_U64_CONSTRAINTS "=A,{ax},{dx},~{dirflag},~{fpsr},~{flags}"
 
 #define BIT_TEST_PREFIX " btl  $2,$1"
 #define BIT_TEST_AND_SET_PREFIX " btsl  $1,$0"
@@ -235,6 +236,7 @@ private:
     handleCurrentTask(M);
     handleBarrier(M);
     handleSplitU64(M);
+    handleBuildU64(M);
     handleGetUser(M);
   }
 
@@ -326,6 +328,20 @@ private:
       Value *setLow = B.CreateInsertValue(empty, low, {0});
       Value *replace = B.CreateInsertValue(setLow, high, {1});
       call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleBuildU64(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, "", false, BUILD_U64_CONSTRAINTS);
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *low = B.CreateZExt(call->getArgOperand(0), i64Ty);
+      Value *upper = B.CreateZExt(call->getArgOperand(1), i64Ty);
+      Value *v = B.CreateOr(low, B.CreateShl(upper, 32));
+      call->replaceAllUsesWith(v);
       call->eraseFromParent();
     }
   }
@@ -477,7 +493,7 @@ private:
       Value *low = B.CreateZExt(call->getArgOperand(1), i64Ty);
       Value *upper = B.CreateZExt(call->getArgOperand(2), i64Ty);
 
-      Value *v = B.CreateAdd(B.CreateShl(upper, 32), low);
+      Value *v = B.CreateOr(B.CreateShl(upper, 32), low);
       Value *quotient = B.CreateUDiv(v, divisor);
       Value *remainder = B.CreateURem(v, divisor);
 
