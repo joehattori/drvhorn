@@ -39,7 +39,9 @@ using namespace llvm;
 #define CALL1 "call ${1:P}"
 #define CALL2 "call ${2:P}"
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
-#define GET_USER "call __GET_USER_nocheck_${4:P}"
+#define CPUID "cpuid"
+
+#define GET_USER "call __get_user_nocheck_${4:P}"
 #define GET_USER_CONSTRAINTS                                                   \
   "={ax},={edx},={esp},0,i,{esp},~{dirflag},~{fpsr},~{flags}"
 
@@ -202,6 +204,7 @@ private:
     handleXAddl(M);
     handleMovl(M);
     handleAddl(M);
+    handleCpuid(M);
 
     handleAtomic64Read(M);
     handleAtomic64Set(M);
@@ -417,6 +420,30 @@ private:
 
       Value *add = B.CreateAdd(dst, src);
       call->replaceAllUsesWith(add);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleCpuid(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CPUID, false);
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    FunctionCallee ndf = getNondetFn(i32Ty, M);
+    StructType *cpuidRetType = StructType::create(ctx);
+    cpuidRetType->setBody({i32Ty, i32Ty, i32Ty, i32Ty});
+    // return nondet values for eax, ebx, ecx, and edx
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *eax = B.CreateCall(ndf);
+      Value *ebx = B.CreateCall(ndf);
+      Value *ecx = B.CreateCall(ndf);
+      Value *edx = B.CreateCall(ndf);
+      Value *setEax =
+          B.CreateInsertValue(UndefValue::get(cpuidRetType), eax, {0});
+      Value *setEbx = B.CreateInsertValue(setEax, ebx, {1});
+      Value *setEcx = B.CreateInsertValue(setEbx, ecx, {2});
+      Value *setEdx = B.CreateInsertValue(setEcx, edx, {3});
+      call->replaceAllUsesWith(setEdx);
       call->eraseFromParent();
     }
   }
