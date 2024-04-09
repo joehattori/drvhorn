@@ -39,6 +39,9 @@ using namespace llvm;
 #define CALL1 "call ${1:P}"
 #define CALL2 "call ${2:P}"
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
+#define GET_USER "call __GET_USER_nocheck_${4:P}"
+#define GET_USER_CONSTRAINTS                                                   \
+  "={ax},={edx},={esp},0,i,{esp},~{dirflag},~{fpsr},~{flags}"
 
 #define HWEIGHT                                                                \
   "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
@@ -220,6 +223,7 @@ private:
 
     handleCurrentTask(M);
     handleBarrier(M);
+    handleGetUser(M);
   }
 
   std::vector<CallInst *>
@@ -272,7 +276,7 @@ private:
         return false;
       PointerType *innerPtrType = dyn_cast<PointerType>(innerType);
       return innerPtrType->getElementType()->getStructName().startswith(
-          "struct.task_struct.");
+          "struct.task_struct");
     };
 
     std::vector<CallInst *> calls =
@@ -695,6 +699,26 @@ private:
       Value *isOk = B.CreateICmpULT(index, size);
       Value *mask = B.CreateSelect(isOk, B.getInt32(0xffffffff), B.getInt32(0));
       call->replaceAllUsesWith(mask);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleGetUser(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, GET_USER, false, GET_USER_CONSTRAINTS);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *addr = call->getArgOperand(0);
+      Value *stackPointer = call->getArgOperand(2);
+      StructType *type = cast<StructType>(call->getType());
+
+      Value *ok =
+          B.CreateInsertValue(UndefValue::get(type), B.getInt32(0), {0});
+      Value *loaded = B.CreateLoad(i32Ty, addr);
+      Value *setLoaded = B.CreateInsertValue(ok, loaded, {1});
+      Value *completed = B.CreateInsertValue(setLoaded, stackPointer, {2});
+      call->replaceAllUsesWith(completed);
       call->eraseFromParent();
     }
   }
