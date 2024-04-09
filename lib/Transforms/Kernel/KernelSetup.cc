@@ -24,7 +24,8 @@ using namespace llvm;
 
 #define BIT_TEST_PREFIX " btl  $2,$1"
 #define BIT_TEST_AND_SET_PREFIX " btsl  $1,$0"
-#define BIT_TEST_AND_RESET_PREFIX " btrl  $1,$0"
+#define BIT_TEST_AND_RESET_1_0_PREFIX " btrl  $1,$0"
+#define BIT_TEST_AND_RESET_2_1_PREFIX " btrl  $2,$1"
 
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
@@ -386,20 +387,26 @@ private:
   }
 
   void handleBitTestAndReset(Module &M) {
-    std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, BIT_TEST_AND_RESET_PREFIX, true);
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *addr = call->getArgOperand(0);
-      Value *offset = call->getArgOperand(1);
+    auto replaceBtrl = [&](Module &M, const std::string &targetAsmPrefix,
+                           unsigned addrIdx, unsigned offIdx) {
+      std::vector<CallInst *> calls =
+          getTargetAsmCalls(M, targetAsmPrefix, true);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *addr = call->getArgOperand(addrIdx);
+        Value *offset = call->getArgOperand(offIdx);
 
-      Value *pos = bitAddr(B, addr, offset);
-      Value *old =
-          B.CreateAtomicRMW(AtomicRMWInst::And, pos, B.getInt1(0), MaybeAlign(),
-                            AtomicOrdering::SequentiallyConsistent);
-      call->replaceAllUsesWith(old);
-      call->eraseFromParent();
-    }
+        Value *pos = bitAddr(B, addr, offset);
+        Value *old = B.CreateAtomicRMW(AtomicRMWInst::And, pos, B.getInt1(0),
+                                       MaybeAlign(),
+                                       AtomicOrdering::SequentiallyConsistent);
+        call->replaceAllUsesWith(old);
+        call->eraseFromParent();
+      }
+    };
+
+    replaceBtrl(M, BIT_TEST_AND_RESET_1_0_PREFIX, 1, 0);
+    replaceBtrl(M, BIT_TEST_AND_RESET_2_1_PREFIX, 2, 1);
   }
 
   void handleIncl(Module &M) {
