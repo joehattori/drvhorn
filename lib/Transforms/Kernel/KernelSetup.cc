@@ -37,6 +37,9 @@ using namespace llvm;
 #define CMPXCHGL21 "cmpxchgl $2,$1"
 #define CMPXCHGL31_PREFIX "cmpxchgl $3, $1"
 #define CMPXCHG8B "cmpxchg8b $1"
+#define XCHGL "xchgl $0, $1;"
+#define XCGHL_CONSTRAINTS                                                      \
+  "=r,=*m,0,*m,~{memory},~{cc},~{dirflag},~{fpsr},~{flags}"
 #define FFS "rep; bsf $1,$0"
 #define FLS "bsrl $1,$0;cmovzl $2,$0"
 #define CLI "cli"
@@ -220,6 +223,7 @@ private:
     handleAtomic64Set(M);
     handleAtomic64AddReturn(M);
     handleAtomic64SubReturn(M);
+    handleXchgl(M);
     handleCmpxchgl(M);
     handleCmpxchg8b(M);
 
@@ -535,6 +539,33 @@ private:
       Value *setEdx = B.CreateInsertValue(setEcx, edx, {3});
       call->replaceAllUsesWith(setEdx);
       call->eraseFromParent();
+    }
+  }
+
+  void handleXchgl(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, XCHGL, false, XCGHL_CONSTRAINTS);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *src = call->getArgOperand(0);
+      Value *dst = call->getArgOperand(1);
+      bool isSrcPtr = src->getType()->isPointerTy();
+      bool isDstPtr = dst->getType()->isPointerTy();
+      if (isSrcPtr && !isDstPtr) {
+        Value *loaded = B.CreateLoad(dst->getType(), src);
+        B.CreateStore(dst, src);
+        call->replaceAllUsesWith(loaded);
+        call->eraseFromParent();
+      } else if (isSrcPtr && isDstPtr) {
+        Value *loadedSrc = B.CreateLoad(src->getType(), src);
+        Value *loadedDst = B.CreateLoad(dst->getType(), dst);
+        B.CreateStore(loadedDst, src);
+        B.CreateStore(loadedSrc, dst);
+        call->replaceAllUsesWith(loadedSrc);
+        call->eraseFromParent();
+      } else {
+        errs() << "TODO: handleXchgl\n";
+      }
     }
   }
 
