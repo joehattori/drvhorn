@@ -29,6 +29,7 @@ using namespace llvm;
 #define XADDL_PREFIX "xaddl $0, $1"
 #define MOVL "movl $1, $0"
 #define ADDL "addl $1, $0"
+#define MULL "mull $3"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
 #define CMPXCHGL31_PREFIX "cmpxchgl $3, $1"
 #define CMPXCHG8B "cmpxchg8b $1"
@@ -207,6 +208,7 @@ private:
     handleXAddl(M);
     handleMovl(M);
     handleAddl(M);
+    handleMull(M);
     handleCpuid(M);
 
     handleAtomic64Read(M);
@@ -423,6 +425,24 @@ private:
 
       Value *add = B.CreateAdd(dst, src);
       call->replaceAllUsesWith(add);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleMull(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, MULL, false);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *v1 = B.CreateZExt(call->getArgOperand(0), B.getInt64Ty());
+      Value *v2 = B.CreateZExt(call->getArgOperand(1), B.getInt64Ty());
+
+      Value *mul = B.CreateMul(v1, v2);
+      Value *low = B.CreateTrunc(mul, B.getInt32Ty());
+      Value *upper = B.CreateLShr(mul, 32);
+      StructType *type = cast<StructType>(call->getType());
+      Value *setLow = B.CreateInsertValue(UndefValue::get(type), low, {0});
+      Value *replace = B.CreateInsertValue(setLow, upper, {1});
+      call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
   }
