@@ -31,6 +31,7 @@ using namespace llvm;
 #define MOVL "movl $1, $0"
 #define ADDL "addl $1, $0"
 #define MULL "mull $3"
+#define DIVL "divl $2"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
 #define CMPXCHGL31_PREFIX "cmpxchgl $3, $1"
 #define CMPXCHG8B "cmpxchg8b $1"
@@ -210,6 +211,7 @@ private:
     handleMovl(M);
     handleAddl(M);
     handleMull(M);
+    handleDivl(M);
     handleCpuid(M);
 
     handleAtomic64Read(M);
@@ -461,6 +463,28 @@ private:
       Value *empty = UndefValue::get(type);
       Value *setLow = B.CreateInsertValue(empty, low, {0});
       Value *replace = B.CreateInsertValue(setLow, upper, {1});
+      call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleDivl(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, DIVL, false);
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *divisor = B.CreateZExt(call->getArgOperand(0), i64Ty);
+      Value *low = B.CreateZExt(call->getArgOperand(1), i64Ty);
+      Value *upper = B.CreateZExt(call->getArgOperand(2), i64Ty);
+
+      Value *v = B.CreateAdd(B.CreateShl(upper, 32), low);
+      Value *quotient = B.CreateUDiv(v, divisor);
+      Value *remainder = B.CreateURem(v, divisor);
+
+      StructType *type = cast<StructType>(call->getType());
+      Value *empty = UndefValue::get(type);
+      Value *setQuotient = B.CreateInsertValue(empty, quotient, {0});
+      Value *replace = B.CreateInsertValue(setQuotient, remainder, {1});
       call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
