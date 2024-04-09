@@ -33,6 +33,7 @@ using namespace llvm;
 #define CMPXCHGL31_PREFIX "cmpxchgl $3, $1"
 #define CMPXCHG8B "cmpxchg8b $1"
 #define FFS "rep; bsf $1,$0"
+#define FLS "bsrl $1,$0;cmovzl $2,$0"
 #define CLI "cli"
 #define STI "sti"
 #define RDPMC "rdpmc"
@@ -198,6 +199,7 @@ private:
     handleBitTestAndSet(M);
     handleBitTestAndReset(M);
     handleFFS(M);
+    handleFLS(M);
     handleHWeight(M);
 
     handleIncl(M);
@@ -509,9 +511,30 @@ private:
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *v = call->getArgOperand(0);
-      Value *zero = B.getFalse();
-      Value *cttzCall = B.CreateCall(cttz, {v, zero});
-      call->replaceAllUsesWith(cttzCall);
+      Value *zero = B.getInt32(0);
+      Value *isZero = B.CreateICmpEQ(v, zero);
+      Value *cttzCall = B.CreateCall(cttz, {v, B.getFalse()});
+      Value *nonZero = B.CreateAdd(cttzCall, B.getInt32(1));
+      Value *replace = B.CreateSelect(isZero, zero, nonZero);
+      call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleFLS(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, FLS, false);
+    LLVMContext &ctx = M.getContext();
+    Function *ctlz =
+        Intrinsic::getDeclaration(&M, Intrinsic::ctlz, {Type::getInt32Ty(ctx)});
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *v = call->getArgOperand(0);
+      Value *zero = B.getInt32(0);
+      Value *isZero = B.CreateICmpEQ(v, zero);
+      Value *ctlzCall = B.CreateCall(ctlz, {v, B.getFalse()});
+      Value *nonZero = B.CreateSub(B.getInt32(32), ctlzCall);
+      Value *replace = B.CreateSelect(isZero, zero, nonZero);
+      call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
   }
