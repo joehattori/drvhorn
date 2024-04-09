@@ -19,6 +19,7 @@ using namespace llvm;
 #define MOVL_POSITION_INDEPENDENT "movl ${1:P}, $0"
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
+#define SPLIT_U64_CONSTRAINTS "={ax},={dx},A,~{dirflag},~{fpsr},~{flags}"
 
 #define BIT_TEST_PREFIX " btl  $2,$1"
 #define BIT_TEST_AND_SET_PREFIX " btsl  $1,$0"
@@ -231,6 +232,7 @@ private:
 
     handleCurrentTask(M);
     handleBarrier(M);
+    handleSplitU64(M);
     handleGetUser(M);
   }
 
@@ -308,6 +310,22 @@ private:
         getTargetAsmCalls(M, "", false, BARRIER_CONSTRAINTS);
     for (CallInst *call : calls)
       call->eraseFromParent();
+  }
+
+  void handleSplitU64(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, "", false, SPLIT_U64_CONSTRAINTS);
+    for (CallInst *call : calls) {
+      Value *v = call->getArgOperand(0);
+      IRBuilder<> B(call);
+      Value *low = B.CreateTrunc(v, B.getInt32Ty());
+      Value *high = B.CreateLShr(v, 32);
+      Value *empty = UndefValue::get(call->getType());
+      Value *setLow = B.CreateInsertValue(empty, low, {0});
+      Value *replace = B.CreateInsertValue(setLow, high, {1});
+      call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
   }
 
   Value *bitAddr(IRBuilder<> &B, Value *base, Value *offset) {
@@ -440,7 +458,8 @@ private:
       Value *low = B.CreateTrunc(mul, B.getInt32Ty());
       Value *upper = B.CreateLShr(mul, 32);
       StructType *type = cast<StructType>(call->getType());
-      Value *setLow = B.CreateInsertValue(UndefValue::get(type), low, {0});
+      Value *empty = UndefValue::get(type);
+      Value *setLow = B.CreateInsertValue(empty, low, {0});
       Value *replace = B.CreateInsertValue(setLow, upper, {1});
       call->replaceAllUsesWith(replace);
       call->eraseFromParent();
@@ -461,8 +480,9 @@ private:
       Value *ebx = B.CreateCall(ndf);
       Value *ecx = B.CreateCall(ndf);
       Value *edx = B.CreateCall(ndf);
-      Value *setEax =
-          B.CreateInsertValue(UndefValue::get(cpuidRetType), eax, {0});
+
+      Value *empty = UndefValue::get(cpuidRetType);
+      Value *setEax = B.CreateInsertValue(empty, eax, {0});
       Value *setEbx = B.CreateInsertValue(setEax, ebx, {1});
       Value *setEcx = B.CreateInsertValue(setEbx, ecx, {2});
       Value *setEdx = B.CreateInsertValue(setEcx, edx, {3});
@@ -492,8 +512,8 @@ private:
         Value *isSuccess = B.CreateExtractValue(inst, {1});
         StructType *type = cast<StructType>(call->getType());
         Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
-        Value *converted =
-            B.CreateInsertValue(UndefValue::get(type), castedSuccess, {0});
+        Value *empty = UndefValue::get(type);
+        Value *converted = B.CreateInsertValue(empty, castedSuccess, {0});
         Value *completed = B.CreateInsertValue(converted, val, {1});
 
         call->replaceAllUsesWith(completed);
@@ -583,10 +603,11 @@ private:
       IRBuilder<> B(call);
       StructType *type = cast<StructType>(call->getType());
       // return {0 (success), 0 (msr value)} for now.
-      Value *empty = B.CreateInsertValue(UndefValue::get(type),
-                                         Constant::getNullValue(i32Ty), {0});
+      Value *empty = UndefValue::get(type);
+      Value *setSuccess =
+          B.CreateInsertValue(empty, Constant::getNullValue(i32Ty), {0});
       Value *retVal =
-          B.CreateInsertValue(empty, Constant::getNullValue(i64Ty), {1});
+          B.CreateInsertValue(setSuccess, Constant::getNullValue(i64Ty), {1});
       call->replaceAllUsesWith(retVal);
       call->eraseFromParent();
     }
@@ -791,8 +812,8 @@ private:
       Value *stackPointer = call->getArgOperand(2);
       StructType *type = cast<StructType>(call->getType());
 
-      Value *ok =
-          B.CreateInsertValue(UndefValue::get(type), B.getInt32(0), {0});
+      Value *empty = UndefValue::get(type);
+      Value *ok = B.CreateInsertValue(empty, B.getInt32(0), {0});
       Value *loaded = B.CreateLoad(i32Ty, addr);
       Value *setLoaded = B.CreateInsertValue(ok, loaded, {1});
       Value *completed = B.CreateInsertValue(setLoaded, stackPointer, {2});
