@@ -29,7 +29,8 @@ using namespace llvm;
 #define XADDL_PREFIX "xaddl $0, $1"
 #define MOVL "movl $1, $0"
 #define ADDL "addl $1, $0"
-#define CMPXCHGL_PREFIX "cmpxchgl $3, $1"
+#define CMPXCHGL21 "cmpxchgl $2,$1"
+#define CMPXCHGL31_PREFIX "cmpxchgl $3, $1"
 #define CMPXCHG8B "cmpxchg8b $1"
 #define FFS "rep; bsf $1,$0"
 #define CLI "cli"
@@ -449,30 +450,37 @@ private:
   }
 
   void handleCmpxchgl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, CMPXCHGL_PREFIX, true);
-    LLVMContext &ctx = M.getContext();
-    Type *i8Ty = Type::getInt8Ty(ctx);
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *acc = call->getArgOperand(0);
-      Value *cmp = call->getArgOperand(3);
-      Value *new_ = call->getArgOperand(1);
-      AtomicCmpXchgInst *inst = B.CreateAtomicCmpXchg(
-          acc, cmp, new_, MaybeAlign(), AtomicOrdering::SequentiallyConsistent,
-          AtomicOrdering::SequentiallyConsistent);
+    auto replaceCmpxchg = [&](Module &M, const std::string &targetAsm,
+                              bool isPrefix, int cmpIdx) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, isPrefix);
+      LLVMContext &ctx = M.getContext();
+      Type *i8Ty = Type::getInt8Ty(ctx);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *acc = call->getArgOperand(0);
+        Value *cmp = call->getArgOperand(cmpIdx);
+        Value *new_ = call->getArgOperand(1);
+        AtomicCmpXchgInst *inst =
+            B.CreateAtomicCmpXchg(acc, cmp, new_, MaybeAlign(),
+                                  AtomicOrdering::SequentiallyConsistent,
+                                  AtomicOrdering::SequentiallyConsistent);
 
-      // convert {ty, i1} to {i8, ty}
-      Value *val = B.CreateExtractValue(inst, {0});
-      Value *isSuccess = B.CreateExtractValue(inst, {1});
-      StructType *type = cast<StructType>(call->getType());
-      Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
-      Value *converted =
-          B.CreateInsertValue(UndefValue::get(type), castedSuccess, {0});
-      Value *completed = B.CreateInsertValue(converted, val, {1});
+        // convert {ty, i1} to {i8, ty}
+        Value *val = B.CreateExtractValue(inst, {0});
+        Value *isSuccess = B.CreateExtractValue(inst, {1});
+        StructType *type = cast<StructType>(call->getType());
+        Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
+        Value *converted =
+            B.CreateInsertValue(UndefValue::get(type), castedSuccess, {0});
+        Value *completed = B.CreateInsertValue(converted, val, {1});
 
-      call->replaceAllUsesWith(completed);
-      call->eraseFromParent();
-    }
+        call->replaceAllUsesWith(completed);
+        call->eraseFromParent();
+      }
+    };
+
+    replaceCmpxchg(M, CMPXCHGL31_PREFIX, true, 3);
+    replaceCmpxchg(M, CMPXCHGL21, false, 2);
   }
 
   void handleCmpxchg8b(Module &M) {
