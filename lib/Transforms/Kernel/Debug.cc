@@ -17,6 +17,7 @@ public:
   Debug() : ModulePass(ID) {}
 
   bool runOnModule(Module &M) override {
+    unsigned int counter = 0;
     for (Function &F : M) {
       if (F.isDeclaration() || !F.hasName())
         continue;
@@ -24,17 +25,20 @@ public:
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
           if (InlineAsm *inlineAsm =
                   dyn_cast<InlineAsm>(call->getCalledOperand())) {
-            static int c = 0;
-            if (c++ < 10) {
+            if (counter < 10) {
               StringRef name = F.getName();
               errs() << "In func " << name.str() << "\n";
               errs() << "asm: " << inlineAsm->getAsmString() << "\n";
               errs() << "constraints " << inlineAsm->getConstraintString()
                      << "\n";
             }
+            counter++;
           }
         }
       }
+    }
+    if (counter) {
+      errs() << "Total number of inline asm instructions: " << counter << "\n";
     }
     return false;
   }

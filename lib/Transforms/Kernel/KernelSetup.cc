@@ -71,9 +71,13 @@ using namespace llvm;
   "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
   "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
   "reg=$0, type=10 ;.purgem extable_type_reg; .popsection;"
+#define RDMSR                                                                  \
+  "1: rdmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
+  ".long (2b) - .; .long 9 ; .popsection;"
 #define WRMSR                                                                  \
   "1: wrmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
   ".long (2b) - .; .long 8 ; .popsection;"
+
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 
 #define ATOMIC64_COUNTER_INDEX 0
@@ -213,6 +217,7 @@ private:
 
     handleNativeReadMSRSafe(M);
     handleNativeWriteMSRSafe(M);
+    handleRDMSR(M);
     handleWRMSR(M);
     handleArrayIndexMaskNoSpec(M);
   }
@@ -500,6 +505,20 @@ private:
     }
   }
 
+  void handleRDMSR(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, RDMSR, false);
+    LLVMContext &ctx = M.getContext();
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    FunctionCallee ndf = getNondetFn(i64Ty, M);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      // return a nondet unsigned long long for now.
+      Value *ret = B.CreateCall(ndf);
+      call->replaceAllUsesWith(ret);
+      call->eraseFromParent();
+    }
+  }
+
   void handleWRMSR(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, WRMSR, false);
     LLVMContext &ctx = M.getContext();
@@ -610,10 +629,10 @@ private:
   void handleNativeSaveFL(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, NATIVE_SAVE_FL, false);
     Type *i32Ty = Type::getInt32Ty(M.getContext());
+    FunctionCallee ndf = getNondetFn(i32Ty, M);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       // return a nondet unsigned long for now.
-      FunctionCallee ndf = getNondetFn(i32Ty, M);
       Value *ret = B.CreateCall(ndf);
       call->replaceAllUsesWith(ret);
       call->eraseFromParent();
