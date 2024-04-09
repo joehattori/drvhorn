@@ -32,6 +32,14 @@ using namespace llvm;
 #define CMPXCHGL_PREFIX "cmpxchgl $3, $1"
 #define CMPXCHG8B "cmpxchg8b $1"
 #define FFS "rep; bsf $1,$0"
+#define CLI "cli"
+#define STI "sti"
+#define RDPMC "rdpmc"
+#define CALL0 "call ${0:P}"
+#define CALL1 "call ${1:P}"
+#define CALL2 "call ${2:P}"
+#define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
+
 #define HWEIGHT                                                                \
   "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
@@ -66,14 +74,7 @@ using namespace llvm;
 #define WRMSR                                                                  \
   "1: wrmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
   ".long (2b) - .; .long 8 ; .popsection;"
-
-#define CALL0 "call ${0:P}"
-#define CALL1 "call ${1:P}"
-#define CALL2 "call ${2:P}"
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
-#define CLI "cli"
-#define STI "sti"
-#define RDPMC "rdpmc"
 
 #define ATOMIC64_COUNTER_INDEX 0
 
@@ -198,10 +199,6 @@ private:
     handleMovl(M);
     handleAddl(M);
 
-    handleNativeReadMSRSafe(M);
-    handleNativeWriteMSRSafe(M);
-    handleWRMSR(M);
-
     handleAtomic64Read(M);
     handleAtomic64Set(M);
     handleAtomic64AddReturn(M);
@@ -213,6 +210,11 @@ private:
     handleCLI(M);
     handleSTI(M);
     handleRDPMC(M);
+
+    handleNativeReadMSRSafe(M);
+    handleNativeWriteMSRSafe(M);
+    handleWRMSR(M);
+    handleArrayIndexMaskNoSpec(M);
   }
 
   std::vector<CallInst *>
@@ -641,6 +643,20 @@ private:
       FunctionCallee ndf = getNondetFn(i64Ty, M);
       Value *ret = B.CreateCall(ndf);
       call->replaceAllUsesWith(ret);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleArrayIndexMaskNoSpec(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, ARRAY_INDEX_MASK_NOSPEC, false);
+    for (CallInst *call : calls) {
+      Value *index = call->getArgOperand(1);
+      Value *size = call->getArgOperand(0);
+      IRBuilder<> B(call);
+      Value *isOk = B.CreateICmpULT(index, size);
+      Value *mask = B.CreateSelect(isOk, B.getInt32(0xffffffff), B.getInt32(0));
+      call->replaceAllUsesWith(mask);
       call->eraseFromParent();
     }
   }
