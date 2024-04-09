@@ -10,13 +10,13 @@
 #include "seahorn/Support/SeaDebug.h"
 
 #include <algorithm>
+#include <llvm-14/llvm/IR/Operator.h>
 #include <optional>
 #include <regex>
 
 using namespace llvm;
 
-#define CURRENT_TASK "movl ${1:P}, $0"
-#define CURRENT_TASK_CONSTRAINTS "=r,im,~{dirflag},~{fpsr},~{flags}"
+#define MOVL_POSITION_INDEPENDENT "movl ${1:P}, $0"
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
 
@@ -188,9 +188,6 @@ private:
   }
 
   void handleInlineAssembly(Module &M) {
-    handleCurrentTask(M);
-    handleBarrier(M);
-
     handleBitTest(M);
     handleBitTestAndSet(M);
     handleBitTestAndReset(M);
@@ -220,6 +217,9 @@ private:
     handleRDMSR(M);
     handleWRMSR(M);
     handleArrayIndexMaskNoSpec(M);
+
+    handleCurrentTask(M);
+    handleBarrier(M);
   }
 
   std::vector<CallInst *>
@@ -263,12 +263,31 @@ private:
   }
 
   void handleCurrentTask(Module &M) {
+    auto isPtrToPtrToTask = [](Type *type) {
+      if (!type->isPointerTy())
+        return false;
+      PointerType *ptrType = dyn_cast<PointerType>(type);
+      Type *innerType = ptrType->getElementType();
+      if (!innerType->isPointerTy())
+        return false;
+      PointerType *innerPtrType = dyn_cast<PointerType>(innerType);
+      return innerPtrType->getElementType()->getStructName().startswith(
+          "struct.task_struct.");
+    };
+
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, CURRENT_TASK, false, CURRENT_TASK_CONSTRAINTS);
+        getTargetAsmCalls(M, MOVL_POSITION_INDEPENDENT, false);
     for (CallInst *call : calls) {
-      Value *task = call->getArgOperand(0);
-      call->replaceAllUsesWith(task);
-      call->eraseFromParent();
+      Value *arg = call->getArgOperand(0);
+      if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(arg)) {
+        Value *task = bitcast->getOperand(0);
+        if (isPtrToPtrToTask(bitcast->getSrcTy()) &&
+            isPtrToPtrToTask(bitcast->getDestTy()) &&
+            task->getName().equals("current_task")) {
+          call->replaceAllUsesWith(task);
+          call->eraseFromParent();
+        }
+      }
     }
   }
 
