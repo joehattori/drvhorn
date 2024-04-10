@@ -92,6 +92,13 @@ using namespace llvm;
 #define WRMSR                                                                  \
   "1: wrmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
   ".long (2b) - .; .long 8 ; .popsection;"
+#define WMB                                                                    \
+  "# ALT: oldnstr;661:;lock; addl $$0,-4(%esp);662:;# ALT: padding;.skip "     \
+  "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
+  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection .altinstructions,'a'; "  \
+  ".long 661b - .; .long 6641f - .; .word ( 0*32+26); .byte 663b-661b; .byte " \
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,'ax';# ALT: "    \
+  "replacement 1;6641:;sfence;6651:;.popsection;"
 
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 
@@ -240,6 +247,7 @@ private:
 
     handleCurrentTask(M);
     handleBarrier(M);
+    handleWMB(M);
     handleSplitU64(M);
     handleBuildU64(M);
     handleGetUser(M);
@@ -327,6 +335,12 @@ private:
   void handleBarrier(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, "", false, BARRIER_CONSTRAINTS);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
+  }
+
+  void handleWMB(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, WMB, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
