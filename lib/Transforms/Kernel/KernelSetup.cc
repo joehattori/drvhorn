@@ -21,6 +21,8 @@ using namespace llvm;
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
 #define SPLIT_U64_CONSTRAINTS "={ax},={dx},A,~{dirflag},~{fpsr},~{flags}"
 #define BUILD_U64_CONSTRAINTS "=A,{ax},{dx},~{dirflag},~{fpsr},~{flags}"
+#define ARCH_ATOMIC64_XCHG_CONSTRAINTS                                         \
+  "=&A,i,{si},{bx},{cx},~{memory},~{dirflag},~{fpsr},~{flags}"
 
 #define BIT_TEST_PREFIX "btl $2,$1"
 #define BIT_TEST_AND_SET_PREFIX "btsl $1,$0"
@@ -231,6 +233,7 @@ private:
     handleAtomic64Set(M);
     handleAtomic64AddReturn(M);
     handleAtomic64SubReturn(M);
+    handleAtomic64Xchg(M);
     handleXchgl(M);
     handleCmpxchgl(M);
     handleCmpxchg8b(M);
@@ -854,6 +857,34 @@ private:
       Value *sub = B.CreateSub(counter, i);
       B.CreateStore(sub, counterPtr);
       call->replaceAllUsesWith(sub);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleAtomic64Xchg(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, CALL1, false, ARCH_ATOMIC64_XCHG_CONSTRAINTS);
+    LLVMContext &ctx = M.getContext();
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    StructType *atomic64Type =
+        StructType::getTypeByName(ctx, "struct.atomic64_t");
+    for (CallInst *call : calls) {
+      if (!call->getNumOperands())
+        continue;
+      Value *op = call->getOperand(0);
+      if (!op->hasName() || !op->getName().equals("atomic64_xchg_cx8"))
+        continue;
+      IRBuilder<> B(call);
+      Value *v = call->getOperand(1);
+      Value *low = B.CreateZExt(call->getOperand(2), i64Ty);
+      Value *high = B.CreateZExt(call->getOperand(3), i64Ty);
+      Value *new_ = B.CreateOr(B.CreateLShr(high, 32), low);
+      Value *counterPtr =
+          B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
+      Value *old =
+          B.CreateAtomicRMW(AtomicRMWInst::Xchg, counterPtr, new_, MaybeAlign(),
+                            AtomicOrdering::SequentiallyConsistent);
+      call->replaceAllUsesWith(old);
       call->eraseFromParent();
     }
   }
