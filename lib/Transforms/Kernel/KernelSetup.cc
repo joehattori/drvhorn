@@ -16,28 +16,28 @@
 
 using namespace llvm;
 
-#define MOVL_POSITION_INDEPENDENT "movl ${1:P}, $0"
+#define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
 #define SPLIT_U64_CONSTRAINTS "={ax},={dx},A,~{dirflag},~{fpsr},~{flags}"
 #define BUILD_U64_CONSTRAINTS "=A,{ax},{dx},~{dirflag},~{fpsr},~{flags}"
 
-#define BIT_TEST_PREFIX " btl  $2,$1"
-#define BIT_TEST_AND_SET_PREFIX " btsl  $1,$0"
-#define BIT_TEST_AND_RESET_1_0_PREFIX " btrl  $1,$0"
-#define BIT_TEST_AND_RESET_2_1_PREFIX " btrl  $2,$1"
+#define BIT_TEST_PREFIX "btl $2,$1"
+#define BIT_TEST_AND_SET_PREFIX "btsl $1,$0"
+#define BIT_TEST_AND_RESET_1_0_PREFIX "btrl $1,$0"
+#define BIT_TEST_AND_RESET_2_1_PREFIX "btrl $2,$1"
 
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
-#define XADDL_PREFIX "xaddl $0, $1"
-#define MOVL "movl $1, $0"
-#define ADDL "addl $1, $0"
+#define XADDL_PREFIX "xaddl $0,$1"
+#define MOVL "movl $1,$0"
+#define ADDL "addl $1,$0"
 #define MULL "mull $3"
 #define DIVL "divl $2"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
-#define CMPXCHGL31_PREFIX "cmpxchgl $3, $1"
+#define CMPXCHGL31_PREFIX "cmpxchgl $3,$1"
 #define CMPXCHG8B "cmpxchg8b $1"
-#define XCHGL "xchgl $0, $1;"
+#define XCHGL "xchgl $0,$1;"
 #define XCGHL_CONSTRAINTS                                                      \
   "=r,=*m,0,*m,~{memory},~{cc},~{dirflag},~{fpsr},~{flags}"
 #define FFS "rep; bsf $1,$0"
@@ -60,32 +60,32 @@ using namespace llvm;
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
   "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection .altinstructions,'a'; "  \
   ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
-  "6651f-6641f;.popsection;.pushsection .altinstr_replacement, 'ax';# ALT: "   \
-  "replacement 1;6641:;popcntl $1, $0;6651:;.popsection;"
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,'ax';# ALT: "    \
+  "replacement 1;6641:;popcntl $1,$0;6651:;.popsection;"
 #define NATIVE_READ_MSR_SAFE                                                   \
   "1: rdmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
   "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
-  ".Lfound, 0;.set .Lregnr, 0;.irp "                                           \
+  ".Lfound,0;.set .Lregnr,0;.irp "                                             \
   "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
-  "\\reg, %\\rs;.set .Lfound, .Lfound+1;.long \\type + (.Lregnr << "           \
-  "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.set .Lregnr, 0;.irp "              \
+  "\\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "             \
+  "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.set .Lregnr,0;.irp "                \
   "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
-  "ifc \\reg, %\\rs;.set .Lfound, .Lfound+1;.long \\type + (.Lregnr << "       \
-  "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
+  "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
+  "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
   "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
-  "reg=$0, type=11 ;.purgem extable_type_reg; .popsection;"
+  "reg=$0,type=11 ;.purgem extable_type_reg; .popsection;"
 #define NATIVE_WRITE_MSR_SAFE                                                  \
   "1: wrmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
   "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
-  ".Lfound, 0;.set .Lregnr, 0;.irp "                                           \
+  ".Lfound,0;.set .Lregnr,0;.irp "                                             \
   "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
-  "\\reg, %\\rs;.set .Lfound, .Lfound+1;.long \\type + (.Lregnr << "           \
-  "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.set .Lregnr, 0;.irp "              \
+  "\\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "             \
+  "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.set .Lregnr,0;.irp "                \
   "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
-  "ifc \\reg, %\\rs;.set .Lfound, .Lfound+1;.long \\type + (.Lregnr << "       \
-  "8);.endif;.set .Lregnr, .Lregnr+1;.endr;.if (.Lfound != 1);.error "         \
+  "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
+  "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
   "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
-  "reg=$0, type=10 ;.purgem extable_type_reg; .popsection;"
+  "reg=$0,type=10 ;.purgem extable_type_reg; .popsection;"
 #define RDMSR                                                                  \
   "1: rdmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
   ".long (2b) - .; .long 9 ; .popsection;"
@@ -249,10 +249,18 @@ private:
   getTargetAsmCalls(Module &M, const std::string &asmStr, bool isPrefix,
                     const std::string &constraints = "") {
     auto formatInlineAsm = [](std::string s) {
+      // trim leading whitespace
+      s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char c) {
+                return !std::isspace(c);
+              }));
       std::regex newLine("\n");
       s = std::regex_replace(s, newLine, ";");
       std::regex tab("\t");
       s = std::regex_replace(s, tab, "");
+      std::regex commaSpace(",\\s+");
+      s = std::regex_replace(s, commaSpace, ",");
+      std::regex spacesBeforeReg("\\s+\\$");
+      s = std::regex_replace(s, spacesBeforeReg, " $");
       std::regex quote("\"");
       return std::regex_replace(s, quote, "'");
     };
@@ -262,7 +270,9 @@ private:
           dyn_cast<InlineAsm>(call->getCalledOperand());
       if (!inlineAsm)
         return false;
+      // errs() << "before " << inlineAsm->getAsmString() << "\n";
       std::string formatted = formatInlineAsm(inlineAsm->getAsmString());
+      // errs() << "after " << formatted << "\n";
       if (isPrefix)
         return !formatted.rfind(asmStr, 0) &&
                (constraints.empty() ||
