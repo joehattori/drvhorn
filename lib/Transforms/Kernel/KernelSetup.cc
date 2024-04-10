@@ -103,6 +103,19 @@ using namespace llvm;
   ".long 661b - .; .long 6641f - .; .word ( 0*32+26); .byte 663b-661b; .byte " \
   "6651f-6641f;.popsection;.pushsection .altinstr_replacement,'ax';# ALT: "    \
   "replacement 1;6641:;sfence;6651:;.popsection;"
+#define LOAD_GS                                                                \
+  "1:movl ${0:k},%gs; .pushsection '__ex_table','a'; .balign 4; .long (1b) "   \
+  "- .; .long (1b) - .;.macro extable_type_reg type:req reg:req;.set "         \
+  ".Lfound,0;.set .Lregnr,0;.irp "                                             \
+  "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
+  "\\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "             \
+  "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.set .Lregnr,0;.irp "                \
+  "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
+  "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
+  "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
+  "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
+  "reg=${0:k},type=(17 $| ((0) << 16)) ;.purgem extable_type_reg; "            \
+  ".popsection;"
 
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 
@@ -255,6 +268,7 @@ private:
     handleWMB(M);
     handleUD2(M);
     handleLoadCr3(M);
+    handleLoadGs(M);
     handleSplitU64(M);
     handleBuildU64(M);
     handleGetUser(M);
@@ -362,6 +376,18 @@ private:
     std::vector<CallInst *> calls = getTargetAsmCalls(M, LOAD_CR3, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
+  }
+
+  void handleLoadGs(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, LOAD_GS, false);
+    Type *i16Ty = Type::getInt16Ty(M.getContext());
+    FunctionCallee ndf = getNondetFn(i16Ty, M);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *v = B.CreateCall(ndf);
+      call->replaceAllUsesWith(v);
+      call->eraseFromParent();
+    }
   }
 
   void handleSplitU64(Module &M) {
