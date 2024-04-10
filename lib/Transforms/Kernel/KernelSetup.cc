@@ -50,6 +50,7 @@ using namespace llvm;
 #define CALL2 "call ${2:P}"
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
 #define CPUID "cpuid"
+#define UD2 ".byte 0x0f,0x0b"
 
 #define GET_USER "call __get_user_nocheck_${4:P}"
 #define GET_USER_CONSTRAINTS                                                   \
@@ -248,6 +249,7 @@ private:
     handleCurrentTask(M);
     handleBarrier(M);
     handleWMB(M);
+    handleUD2(M);
     handleSplitU64(M);
     handleBuildU64(M);
     handleGetUser(M);
@@ -341,6 +343,12 @@ private:
 
   void handleWMB(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, WMB, false);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
+  }
+
+  void handleUD2(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, UD2, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
