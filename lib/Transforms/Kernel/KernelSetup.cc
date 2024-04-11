@@ -61,6 +61,8 @@ using namespace llvm;
 #define GET_USER_CONSTRAINTS                                                   \
   "={ax},={edx},={esp},0,i,{esp},~{dirflag},~{fpsr},~{flags}"
 
+#define CALL_ON_STACK "xchgl%ebx,%esp;call *$2;movl%ebx,%esp;"
+
 #define HWEIGHT                                                                \
   "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
@@ -275,6 +277,7 @@ private:
     handleSplitU64(M);
     handleBuildU64(M);
     handleGetUser(M);
+    handleCallOnStack(M);
   }
 
   std::vector<CallInst *>
@@ -1003,6 +1006,22 @@ private:
       Value *completed = B.CreateInsertValue(setLoaded, stackPointer, {2});
       call->replaceAllUsesWith(completed);
       call->eraseFromParent();
+    }
+  }
+
+  void handleCallOnStack(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL_ON_STACK, false);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *funcPtr = call->getArgOperand(1);
+      if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(funcPtr)) {
+        Function *func = cast<Function>(bitcast->getOperand(0));
+        Value *replace = B.CreateCall(func);
+        call->replaceAllUsesWith(replace);
+        call->eraseFromParent();
+      } else {
+        errs() << "TODO: handleCallOnStack\n";
+      }
     }
   }
 
