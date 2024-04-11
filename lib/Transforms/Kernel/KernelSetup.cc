@@ -53,7 +53,9 @@ using namespace llvm;
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
 #define CPUID "cpuid"
 #define UD2 ".byte 0x0f,0x0b"
+
 #define LOAD_CR3 "mov $0,%cr3"
+#define LIDT "lidt $0"
 
 #define GET_USER "call __get_user_nocheck_${4:P}"
 #define GET_USER_CONSTRAINTS                                                   \
@@ -268,6 +270,7 @@ private:
     handleWMB(M);
     handleUD2(M);
     handleLoadCr3(M);
+    handleLidt(M);
     handleLoadGs(M);
     handleSplitU64(M);
     handleBuildU64(M);
@@ -374,6 +377,12 @@ private:
 
   void handleLoadCr3(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, LOAD_CR3, false);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
+  }
+
+  void handleLidt(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, LIDT, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
