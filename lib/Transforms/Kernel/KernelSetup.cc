@@ -53,6 +53,7 @@ using namespace llvm;
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
 #define CPUID "cpuid"
 #define UD2 ".byte 0x0f,0x0b"
+#define IN "inb ${1:w},${0:b}"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -246,6 +247,7 @@ private:
     handleMull(M);
     handleDivl(M);
     handleCpuid(M);
+    handleIn(M);
 
     handleAtomic64Read(M);
     handleAtomic64Set(M);
@@ -619,6 +621,19 @@ private:
       Value *setEcx = B.CreateInsertValue(setEbx, ecx, {2});
       Value *setEdx = B.CreateInsertValue(setEcx, edx, {3});
       call->replaceAllUsesWith(setEdx);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleIn(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, IN, false);
+    Type *i8Ty = Type::getInt8Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *src = call->getArgOperand(0);
+      Value *load = B.CreateLoad(i8Ty, src);
+      Value *cast = B.CreateTrunc(load, i8Ty);
+      call->replaceAllUsesWith(cast);
       call->eraseFromParent();
     }
   }
