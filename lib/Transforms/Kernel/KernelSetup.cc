@@ -10,13 +10,10 @@
 #include "seahorn/Support/SeaDebug.h"
 
 #include <algorithm>
-#include <llvm-14/llvm/IR/Operator.h>
 #include <optional>
 #include <regex>
 
 using namespace llvm;
-
-#define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
 #define SPLIT_U64_CONSTRAINTS "={ax},={dx},A,~{dirflag},~{fpsr},~{flags}"
@@ -33,6 +30,7 @@ using namespace llvm;
 #define DECL_PREFIX "decl $0"
 #define XADDL_PREFIX "xaddl $0,$1"
 #define MOVL "movl $1,$0"
+#define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
 #define ADDL "addl $1,$0"
 #define MULL "mull $3"
 #define DIVL "divl $2"
@@ -558,14 +556,20 @@ private:
   void handleMovl(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, MOVL, false);
     LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
-      Value *dst = call->getArgOperand(0);
-      Value *src = call->getArgOperand(1);
-
-      LoadInst *load = B.CreateLoad(Type::getInt32Ty(ctx), src);
-      StoreInst *store = B.CreateStore(load, dst);
-      call->replaceAllUsesWith(store);
+      if (call->arg_size() < 2) {
+        Value *src = call->getArgOperand(0);
+        LoadInst *load = B.CreateLoad(i32Ty, src);
+        call->replaceAllUsesWith(load);
+      } else {
+        Value *src = call->getArgOperand(1);
+        Value *dst = call->getArgOperand(0);
+        LoadInst *load = B.CreateLoad(i32Ty, src);
+        StoreInst *store = B.CreateStore(load, dst);
+        call->replaceAllUsesWith(store);
+      }
       call->eraseFromParent();
     }
   }
