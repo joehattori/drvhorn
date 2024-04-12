@@ -21,6 +21,14 @@ public:
       fn->dropAllReferences();
       fn->eraseFromParent();
     }
+
+    StringRef globalVarNames[] = {
+        "sys_call_table",
+    };
+    for (StringRef name : globalVarNames) {
+      GlobalValue *v = M.getNamedValue(name);
+      v->eraseFromParent();
+    }
     return true;
   }
 

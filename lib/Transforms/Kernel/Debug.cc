@@ -23,21 +23,15 @@ public:
   bool runOnModule(Module &M) override {
     unsigned int counter = 0;
     std::map<StringRef, std::set<StringRef>> callers = getCallers(M);
-    for (const auto &caller : callers["x86_idle"]) {
+    for (const auto &caller : callers["user_mode_thread"]) {
       errs() << "Caller: " << caller.str() << "\n";
     }
-    for (const auto &caller : callers["select_idle_routine"]) {
-      errs() << "Caller: " << caller.str() << "\n";
+    for (StringRef name : {"do_int80_syscall_32", "__do_fast_syscall_32"}) {
+      errs() << name.str() << ' ' << isCalled(M, name) << "\n";
     }
     for (Function &F : M) {
       if (F.isDeclaration() || !F.hasName())
         continue;
-      if (F.getName().equals("x86_idle")) {
-        errs() << "called 0\n";
-      }
-      if (F.getName().equals("select_idle_routine")) {
-        errs() << "called 1\n";
-      }
       for (Instruction &inst : instructions(F)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
           if (InlineAsm *inlineAsm =
@@ -79,6 +73,15 @@ private:
       }
     }
     return callers;
+  }
+
+  bool isCalled(const Module &M, StringRef name) {
+    for (const Function &F : M) {
+      if (F.getName().equals(name)) {
+        return true;
+      }
+    }
+    return false;
   }
 };
 
