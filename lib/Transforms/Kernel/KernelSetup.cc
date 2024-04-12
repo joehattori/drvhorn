@@ -133,7 +133,8 @@ using namespace llvm;
   "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
   "reg=${0:k},type=(17 $| ((0) << 16)) ;.purgem extable_type_reg; "            \
   ".popsection;"
-#define RDTSC                                                                  \
+#define RDTSC "rdtsc"
+#define RDTSC_ORDERED                                                          \
   "# ALT: oldinstr2;661:;rdtsc;662:;# ALT: padding2;.skip -((((6651f-6641f) "  \
   "^ (((6651f-6641f) ^ (6652f-6642f)) & -(-((6651f-6641f) < "                  \
   "(6652f-6642f))))) - (662b-661b)) > 0) * (((6651f-6641f) ^ (((6651f-6641f) " \
@@ -917,17 +918,22 @@ private:
   }
 
   void handleRDTSC(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, RDTSC, false);
-    LLVMContext &ctx = M.getContext();
-    Type *i64Ty = Type::getInt64Ty(ctx);
-    FunctionCallee ndf = getNondetFn(i64Ty, M);
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      // return a nondet unsigned long long for now.
-      Value *ret = B.CreateCall(ndf);
-      call->replaceAllUsesWith(ret);
-      call->eraseFromParent();
-    }
+    auto replace = [&](Module &M, const std::string &targetAsm) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
+      LLVMContext &ctx = M.getContext();
+      Type *i64Ty = Type::getInt64Ty(ctx);
+      FunctionCallee ndf = getNondetFn(i64Ty, M);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        // return a nondet unsigned long long for now.
+        Value *ret = B.CreateCall(ndf);
+        call->replaceAllUsesWith(ret);
+        call->eraseFromParent();
+      }
+    };
+
+    replace(M, RDTSC);
+    replace(M, RDTSC_ORDERED);
   }
 
   void handleAtomic64Read(Module &M) {
