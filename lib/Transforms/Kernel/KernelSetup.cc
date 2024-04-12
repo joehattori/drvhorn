@@ -57,6 +57,7 @@ using namespace llvm;
 #define UD2 ".byte 0x0f,0x0b"
 #define SERIALIZE ".byte 0xf,0x1,0xe8"
 #define IRET_TO_SELF "pushfl;pushl %cs;pushl $$1f;iret;1:"
+#define SET_DEBUG_REGISTER_PREFIX "mov $0,%db"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -279,6 +280,7 @@ private:
     handleUD2(M);
     handleSerialize(M);
     handleIretToSelf(M);
+    handleDebugRegisters(M);
     handleLoadCr3(M);
     handleLidt(M);
     handleLoadGs(M);
@@ -401,6 +403,13 @@ private:
       call->replaceAllUsesWith(sp);
       call->eraseFromParent();
     }
+  }
+
+  void handleDebugRegisters(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, SET_DEBUG_REGISTER_PREFIX, true);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
   }
 
   void handleLoadCr3(Module &M) {
