@@ -54,6 +54,8 @@ using namespace llvm;
 #define CPUID "cpuid"
 #define IN "inb ${1:w},${0:b}"
 #define OUT "outb ${0:b},${1:w}"
+#define OUT_AL_0x80 "outb %al,$$0x80"
+#define OUT_AL_0xed "outb %al,$$0xed"
 
 #define UD2 ".byte 0x0f,0x0b"
 #define SERIALIZE ".byte 0xf,0x1,0xe8"
@@ -726,28 +728,27 @@ private:
   void handleIn(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, IN, false);
     Type *i8Ty = Type::getInt8Ty(M.getContext());
+    FunctionCallee ndf = getNondetFn(i8Ty, M);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
-      Value *src = call->getArgOperand(0);
-      Value *load = B.CreateLoad(i8Ty, src);
-      Value *cast = B.CreateTrunc(load, i8Ty);
-      call->replaceAllUsesWith(cast);
+      Value *replace = B.CreateCall(ndf);
+      call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
   }
 
   void handleOut(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, OUT, false);
-    Type *i8Ty = Type::getInt8Ty(M.getContext());
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *src = call->getArgOperand(0);
-      Value *dst = call->getArgOperand(1);
-      Value *dstPtr = B.CreateIntToPtr(dst, i8Ty->getPointerTo());
-      Value *store = B.CreateStore(src, dstPtr);
-      call->replaceAllUsesWith(store);
+    for (CallInst *call : calls)
       call->eraseFromParent();
-    }
+
+    calls = getTargetAsmCalls(M, OUT_AL_0x80, false);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
+
+    calls = getTargetAsmCalls(M, OUT_AL_0xed, false);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
   }
 
   void handleXchgl(Module &M) {
