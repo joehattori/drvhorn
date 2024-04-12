@@ -20,6 +20,7 @@ using namespace llvm;
 #define BUILD_U64_CONSTRAINTS "=A,{ax},{dx},~{dirflag},~{fpsr},~{flags}"
 #define ARCH_ATOMIC64_XCHG_CONSTRAINTS                                         \
   "=&A,i,{si},{bx},{cx},~{memory},~{dirflag},~{fpsr},~{flags}"
+#define OPTIMIZER_HIDE_VAR_CONSTRAINTS "=r,0,~{dirflag},~{fpsr},~{flags}"
 
 #define BIT_TEST_PREFIX "btl $2,$1"
 #define BIT_TEST_AND_SET_PREFIX "btsl $1,$0"
@@ -314,6 +315,7 @@ private:
     handleBuildU64(M);
     handleGetUser(M);
     handleCallOnStack(M);
+    handleOptimizerHideVar(M);
   }
 
   std::vector<CallInst *>
@@ -1169,6 +1171,16 @@ private:
       } else {
         errs() << "TODO: handleCallOnStack\n";
       }
+    }
+  }
+
+  void handleOptimizerHideVar(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, "", false, OPTIMIZER_HIDE_VAR_CONSTRAINTS);
+    for (CallInst *call : calls) {
+      Value *v = call->getArgOperand(0);
+      call->replaceAllUsesWith(v);
+      call->eraseFromParent();
     }
   }
 
