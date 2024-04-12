@@ -54,8 +54,10 @@ using namespace llvm;
 #define CPUID "cpuid"
 #define IN "inb ${1:w},${0:b}"
 #define OUT "outb ${0:b},${1:w}"
+
 #define UD2 ".byte 0x0f,0x0b"
 #define SERIALIZE ".byte 0xf,0x1,0xe8"
+#define IRET_TO_SELF "pushfl;pushl %cs;pushl $$1f;iret;1:"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -277,6 +279,7 @@ private:
     handleWMB(M);
     handleUD2(M);
     handleSerialize(M);
+    handleIretToSelf(M);
     handleLoadCr3(M);
     handleLidt(M);
     handleLoadGs(M);
@@ -388,6 +391,17 @@ private:
     std::vector<CallInst *> calls = getTargetAsmCalls(M, SERIALIZE, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
+  }
+
+  void handleIretToSelf(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, IRET_TO_SELF, false);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      // iret_to_self() pops back the stack pointer.
+      Value *sp = call->getArgOperand(0);
+      call->replaceAllUsesWith(sp);
+      call->eraseFromParent();
+    }
   }
 
   void handleLoadCr3(Module &M) {
