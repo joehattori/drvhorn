@@ -133,6 +133,17 @@ using namespace llvm;
   "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
   "reg=${0:k},type=(17 $| ((0) << 16)) ;.purgem extable_type_reg; "            \
   ".popsection;"
+#define RDTSC                                                                  \
+  "# ALT: oldinstr2;661:;rdtsc;662:;# ALT: padding2;.skip -((((6651f-6641f) "  \
+  "^ (((6651f-6641f) ^ (6652f-6642f)) & -(-((6651f-6641f) < "                  \
+  "(6652f-6642f))))) - (662b-661b)) > 0) * (((6651f-6641f) ^ (((6651f-6641f) " \
+  "^ (6652f-6642f)) & -(-((6651f-6641f) < (6652f-6642f))))) - "                \
+  "(662b-661b)),0x90;663:;.pushsection .altinstructions,\"a\"; .long 661b "    \
+  "- .; .long 6641f - .; .word ( 3*32+18); .byte 663b-661b; .byte "            \
+  "6651f-6641f; .long 661b - .; .long 6642f - .; .word ( 1*32+27); .byte "     \
+  "663b-661b; .byte 6652f-6642f;.popsection;.pushsection "                     \
+  ".altinstr_replacement,\"ax\";# ALT: replacement 1;6641:;lfence; "           \
+  "rdtsc;6651:;# ALT: replacement 2;6642:;rdtscp;6652:;.popsection;"
 
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 
@@ -280,6 +291,7 @@ private:
     handleNativeWriteMSRSafe(M);
     handleRDMSR(M);
     handleWRMSR(M);
+    handleRDTSC(M);
     handleArrayIndexMaskNoSpec(M);
 
     handleCurrentTask(M);
@@ -900,6 +912,20 @@ private:
       // return 0 (success) for now.
       Value *zero = Constant::getNullValue(i32Ty);
       call->replaceAllUsesWith(zero);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleRDTSC(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, RDTSC, false);
+    LLVMContext &ctx = M.getContext();
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    FunctionCallee ndf = getNondetFn(i64Ty, M);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      // return a nondet unsigned long long for now.
+      Value *ret = B.CreateCall(ndf);
+      call->replaceAllUsesWith(ret);
       call->eraseFromParent();
     }
   }
