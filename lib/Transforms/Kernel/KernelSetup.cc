@@ -58,6 +58,7 @@ using namespace llvm;
 #define SERIALIZE ".byte 0xf,0x1,0xe8"
 #define IRET_TO_SELF "pushfl;pushl %cs;pushl $$1f;iret;1:"
 #define SET_DEBUG_REGISTER_PREFIX "mov $0,%db"
+#define NOP "rep; nop"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -71,12 +72,14 @@ using namespace llvm;
 #define HWEIGHT                                                                \
   "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
-  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection .altinstructions,'a'; "  \
+  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection "                        \
+  ".altinstructions,\"a\"; "                                                   \
   ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
-  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,'ax';# ALT: "    \
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
   "replacement 1;6641:;popcntl $1,$0;6651:;.popsection;"
 #define NATIVE_READ_MSR_SAFE                                                   \
-  "1: rdmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
+  "1: rdmsr ; xor $0,$0;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; "    \
+  ".long "                                                                     \
   "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
   ".Lfound,0;.set .Lregnr,0;.irp "                                             \
   "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
@@ -85,10 +88,11 @@ using namespace llvm;
   "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
   "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
   "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
-  "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
+  "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
   "reg=$0,type=11 ;.purgem extable_type_reg; .popsection;"
 #define NATIVE_WRITE_MSR_SAFE                                                  \
-  "1: wrmsr ; xor $0,$0;2:; .pushsection '__ex_table','a'; .balign 4; .long "  \
+  "1: wrmsr ; xor $0,$0;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; "    \
+  ".long "                                                                     \
   "(1b) - .; .long (2b) - .;.macro extable_type_reg type:req reg:req;.set "    \
   ".Lfound,0;.set .Lregnr,0;.irp "                                             \
   "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
@@ -97,23 +101,27 @@ using namespace llvm;
   "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
   "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
   "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
-  "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
+  "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
   "reg=$0,type=10 ;.purgem extable_type_reg; .popsection;"
 #define RDMSR                                                                  \
-  "1: rdmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
+  "1: rdmsr;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; .long (1b) - "   \
+  ".; "                                                                        \
   ".long (2b) - .; .long 9 ; .popsection;"
 #define WRMSR                                                                  \
-  "1: wrmsr;2:; .pushsection '__ex_table','a'; .balign 4; .long (1b) - .; "    \
+  "1: wrmsr;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; .long (1b) - "   \
+  ".; "                                                                        \
   ".long (2b) - .; .long 8 ; .popsection;"
 #define WMB                                                                    \
   "# ALT: oldnstr;661:;lock; addl $$0,-4(%esp);662:;# ALT: padding;.skip "     \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
-  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection .altinstructions,'a'; "  \
+  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection "                        \
+  ".altinstructions,\"a\"; "                                                   \
   ".long 661b - .; .long 6641f - .; .word ( 0*32+26); .byte 663b-661b; .byte " \
-  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,'ax';# ALT: "    \
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
   "replacement 1;6641:;sfence;6651:;.popsection;"
 #define LOAD_GS                                                                \
-  "1:movl ${0:k},%gs; .pushsection '__ex_table','a'; .balign 4; .long (1b) "   \
+  "1:movl ${0:k},%gs; .pushsection \"__ex_table\",\"a\"; .balign 4; .long "    \
+  "(1b) "                                                                      \
   "- .; .long (1b) - .;.macro extable_type_reg type:req reg:req;.set "         \
   ".Lfound,0;.set .Lregnr,0;.irp "                                             \
   "rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15;.ifc "     \
@@ -122,7 +130,7 @@ using namespace llvm;
   "rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d;." \
   "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
   "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
-  "'extable_type_reg: bad register argument';.endif;.endm;extable_type_reg "   \
+  "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
   "reg=${0:k},type=(17 $| ((0) << 16)) ;.purgem extable_type_reg; "            \
   ".popsection;"
 
@@ -281,6 +289,7 @@ private:
     handleSerialize(M);
     handleIretToSelf(M);
     handleDebugRegisters(M);
+    handleNop(M);
     handleLoadCr3(M);
     handleLidt(M);
     handleLoadGs(M);
@@ -305,9 +314,7 @@ private:
       std::regex commaSpace(",\\s+");
       s = std::regex_replace(s, commaSpace, ",");
       std::regex spacesBeforeReg("\\s+\\$");
-      s = std::regex_replace(s, spacesBeforeReg, " $");
-      std::regex quote("\"");
-      return std::regex_replace(s, quote, "'");
+      return std::regex_replace(s, spacesBeforeReg, " $");
     };
 
     auto isTargetAsm = [&](const CallInst *call) {
@@ -408,6 +415,12 @@ private:
   void handleDebugRegisters(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, SET_DEBUG_REGISTER_PREFIX, true);
+    for (CallInst *call : calls)
+      call->eraseFromParent();
+  }
+
+  void handleNop(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, NOP, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
