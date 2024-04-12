@@ -35,6 +35,7 @@ using namespace llvm;
 #define ADDL "addl $1,$0"
 #define MULL "mull $3"
 #define DIVL "divl $2"
+#define ORB "orb ${1:b},$0"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
 #define CMPXCHGL31_PREFIX "cmpxchgl $3,$1"
 #define CMPXCHG8B "cmpxchg8b $1"
@@ -270,6 +271,7 @@ private:
     handleAddl(M);
     handleMull(M);
     handleDivl(M);
+    handleOr(M);
     handleCpuid(M);
     handleIn(M);
     handleOut(M);
@@ -671,6 +673,27 @@ private:
       Value *setQuotient = B.CreateInsertValue(empty, quotient, {0});
       Value *replace = B.CreateInsertValue(setQuotient, remainder, {1});
       call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleOr(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, ORB, false);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *dst = call->getArgOperand(0);
+      Value *src = call->getArgOperand(1);
+
+      if (PointerType *dstTy = dyn_cast<PointerType>(dst->getType())) {
+        if (src->getType()->isIntegerTy()) {
+          // LHS value does not exists.
+          Value *loaded = B.CreateLoad(dstTy->getElementType(), dst);
+          Value *or_ = B.CreateOr(loaded, src);
+          B.CreateStore(or_, dst);
+        }
+      } else {
+        errs() << "TODO: handleOr\n";
+      }
       call->eraseFromParent();
     }
   }
