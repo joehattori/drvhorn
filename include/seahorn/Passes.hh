@@ -114,6 +114,7 @@ llvm::Pass *createCrabLowerIsDerefPass();
 
 llvm::Pass *createAcpiSetupPass(std::string entry);
 llvm::Pass *createKernelSetupPass();
+llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();
 } // namespace seahorn
 

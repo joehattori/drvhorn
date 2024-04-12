@@ -514,6 +514,7 @@ int main(int argc, char **argv) {
       pm_wrapper.add(llvm::createGlobalDCEPass());
       pm_wrapper.add(llvm::createDeadArgEliminationPass());
       pm_wrapper.add(llvm::createAggressiveDCEPass());
+      pm_wrapper.add(seahorn::createRemoveUnnecessaryFunctionsPass());
       pm_wrapper.add(seahorn::createKernelDebugPass());
     }
 
