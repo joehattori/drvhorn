@@ -29,6 +29,7 @@ using namespace llvm;
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
 #define XADDL_PREFIX "xaddl $0,$1"
+#define MOVB "movb $1,$0"
 #define MOVL "movl $1,$0"
 #define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
 #define ADDL "addl $1,$0"
@@ -244,7 +245,7 @@ private:
     handleIncl(M);
     handleDecl(M);
     handleXAddl(M);
-    handleMovl(M);
+    handleMov(M);
     handleAddl(M);
     handleMull(M);
     handleDivl(M);
@@ -553,25 +554,36 @@ private:
     }
   }
 
-  void handleMovl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, MOVL, false);
-    LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      if (call->arg_size() < 2) {
-        Value *src = call->getArgOperand(0);
-        LoadInst *load = B.CreateLoad(i32Ty, src);
-        call->replaceAllUsesWith(load);
-      } else {
-        Value *src = call->getArgOperand(1);
-        Value *dst = call->getArgOperand(0);
-        LoadInst *load = B.CreateLoad(i32Ty, src);
-        StoreInst *store = B.CreateStore(load, dst);
-        call->replaceAllUsesWith(store);
+  void handleMov(Module &M) {
+    auto replaceMov = [&](Module &M, const std::string &targetAsm) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *replace;
+        if (call->arg_size() < 2) {
+          Value *src = call->getArgOperand(0);
+          if (PointerType *srcTy = dyn_cast<PointerType>(src->getType())) {
+            replace = B.CreateLoad(srcTy->getElementType(), src);
+          } else {
+            replace = src;
+          }
+        } else {
+          Value *src = call->getArgOperand(1);
+          Value *dst = call->getArgOperand(0);
+          if (PointerType *srcTy = dyn_cast<PointerType>(src->getType())) {
+            LoadInst *load = B.CreateLoad(srcTy->getElementType(), src);
+            replace = B.CreateStore(load, dst);
+          } else {
+            replace = B.CreateStore(src, dst);
+          }
+        }
+        call->replaceAllUsesWith(replace);
+        call->eraseFromParent();
       }
-      call->eraseFromParent();
-    }
+    };
+
+    replaceMov(M, MOVB);
+    replaceMov(M, MOVL);
   }
 
   void handleAddl(Module &M) {
