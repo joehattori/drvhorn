@@ -54,6 +54,7 @@ using namespace llvm;
 #define CPUID "cpuid"
 #define UD2 ".byte 0x0f,0x0b"
 #define IN "inb ${1:w},${0:b}"
+#define OUT "outb ${0:b},${1:w}"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -248,6 +249,7 @@ private:
     handleDivl(M);
     handleCpuid(M);
     handleIn(M);
+    handleOut(M);
 
     handleAtomic64Read(M);
     handleAtomic64Set(M);
@@ -634,6 +636,20 @@ private:
       Value *load = B.CreateLoad(i8Ty, src);
       Value *cast = B.CreateTrunc(load, i8Ty);
       call->replaceAllUsesWith(cast);
+      call->eraseFromParent();
+    }
+  }
+
+  void handleOut(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, OUT, false);
+    Type *i8Ty = Type::getInt8Ty(M.getContext());
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *src = call->getArgOperand(0);
+      Value *dst = call->getArgOperand(1);
+      Value *dstPtr = B.CreateIntToPtr(dst, i8Ty->getPointerTo());
+      Value *store = B.CreateStore(src, dstPtr);
+      call->replaceAllUsesWith(store);
       call->eraseFromParent();
     }
   }
