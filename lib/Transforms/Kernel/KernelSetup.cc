@@ -313,9 +313,9 @@ private:
     handleLoadGs(M);
     handleSplitU64(M);
     handleBuildU64(M);
-    handleGetUser(M);
     handleCallOnStack(M);
     handleOptimizerHideVar(M);
+    // handleGetUser(M);
   }
 
   std::vector<CallInst *>
@@ -382,13 +382,17 @@ private:
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, MOVL_POSITION_INDEPENDENT, false);
     for (CallInst *call : calls) {
+      IRBuilder<> B(call);
       Value *arg = call->getArgOperand(0);
       if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(arg)) {
         Value *task = bitcast->getOperand(0);
         if (isPtrToPtrToTask(bitcast->getSrcTy()) &&
             isPtrToPtrToTask(bitcast->getDestTy()) &&
             task->getName().equals("current_task")) {
-          call->replaceAllUsesWith(task);
+          Value *currentTask =
+              B.CreateLoad(task->getType()->getPointerElementType(), task);
+          Value *cast = B.CreatePtrToInt(currentTask, B.getInt32Ty());
+          call->replaceAllUsesWith(cast);
           call->eraseFromParent();
         }
       }
@@ -471,11 +475,12 @@ private:
   void handleSplitU64(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, "", false, SPLIT_U64_CONSTRAINTS);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       Value *v = call->getArgOperand(0);
       IRBuilder<> B(call);
-      Value *low = B.CreateTrunc(v, B.getInt32Ty());
-      Value *high = B.CreateLShr(v, 32);
+      Value *low = B.CreateTrunc(v, i32Ty);
+      Value *high = B.CreateTrunc(B.CreateLShr(v, 32), i32Ty);
       Value *empty = UndefValue::get(call->getType());
       Value *setLow = B.CreateInsertValue(empty, low, {0});
       Value *replace = B.CreateInsertValue(setLow, high, {1});
@@ -498,24 +503,23 @@ private:
     }
   }
 
-  Value *bitAddr(IRBuilder<> &B, Value *base, Value *offset) {
-    Value *idx = B.CreateAShr(offset, B.getInt32(8));
-    return B.CreateAdd(base, idx);
-  }
-
   void handleBitTest(Module &M) {
-    LLVMContext &ctx = M.getContext();
     std::vector<CallInst *> calls = getTargetAsmCalls(M, BIT_TEST_PREFIX, true);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
-      Value *addr = call->getArgOperand(1);
-      Value *offset = call->getArgOperand(2);
+      Value *base = call->getArgOperand(0);
+      Value *offset = call->getArgOperand(1);
 
-      Value *pos = bitAddr(B, addr, offset);
-      Value *loaded = B.CreateLoad(Type::getInt1Ty(ctx), pos);
-      Value *bit = B.CreateAnd(loaded, 1);
+      Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
+      Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
+      Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
+      Value *load = B.CreateLoad(i32Ty, byte);
+      Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+      Value *bit = B.CreateAnd(load, mask);
       Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
-      call->replaceAllUsesWith(isSet);
+      Value *replace = B.CreateZExt(isSet, call->getType());
+      call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
   }
@@ -523,108 +527,162 @@ private:
   void handleBitTestAndSet(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, BIT_TEST_AND_SET_PREFIX, true);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
-      Value *addr = call->getArgOperand(0);
+      Value *base = call->getArgOperand(0);
       Value *offset = call->getArgOperand(1);
 
-      Value *pos = bitAddr(B, addr, offset);
-      Value *old =
-          B.CreateAtomicRMW(AtomicRMWInst::Or, pos, B.getInt1(1), MaybeAlign(),
-                            AtomicOrdering::SequentiallyConsistent);
-      call->replaceAllUsesWith(old);
+      Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
+      Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
+      Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
+      Value *load = B.CreateLoad(i32Ty, byte);
+      Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+      Value *bit = B.CreateAnd(load, mask);
+      Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
+      B.CreateStore(B.CreateOr(load, mask), byte);
+      if (!call->getType()->isVoidTy()) {
+        Value *replace = B.CreateZExt(isSet, call->getType());
+        call->replaceAllUsesWith(replace);
+      }
       call->eraseFromParent();
     }
   }
 
   void handleBitTestAndReset(Module &M) {
-    auto replaceBtrl = [&](Module &M, const std::string &targetAsmPrefix,
-                           unsigned addrIdx, unsigned offIdx) {
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    auto replaceBtrl = [this, &M, i32Ty](const std::string &targetAsmPrefix,
+                                         unsigned addrIdx, unsigned offIdx) {
       std::vector<CallInst *> calls =
           getTargetAsmCalls(M, targetAsmPrefix, true);
       for (CallInst *call : calls) {
         IRBuilder<> B(call);
-        Value *addr = call->getArgOperand(addrIdx);
-        Value *offset = call->getArgOperand(offIdx);
+        Value *base = call->getArgOperand(0);
+        Value *offset = call->getArgOperand(1);
 
-        Value *pos = bitAddr(B, addr, offset);
-        Value *old = B.CreateAtomicRMW(AtomicRMWInst::And, pos, B.getInt1(0),
-                                       MaybeAlign(),
-                                       AtomicOrdering::SequentiallyConsistent);
-        call->replaceAllUsesWith(old);
+        Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
+        Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
+        Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
+        Value *load = B.CreateLoad(i32Ty, byte);
+        Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+        Value *bit = B.CreateAnd(load, mask);
+        Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
+        Value *flipped = B.CreateXor(mask, B.getInt32(0xffffffff));
+        B.CreateStore(B.CreateAnd(load, flipped), byte);
+        if (!call->getType()->isVoidTy()) {
+          Value *replace = B.CreateZExt(isSet, call->getType());
+          call->replaceAllUsesWith(replace);
+        }
         call->eraseFromParent();
       }
     };
 
-    replaceBtrl(M, BIT_TEST_AND_RESET_1_0_PREFIX, 1, 0);
-    replaceBtrl(M, BIT_TEST_AND_RESET_2_1_PREFIX, 2, 1);
+    replaceBtrl(BIT_TEST_AND_RESET_1_0_PREFIX, 1, 0);
+    replaceBtrl(BIT_TEST_AND_RESET_2_1_PREFIX, 2, 1);
   }
 
   void handleIncl(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, INCL, false);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
-      Value *inc = B.CreateAdd(val, B.getInt32(1));
-      call->replaceAllUsesWith(inc);
+      if (val->getType()->isPointerTy()) {
+        Value *load = B.CreateLoad(i32Ty, val);
+        Value *inc = B.CreateAdd(load, B.getInt32(1));
+        B.CreateStore(inc, val);
+        call->replaceAllUsesWith(inc);
+      } else {
+        errs() << "TODO: handleIncl\n";
+      }
       call->eraseFromParent();
     }
   }
 
   void handleDecl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, DECL_PREFIX, true);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, INCL, false);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
-      Value *dec = B.CreateSub(val, B.getInt32(1));
-      call->replaceAllUsesWith(dec);
+      if (val->getType()->isPointerTy()) {
+        Value *load = B.CreateLoad(i32Ty, val);
+        Value *dec = B.CreateSub(load, B.getInt32(1));
+        B.CreateStore(dec, val);
+        call->replaceAllUsesWith(dec);
+      } else {
+        errs() << "TODO: handleDecl\n";
+      }
       call->eraseFromParent();
     }
   }
 
   void handleXAddl(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, XADDL_PREFIX, true);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
-      Value *ptr = call->getArgOperand(0);
-      Value *inc = call->getArgOperand(1);
-      Value *old = B.CreateAtomicRMW(AtomicRMWInst::Add, ptr, inc, MaybeAlign(),
-                                     AtomicOrdering::SequentiallyConsistent);
-      call->replaceAllUsesWith(old);
+      Value *src = call->getArgOperand(0);
+      Value *dst = call->getArgOperand(1);
+      Value *load = B.CreateLoad(i32Ty, src);
+      Value *add = B.CreateAdd(load, dst);
+      B.CreateStore(dst, src);
+      if (dst->getType()->isPointerTy()) {
+        errs() << "TODO: handleXAddl\n";
+      }
+      call->replaceAllUsesWith(add);
       call->eraseFromParent();
     }
   }
 
   void handleMov(Module &M) {
-    auto replaceMov = [&](Module &M, const std::string &targetAsm) {
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    Type *i8Ty = Type::getInt8Ty(M.getContext());
+
+    auto replaceMov = [this, &M](const std::string &targetAsm, Type *intTy) {
       std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
       for (CallInst *call : calls) {
         IRBuilder<> B(call);
         Value *replace;
-        if (call->arg_size() < 2) {
-          Value *src = call->getArgOperand(0);
-          if (PointerType *srcTy = dyn_cast<PointerType>(src->getType())) {
-            replace = B.CreateLoad(srcTy->getElementType(), src);
+        if (call->getType()->isVoidTy()) {
+          Value *src = call->getArgOperand(1);
+          Value *dst = call->getArgOperand(0);
+          Type *srcType = src->getType();
+          Type *dstType = dst->getType();
+          if (srcType->isPointerTy()) {
+            LoadInst *load =
+                B.CreateLoad(srcType->getPointerElementType(), src);
+            B.CreateStore(load, dst);
+            replace = load;
           } else {
+            Type *innerType = dstType->getPointerElementType();
+            if (innerType->isPointerTy() && srcType->isIntegerTy()) {
+              src = B.CreateIntToPtr(src, innerType);
+            } else if (srcType != innerType) {
+              errs() << "TODO: type mismatch in handleMov\n";
+            }
+            B.CreateStore(src, dst);
             replace = src;
           }
         } else {
-          Value *src = call->getArgOperand(1);
-          Value *dst = call->getArgOperand(0);
-          if (PointerType *srcTy = dyn_cast<PointerType>(src->getType())) {
-            LoadInst *load = B.CreateLoad(srcTy->getElementType(), src);
-            replace = B.CreateStore(load, dst);
+          Value *src = call->getArgOperand(0);
+          Type *srcType = src->getType();
+          if (srcType->isPointerTy()) {
+            replace = B.CreateLoad(srcType->getPointerElementType(), src);
           } else {
-            replace = B.CreateStore(src, dst);
+            replace = src;
           }
+        }
+        if (replace->getType()->isPointerTy()) {
+          replace = B.CreatePtrToInt(replace, intTy);
         }
         call->replaceAllUsesWith(replace);
         call->eraseFromParent();
       }
     };
 
-    replaceMov(M, MOVB);
-    replaceMov(M, MOVL);
+    replaceMov(MOVB, i8Ty);
+    replaceMov(MOVL, i32Ty);
   }
 
   void handleAddl(Module &M) {
@@ -633,23 +691,31 @@ private:
       IRBuilder<> B(call);
       Value *dst = call->getArgOperand(0);
       Value *src = call->getArgOperand(1);
+      Type *dstType = dst->getType();
+      if (dstType->isPointerTy()) {
+        Value *load = B.CreateLoad(dstType->getPointerElementType(), dst);
+        Value *add = B.CreateAdd(load, src);
+        B.CreateStore(add, dst);
 
-      Value *add = B.CreateAdd(dst, src);
-      call->replaceAllUsesWith(add);
-      call->eraseFromParent();
+        call->replaceAllUsesWith(add);
+        call->eraseFromParent();
+      } else {
+        errs() << "TODO: handleAddl\n";
+      }
     }
   }
 
   void handleMull(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, MULL, false);
+    Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *v1 = B.CreateZExt(call->getArgOperand(0), B.getInt64Ty());
       Value *v2 = B.CreateZExt(call->getArgOperand(1), B.getInt64Ty());
 
       Value *mul = B.CreateMul(v1, v2);
-      Value *low = B.CreateTrunc(mul, B.getInt32Ty());
-      Value *upper = B.CreateLShr(mul, 32);
+      Value *low = B.CreateTrunc(mul, i32Ty);
+      Value *upper = B.CreateTrunc(B.CreateLShr(mul, 32), i32Ty);
       StructType *type = cast<StructType>(call->getType());
       Value *empty = UndefValue::get(type);
       Value *setLow = B.CreateInsertValue(empty, low, {0});
@@ -661,7 +727,9 @@ private:
 
   void handleDivl(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, DIVL, false);
-    Type *i64Ty = Type::getInt64Ty(M.getContext());
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *i64Ty = Type::getInt64Ty(ctx);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *divisor = B.CreateZExt(call->getArgOperand(0), i64Ty);
@@ -669,8 +737,8 @@ private:
       Value *upper = B.CreateZExt(call->getArgOperand(2), i64Ty);
 
       Value *v = B.CreateOr(B.CreateShl(upper, 32), low);
-      Value *quotient = B.CreateUDiv(v, divisor);
-      Value *remainder = B.CreateURem(v, divisor);
+      Value *quotient = B.CreateTrunc(B.CreateUDiv(v, divisor), i32Ty);
+      Value *remainder = B.CreateTrunc(B.CreateURem(v, divisor), i32Ty);
 
       StructType *type = cast<StructType>(call->getType());
       Value *empty = UndefValue::get(type);
@@ -687,12 +755,15 @@ private:
       IRBuilder<> B(call);
       Value *dst = call->getArgOperand(0);
       Value *src = call->getArgOperand(1);
+      Type *dstType = dst->getType();
 
-      if (PointerType *dstTy = dyn_cast<PointerType>(dst->getType())) {
+      if (dstType->isPointerTy()) {
         if (src->getType()->isIntegerTy()) {
           // LHS value does not exists.
-          Value *loaded = B.CreateLoad(dstTy->getElementType(), dst);
-          Value *or_ = B.CreateOr(loaded, src);
+          Type *innerType = dstType->getPointerElementType();
+          Value *cast = B.CreateIntCast(src, innerType, true);
+          Value *loaded = B.CreateLoad(innerType, dst);
+          Value *or_ = B.CreateOr(loaded, cast);
           B.CreateStore(or_, dst);
         }
       } else {
@@ -707,9 +778,6 @@ private:
     LLVMContext &ctx = M.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
     FunctionCallee ndf = getNondetFn(i32Ty, M);
-    StructType *cpuidRetType = StructType::create(ctx);
-    cpuidRetType->setBody({i32Ty, i32Ty, i32Ty, i32Ty});
-    // return nondet values for eax, ebx, ecx, and edx
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *eax = B.CreateCall(ndf);
@@ -717,6 +785,7 @@ private:
       Value *ecx = B.CreateCall(ndf);
       Value *edx = B.CreateCall(ndf);
 
+      Type *cpuidRetType = call->getType();
       Value *empty = UndefValue::get(cpuidRetType);
       Value *setEax = B.CreateInsertValue(empty, eax, {0});
       Value *setEbx = B.CreateInsertValue(setEax, ebx, {1});
@@ -760,29 +829,19 @@ private:
       IRBuilder<> B(call);
       Value *src = call->getArgOperand(0);
       Value *dst = call->getArgOperand(1);
-      bool isSrcPtr = src->getType()->isPointerTy();
-      bool isDstPtr = dst->getType()->isPointerTy();
-      if (isSrcPtr && !isDstPtr) {
-        Value *loaded = B.CreateLoad(dst->getType(), src);
-        B.CreateStore(dst, src);
-        call->replaceAllUsesWith(loaded);
-        call->eraseFromParent();
-      } else if (isSrcPtr && isDstPtr) {
-        Value *loadedSrc = B.CreateLoad(src->getType(), src);
-        Value *loadedDst = B.CreateLoad(dst->getType(), dst);
-        B.CreateStore(loadedDst, src);
-        B.CreateStore(loadedSrc, dst);
-        call->replaceAllUsesWith(loadedSrc);
-        call->eraseFromParent();
-      } else {
+      if (src->getType() != dst->getType()->getPointerTo()) {
         errs() << "TODO: handleXchgl\n";
       }
+      Value *loaded = B.CreateLoad(dst->getType(), src);
+      B.CreateStore(dst, src);
+      call->replaceAllUsesWith(loaded);
+      call->eraseFromParent();
     }
   }
 
   void handleCmpxchgl(Module &M) {
-    auto replaceCmpxchg = [&](Module &M, const std::string &targetAsm,
-                              bool isPrefix, int cmpIdx) {
+    auto replaceCmpxchg = [this, &M](const std::string &targetAsm,
+                                     bool isPrefix, int cmpIdx) {
       std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, isPrefix);
       LLVMContext &ctx = M.getContext();
       Type *i8Ty = Type::getInt8Ty(ctx);
@@ -798,20 +857,26 @@ private:
 
         // convert {ty, i1} to {i8, ty}
         Value *val = B.CreateExtractValue(inst, {0});
-        Value *isSuccess = B.CreateExtractValue(inst, {1});
-        StructType *type = cast<StructType>(call->getType());
-        Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
-        Value *empty = UndefValue::get(type);
-        Value *converted = B.CreateInsertValue(empty, castedSuccess, {0});
-        Value *completed = B.CreateInsertValue(converted, val, {1});
 
-        call->replaceAllUsesWith(completed);
+        Value *replace;
+        Type *type = call->getType();
+        if (type->isStructTy()) {
+          Value *empty = UndefValue::get(type);
+          Value *isSuccess = B.CreateExtractValue(inst, {1});
+          Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
+          Value *converted = B.CreateInsertValue(empty, castedSuccess, {0});
+          replace = B.CreateInsertValue(converted, val, {1});
+        } else {
+          replace = val;
+        }
+
+        call->replaceAllUsesWith(replace);
         call->eraseFromParent();
       }
     };
 
-    replaceCmpxchg(M, CMPXCHGL31_PREFIX, true, 3);
-    replaceCmpxchg(M, CMPXCHGL21, false, 2);
+    replaceCmpxchg(CMPXCHGL31_PREFIX, true, 3);
+    replaceCmpxchg(CMPXCHGL21, false, 2);
   }
 
   void handleCmpxchg8b(Module &M) {
@@ -822,12 +887,14 @@ private:
       Value *lower = call->getArgOperand(1);
       Value *upper = call->getArgOperand(2);
       Value *prev = call->getArgOperand(3);
-      Value *shiftedUpper = B.CreateShl(upper, B.getInt64(32));
+
+      Value *shiftedUpper = B.CreateShl(upper, 32);
       Value *new_ = B.CreateOr(shiftedUpper, lower);
-      AtomicCmpXchgInst *cmpxchg = B.CreateAtomicCmpXchg(
+      Value *atomic = B.CreateAtomicCmpXchg(
           val, prev, new_, MaybeAlign(), AtomicOrdering::SequentiallyConsistent,
           AtomicOrdering::SequentiallyConsistent);
-      call->replaceAllUsesWith(cmpxchg);
+      Value *replace = B.CreateExtractValue(atomic, {0});
+      call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
   }
@@ -905,12 +972,10 @@ private:
   void handleNativeWriteMSRSafe(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, NATIVE_WRITE_MSR_SAFE, false);
-    LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt8Ty(ctx);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       // return 0 (success) for now.
-      Value *zero = Constant::getNullValue(i32Ty);
+      Value *zero = B.getInt32(0);
       call->replaceAllUsesWith(zero);
       call->eraseFromParent();
     }
@@ -918,8 +983,7 @@ private:
 
   void handleRDMSR(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, RDMSR, false);
-    LLVMContext &ctx = M.getContext();
-    Type *i64Ty = Type::getInt64Ty(ctx);
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
     FunctionCallee ndf = getNondetFn(i64Ty, M);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
@@ -932,22 +996,21 @@ private:
 
   void handleWRMSR(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, WRMSR, false);
-    LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt8Ty(ctx);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       // return 0 (success) for now.
-      Value *zero = Constant::getNullValue(i32Ty);
+      Value *zero = B.getInt32(0);
       call->replaceAllUsesWith(zero);
       call->eraseFromParent();
     }
   }
 
   void handleRDTSC(Module &M) {
-    auto replace = [&](Module &M, const std::string &targetAsm) {
+    LLVMContext &ctx = M.getContext();
+    Type *i64Ty = Type::getInt64Ty(ctx);
+
+    auto replace = [this, &M, i64Ty](const std::string &targetAsm) {
       std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
-      LLVMContext &ctx = M.getContext();
-      Type *i64Ty = Type::getInt64Ty(ctx);
       FunctionCallee ndf = getNondetFn(i64Ty, M);
       for (CallInst *call : calls) {
         IRBuilder<> B(call);
@@ -958,8 +1021,8 @@ private:
       }
     };
 
-    replace(M, RDTSC);
-    replace(M, RDTSC_ORDERED);
+    replace(RDTSC);
+    replace(RDTSC_ORDERED);
   }
 
   void handleAtomic64Read(Module &M) {
@@ -989,6 +1052,7 @@ private:
     LLVMContext &ctx = M.getContext();
     StructType *atomic64Type =
         StructType::getTypeByName(ctx, "struct.atomic64_t");
+    Type *i64Ty = Type::getInt64Ty(ctx);
     for (CallInst *call : calls) {
       if (!call->getNumOperands())
         continue;
@@ -1000,6 +1064,9 @@ private:
       IRBuilder<> B(call);
       Value *counterPtr =
           B.CreateStructGEP(atomic64Type, v, ATOMIC64_COUNTER_INDEX);
+      if (!i->getType()->isIntegerTy(64)) {
+        i = B.CreateZExt(i, i64Ty);
+      }
       Value *set = B.CreateStore(i, counterPtr);
       call->replaceAllUsesWith(set);
       call->eraseFromParent();
@@ -1026,7 +1093,11 @@ private:
       Value *counter = B.CreateLoad(i64Ty, counterPtr);
       Value *add = B.CreateAdd(counter, i);
       B.CreateStore(add, counterPtr);
-      call->replaceAllUsesWith(add);
+
+      Value *empty = UndefValue::get(call->getType());
+      Value *setResult = B.CreateInsertValue(empty, add, {0});
+      Value *setCounter = B.CreateInsertValue(setResult, v, {1});
+      call->replaceAllUsesWith(setCounter);
       call->eraseFromParent();
     }
   }
@@ -1051,7 +1122,11 @@ private:
       Value *counter = B.CreateLoad(i64Ty, counterPtr);
       Value *sub = B.CreateSub(counter, i);
       B.CreateStore(sub, counterPtr);
-      call->replaceAllUsesWith(sub);
+
+      Value *empty = UndefValue::get(call->getType());
+      Value *setResult = B.CreateInsertValue(empty, sub, {0});
+      Value *setCounter = B.CreateInsertValue(setResult, v, {1});
+      call->replaceAllUsesWith(setCounter);
       call->eraseFromParent();
     }
   }
@@ -1128,9 +1203,9 @@ private:
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, ARRAY_INDEX_MASK_NOSPEC, false);
     for (CallInst *call : calls) {
+      IRBuilder<> B(call);
       Value *index = call->getArgOperand(1);
       Value *size = call->getArgOperand(0);
-      IRBuilder<> B(call);
       Value *isOk = B.CreateICmpULT(index, size);
       Value *mask = B.CreateSelect(isOk, B.getInt32(0xffffffff), B.getInt32(0));
       call->replaceAllUsesWith(mask);
@@ -1138,25 +1213,25 @@ private:
     }
   }
 
-  void handleGetUser(Module &M) {
-    std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, GET_USER, false, GET_USER_CONSTRAINTS);
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *addr = call->getArgOperand(0);
-      Value *stackPointer = call->getArgOperand(2);
-      StructType *type = cast<StructType>(call->getType());
-
-      Value *empty = UndefValue::get(type);
-      Value *ok = B.CreateInsertValue(empty, B.getInt32(0), {0});
-      Value *loaded = B.CreateLoad(i32Ty, addr);
-      Value *setLoaded = B.CreateInsertValue(ok, loaded, {1});
-      Value *completed = B.CreateInsertValue(setLoaded, stackPointer, {2});
-      call->replaceAllUsesWith(completed);
-      call->eraseFromParent();
-    }
-  }
+  // void handleGetUser(Module &M) {
+  //   std::vector<CallInst *> calls =
+  //       getTargetAsmCalls(M, GET_USER, false, GET_USER_CONSTRAINTS);
+  //   for (CallInst *call : calls) {
+  //     IRBuilder<> B(call);
+  //     Value *addr = call->getArgOperand(0);
+  //     Value *stackPointer = call->getArgOperand(2);
+  //
+  //     Value *empty = UndefValue::get(call->getType());
+  //     Value *ok = B.CreateInsertValue(empty, B.getInt32(0), {0});
+  //     Value *loaded = B.CreateLoad(addr->getType()->getPointerElementType(),
+  //     addr); if (loaded->getType()->isIntegerTy()) {
+  //     }
+  //     Value *setLoaded = B.CreateInsertValue(ok, loaded, {1});
+  //     Value *completed = B.CreateInsertValue(setLoaded, stackPointer, {2});
+  //     call->replaceAllUsesWith(completed);
+  //     call->eraseFromParent();
+  //   }
+  // }
 
   void handleCallOnStack(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL_ON_STACK, false);
