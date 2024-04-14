@@ -162,7 +162,8 @@ struct MemAllocConversion {
     KmallocLarge,
     KmallocNode,
     KmallocLargeNode,
-    PcpuAlloc
+    PcpuAlloc,
+    Vmalloc,
   };
 
   CallInst *call = nullptr;
@@ -185,6 +186,8 @@ struct MemAllocConversion {
       type = KmallocLargeNode;
     else if (name.equals("pcpu_alloc"))
       type = PcpuAlloc;
+    else if (name.equals("__vmalloc_node_range"))
+      type = Vmalloc;
     else
       return;
     call = inst;
@@ -199,6 +202,8 @@ struct MemAllocConversion {
       return {call->getArgOperand(0), call->getArgOperand(1)};
     case PcpuAlloc:
       return {call->getArgOperand(0), call->getArgOperand(3)};
+    case Vmalloc:
+      return {call->getArgOperand(0), call->getArgOperand(1)};
     }
   }
 };
@@ -211,7 +216,7 @@ public:
 
   bool runOnModule(Module &M) override {
     handleKmalloc(M);
-    handleInlineAssembly(M);
+    // handleInlineAssembly(M);
     insertMain(M);
     updateFunctionLinkage(M);
     return true;
@@ -226,6 +231,7 @@ private:
     LLVMContext &ctx = M.getContext();
     // void pointer type.
     Type *retType = Type::getInt8PtrTy(ctx);
+    // size and GFP flag
     SmallVector<Type *, 2> argTypes = {Type::getInt32Ty(ctx),
                                        Type::getInt32Ty(ctx)};
     FunctionType *funcType = FunctionType::get(retType, argTypes, false);
@@ -251,12 +257,7 @@ private:
       call->replaceAllUsesWith(new_call);
       call->eraseFromParent();
     }
-
-    for (StringRef name : {"__kmalloc", "kmalloc_large", "__kmalloc_node",
-                           "kmalloc_large_node", "pcpu_alloc"}) {
-      if (Function *fn = M.getFunction(name))
-        fn->eraseFromParent();
-    }
+    // original memory allocation functions should be removed in the DCE pass.
   }
 
   void handleInlineAssembly(Module &M) {
