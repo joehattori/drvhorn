@@ -21,13 +21,8 @@ public:
   bool runOnModule(Module &M) override {
     verify(M);
 
-    StringRef globalVarNames[] = {
-        "sys_call_table",
-    };
-    for (StringRef name : globalVarNames) {
-      GlobalVariable *v = M.getNamedGlobal(name);
-      v->eraseFromParent();
-    }
+    removeGlobalVars(M);
+    replaceGlobalVarsWithEmpty(M);
 
     GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME);
     Type *ty = compilerUsed->getType();
@@ -44,6 +39,28 @@ public:
   }
 
 private:
+  void removeGlobalVars(Module &M) {
+    StringRef globalVarNames[] = {
+        "sys_call_table",
+    };
+    for (StringRef name : globalVarNames) {
+      GlobalVariable *v = M.getNamedGlobal(name);
+      v->eraseFromParent();
+    }
+  }
+
+  void replaceGlobalVarsWithEmpty(Module &M) {
+    StringRef globalVarNames[] = {
+        "pmu",
+    };
+    for (StringRef name : globalVarNames) {
+      GlobalVariable *v = M.getNamedGlobal(name);
+      Constant *empty = Constant::getNullValue(v->getType());
+      v->replaceAllUsesWith(empty);
+      v->eraseFromParent();
+    }
+  }
+
   void verify(Module &M) {
     if (verifyModule(M, &errs())) {
       errs() << "Module verification failed\n";
