@@ -511,9 +511,7 @@ int main(int argc, char **argv) {
 
     if (Acpi) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
-      pm_wrapper.add(llvm::createGlobalDCEPass());
       pm_wrapper.add(seahorn::createRemoveUnnecessaryFunctionsPass());
-      pm_wrapper.add(llvm::createGlobalDCEPass());
       pm_wrapper.add(seahorn::createKernelDebugPass());
     }
 

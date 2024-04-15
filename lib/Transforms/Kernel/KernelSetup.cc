@@ -218,7 +218,6 @@ public:
     handleKmalloc(M);
     // handleInlineAssembly(M);
     insertMain(M);
-    updateFunctionLinkage(M);
     return true;
   }
 
@@ -1270,15 +1269,6 @@ private:
     ArrayRef<Type *> params;
     Function::Create(FunctionType::get(i32Ty, params, false),
                      GlobalValue::LinkageTypes::ExternalLinkage, "main", &M);
-  }
-
-  void updateFunctionLinkage(Module &M) {
-    for (Function &F : M) {
-      if (F.isDeclaration())
-        continue;
-      if (!F.getName().equals("main"))
-        F.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    }
   }
 
   FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,

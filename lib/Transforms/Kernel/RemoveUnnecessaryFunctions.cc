@@ -1,11 +1,14 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
+#include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/Scalar.h"
 
 #define COMPILER_USED_NAME "llvm.compiler.used"
 
@@ -20,15 +23,20 @@ public:
 
   bool runOnModule(Module &M) override {
     verify(M);
-
-    removeGlobalVars(M);
-    replaceGlobalVarsWithEmpty(M);
+    updateLinkage(M);
 
     GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME);
     Type *ty = compilerUsed->getType();
     compilerUsed->eraseFromParent();
     // llvm.compiler.used seems to be required, so insert an empty value
     M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
+
+    legacy::PassManager pm;
+    pm.add(createAggressiveDCEPass());
+    pm.add(createGlobalDCEPass());
+
+    while (pm.run(M))
+      ;
 
     verify(M);
     return true;
@@ -39,25 +47,26 @@ public:
   }
 
 private:
-  void removeGlobalVars(Module &M) {
-    StringRef globalVarNames[] = {
-        "sys_call_table",
-    };
-    for (StringRef name : globalVarNames) {
-      GlobalVariable *v = M.getNamedGlobal(name);
-      v->eraseFromParent();
-    }
+  void debug(Module &M, StringRef name) {
+    GlobalValue *f = M.getGlobalVariable(name);
+    // GlobalValue *f = M.getFunction(name);
+    if (f)
+      errs() << name << " found: " << f->isDiscardableIfUnused() << "\n";
+    else
+      errs() << name << " not found\n";
   }
 
-  void replaceGlobalVarsWithEmpty(Module &M) {
-    StringRef globalVarNames[] = {
-        "pmu",
-    };
-    for (StringRef name : globalVarNames) {
-      GlobalVariable *v = M.getNamedGlobal(name);
-      Constant *empty = Constant::getNullValue(v->getType());
-      v->replaceAllUsesWith(empty);
-      v->eraseFromParent();
+  void updateLinkage(Module &M) {
+    for (Function &f : M) {
+      if (f.isDeclaration())
+        continue;
+      if (!f.getName().equals("main"))
+        f.setLinkage(GlobalValue::LinkageTypes::PrivateLinkage);
+    }
+    for (GlobalVariable &v : M.globals()) {
+      if (v.isDeclaration())
+        continue;
+      v.setLinkage(GlobalValue::LinkageTypes::PrivateLinkage);
     }
   }
 
