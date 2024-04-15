@@ -216,6 +216,7 @@ public:
 
   bool runOnModule(Module &M) override {
     handleKmalloc(M);
+    handleKfree(M);
     // handleInlineAssembly(M);
     insertMain(M);
     return true;
@@ -257,6 +258,42 @@ private:
       call->eraseFromParent();
     }
     // original memory allocation functions should be removed in the DCE pass.
+  }
+
+  FunctionCallee createKfreeStub(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    // void pointer type.
+    Type *voidType = Type::getVoidTy(ctx);
+    Type *i8Type = Type::getInt8Ty(ctx);
+    // size and GFP flag
+    FunctionType *funcType =
+        FunctionType::get(voidType, {i8Type->getPointerTo()}, false);
+    return M.getOrInsertFunction("free_stub", funcType);
+  }
+
+  void handleKfree(Module &M) {
+    FunctionCallee stub = createKfreeStub(M);
+    std::vector<CallInst *> toReplace;
+    for (Function &fn : M) {
+      for (Instruction &inst : instructions(fn)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          Function *fn = call->getCalledFunction();
+          if (!fn)
+            continue;
+          StringRef name = fn->getName();
+          if (name.equals("kfree") || name.equals("vfree")) {
+            toReplace.push_back(call);
+          }
+        }
+      }
+    }
+
+    for (CallInst *call : toReplace) {
+      IRBuilder<> B(call);
+      CallInst *new_call = B.CreateCall(stub, call->getArgOperand(0));
+      call->replaceAllUsesWith(new_call);
+      call->eraseFromParent();
+    }
   }
 
   void handleInlineAssembly(Module &M) {
