@@ -31,12 +31,15 @@ using namespace llvm;
 #define DECL_PREFIX "decl $0"
 #define XADDL_PREFIX "xaddl $0,$1"
 #define MOVB "movb $1,$0"
-#define MOVL "movl $1,$0"
+#define MOVL_0_1 "movl $0,$1"
+#define MOVL_1_0 "movl $1,$0"
 #define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
 #define ADDL "addl $1,$0"
+#define ANDL "andl $1,$0"
 #define MULL "mull $3"
 #define DIVL "divl $2"
 #define ORB "orb ${1:b},$0"
+#define ORL "orl $1,$0"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
 #define CMPXCHGL31_PREFIX "cmpxchgl $3,$1"
 #define CMPXCHG8B "cmpxchg8b $1"
@@ -53,8 +56,11 @@ using namespace llvm;
 #define CALL2 "call ${2:P}"
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
 #define CPUID "cpuid"
-#define IN "inb ${1:w},${0:b}"
-#define OUT "outb ${0:b},${1:w}"
+#define INB "inb ${1:w},${0:b}"
+#define INW "inl ${1:w},${0:w}"
+#define INL "inl ${1:w},$0"
+#define OUTB "outb ${0:b},${1:w}"
+#define OUTL "outl $0,${1:w}"
 #define OUT_AL_0x80 "outb %al,$$0x80"
 #define OUT_AL_0xed "outb %al,$$0xed"
 
@@ -156,58 +162,6 @@ using namespace llvm;
 
 namespace seahorn {
 
-struct MemAllocConversion {
-  enum MemAllocType {
-    Kmalloc,
-    KmallocLarge,
-    KmallocNode,
-    KmallocLargeNode,
-    PcpuAlloc,
-    Vmalloc,
-  };
-
-  CallInst *call = nullptr;
-  MemAllocType type;
-
-  MemAllocConversion(CallInst *inst) {
-    if (!inst)
-      return;
-    Function *fn = inst->getCalledFunction();
-    if (!fn)
-      return;
-    StringRef name = fn->getName();
-    if (name.equals("__kmalloc"))
-      type = Kmalloc;
-    else if (name.equals("kmalloc_large"))
-      type = KmallocLarge;
-    else if (name.equals("__kmalloc_node"))
-      type = KmallocNode;
-    else if (name.equals("kmalloc_large_node"))
-      type = KmallocLargeNode;
-    else if (name.equals("pcpu_alloc"))
-      type = PcpuAlloc;
-    else if (name.equals("__vmalloc_node_range"))
-      type = Vmalloc;
-    else
-      return;
-    call = inst;
-  }
-
-  SmallVector<Value *, 2> getArgs() const {
-    switch (type) {
-    case Kmalloc:
-    case KmallocLarge:
-    case KmallocNode:
-    case KmallocLargeNode:
-      return {call->getArgOperand(0), call->getArgOperand(1)};
-    case PcpuAlloc:
-      return {call->getArgOperand(0), call->getArgOperand(3)};
-    case Vmalloc:
-      return {call->getArgOperand(0), call->getArgOperand(1)};
-    }
-  }
-};
-
 class KernelSetup : public ModulePass {
 public:
   static char ID;
@@ -215,9 +169,10 @@ public:
   KernelSetup() : ModulePass(ID) {}
 
   bool runOnModule(Module &M) override {
-    handleKmalloc(M);
-    handleKfree(M);
-    // handleInlineAssembly(M);
+    handleMalloc(M);
+    handleFree(M);
+    handleKmemCache(M);
+    handleInlineAssembly(M);
     insertMain(M);
     return true;
   }
@@ -227,82 +182,95 @@ public:
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
 
-  FunctionCallee createKmallocStub(Module &M) {
+  void handleMalloc(Module &M) {
     LLVMContext &ctx = M.getContext();
-    // void pointer type.
-    Type *retType = Type::getInt8PtrTy(ctx);
-    // size and GFP flag
-    SmallVector<Type *, 2> argTypes = {Type::getInt32Ty(ctx),
-                                       Type::getInt32Ty(ctx)};
-    FunctionType *funcType = FunctionType::get(retType, argTypes, false);
-    return M.getOrInsertFunction("malloc_stub", funcType);
+    Type *addrType = Type::getInt8Ty(ctx)->getPointerTo();
+    FunctionCallee nd = getNondetFn(addrType, M);
+    std::string mallocFuncNames[] = {
+        "__kmalloc",     "__kmalloc_node",     "__kmalloc_node_track_caller",
+        "kmalloc_large", "kmalloc_large_node", "__vmalloc_node_range",
+        "pcpu_alloc",
+    };
+    for (const std::string &name : mallocFuncNames) {
+      std::string wrapperName = name + "_wrapper";
+      Function *orig = M.getFunction(name);
+      if (!orig)
+        continue;
+
+      Function *wrapper = Function::Create(
+          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+          wrapperName, &M);
+      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+      CallInst *call = CallInst::Create(nd, "", block);
+      ReturnInst::Create(ctx, call, block);
+      orig->replaceAllUsesWith(wrapper);
+      orig->eraseFromParent();
+    }
   }
 
-  void handleKmalloc(Module &M) {
-    FunctionCallee stub = createKmallocStub(M);
-
-    std::vector<MemAllocConversion> conversions;
-    for (Function &fn : M) {
-      for (Instruction &inst : instructions(fn)) {
-        MemAllocConversion conv(dyn_cast<CallInst>(&inst));
-        if (conv.call)
-          conversions.push_back(conv);
-      }
-    }
-
-    for (const MemAllocConversion &conv : conversions) {
-      CallInst *call = conv.call;
-      IRBuilder<> B(call);
-      CallInst *new_call = B.CreateCall(stub, conv.getArgs());
-      call->replaceAllUsesWith(new_call);
-      call->eraseFromParent();
-    }
-    // original memory allocation functions should be removed in the DCE pass.
-  }
-
-  FunctionCallee createKfreeStub(Module &M) {
+  void handleFree(Module &M) {
     LLVMContext &ctx = M.getContext();
-    // void pointer type.
+    Type *addrType = Type::getInt8Ty(ctx)->getPointerTo();
     Type *voidType = Type::getVoidTy(ctx);
-    Type *i8Type = Type::getInt8Ty(ctx);
-    // size and GFP flag
-    FunctionType *funcType =
-        FunctionType::get(voidType, {i8Type->getPointerTo()}, false);
-    return M.getOrInsertFunction("free_stub", funcType);
+    FunctionType *freeStubType = FunctionType::get(voidType, {addrType}, false);
+    FunctionCallee nd = M.getOrInsertFunction("free_stub", freeStubType);
+    std::string freeFuncNames[] = {
+        "kfree",
+        "vfree",
+    };
+    for (const std::string &name : freeFuncNames) {
+      std::string wrapperName = name + "_wrapper";
+      Function *orig = M.getFunction(name);
+      if (!orig)
+        continue;
+
+      Function *wrapper = Function::Create(
+          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+          wrapperName, &M);
+      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+      Argument *addr = wrapper->getArg(0);
+      CallInst::Create(nd, {addr}, "", block);
+      ReturnInst::Create(ctx, nullptr, block);
+      orig->replaceAllUsesWith(wrapper);
+      orig->eraseFromParent();
+    }
   }
 
-  void handleKfree(Module &M) {
-    FunctionCallee stub = createKfreeStub(M);
-    std::vector<CallInst *> toReplace;
-    for (Function &fn : M) {
-      for (Instruction &inst : instructions(fn)) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          Function *fn = call->getCalledFunction();
-          if (!fn)
-            continue;
-          StringRef name = fn->getName();
-          if (name.equals("kfree") || name.equals("vfree")) {
-            toReplace.push_back(call);
-          }
-        }
+  void handleKmemCache(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    std::string kmemCacheFuncNames[] = {
+        "kmem_cache_create", "kmem_cache_alloc",   "kmem_cache_alloc_lru",
+        "kmem_cache_free",   "kmem_cache_destroy",
+    };
+    for (const std::string &name : kmemCacheFuncNames) {
+      Function *orig = M.getFunction(name);
+      if (!orig)
+        continue;
+      Type *retType = orig->getReturnType();
+      FunctionCallee nd = getNondetFn(retType, M);
+      std::string wrapperName = name + "_wrapper";
+      Function *wrapper = Function::Create(
+          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+          wrapperName, &M);
+      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+      CallInst *call = CallInst::Create(nd, "", block);
+      if (retType->isVoidTy()) {
+        ReturnInst::Create(ctx, nullptr, block);
+      } else {
+        ReturnInst::Create(ctx, call, block);
       }
-    }
-
-    for (CallInst *call : toReplace) {
-      IRBuilder<> B(call);
-      CallInst *new_call = B.CreateCall(stub, call->getArgOperand(0));
-      call->replaceAllUsesWith(new_call);
-      call->eraseFromParent();
+      orig->replaceAllUsesWith(wrapper);
+      orig->eraseFromParent();
     }
   }
 
   void handleInlineAssembly(Module &M) {
-    handleBitTest(M);
+    // handleBitTest(M);
     handleBitTestAndSet(M);
     handleBitTestAndReset(M);
     handleFFS(M);
     handleFLS(M);
-    handleHWeight(M);
+    // handleHWeight(M);
 
     handleIncl(M);
     handleDecl(M);
@@ -311,8 +279,9 @@ private:
     handleAddl(M);
     handleMull(M);
     handleDivl(M);
+    handleAndl(M);
     handleOr(M);
-    handleCpuid(M);
+    // handleCpuid(M);
     handleIn(M);
     handleOut(M);
 
@@ -328,52 +297,50 @@ private:
     handleNativeSaveFL(M);
     handleCLI(M);
     handleSTI(M);
-    handleRDPMC(M);
+    // handleRDPMC(M);
 
-    handleNativeReadMSRSafe(M);
-    handleNativeWriteMSRSafe(M);
-    handleRDMSR(M);
-    handleWRMSR(M);
-    handleRDTSC(M);
-    handleArrayIndexMaskNoSpec(M);
+    // handleNativeReadMSRSafe(M);
+    // handleNativeWriteMSRSafe(M);
+    // handleRDMSR(M);
+    // handleWRMSR(M);
+    // handleRDTSC(M);
+    // handleArrayIndexMaskNoSpec(M);
 
     handleCurrentTask(M);
     handleBarrier(M);
-    handleWMB(M);
-    handleUD2(M);
-    handleSerialize(M);
-    handleIretToSelf(M);
+    removeFunctions(M);
+    // handleWMB(M);
+    // handleSerialize(M);
+    // handleIretToSelf(M);
     handleDebugRegisters(M);
-    handleNop(M);
-    handleLoadCr3(M);
-    handleLidt(M);
-    handleLoadGs(M);
-    handleSplitU64(M);
-    handleBuildU64(M);
-    handleCallOnStack(M);
-    handleOptimizerHideVar(M);
-    // handleGetUser(M);
+    // handleLoadGs(M);
+    // handleSplitU64(M);
+    // handleBuildU64(M);
+    // handleCallOnStack(M);
+    // handleOptimizerHideVar(M);
+    // // handleGetUser(M);
+  }
+
+  std::string formatInlineAsm(std::string s) {
+    // trim leading whitespace
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char c) {
+              return !std::isspace(c);
+            }));
+    std::regex newLine("\n");
+    s = std::regex_replace(s, newLine, ";");
+    std::regex tab("\t");
+    s = std::regex_replace(s, tab, "");
+    std::regex commaSpace(",\\s+");
+    s = std::regex_replace(s, commaSpace, ",");
+    std::regex spacesBeforeReg("\\s+\\$");
+    return std::regex_replace(s, spacesBeforeReg, " $");
   }
 
   std::vector<CallInst *>
   getTargetAsmCalls(Module &M, const std::string &asmStr, bool isPrefix,
                     const std::string &constraints = "") {
-    auto formatInlineAsm = [](std::string s) {
-      // trim leading whitespace
-      s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char c) {
-                return !std::isspace(c);
-              }));
-      std::regex newLine("\n");
-      s = std::regex_replace(s, newLine, ";");
-      std::regex tab("\t");
-      s = std::regex_replace(s, tab, "");
-      std::regex commaSpace(",\\s+");
-      s = std::regex_replace(s, commaSpace, ",");
-      std::regex spacesBeforeReg("\\s+\\$");
-      return std::regex_replace(s, spacesBeforeReg, " $");
-    };
-
-    auto isTargetAsm = [&](const CallInst *call) {
+    auto isTargetAsm = [this, &asmStr, isPrefix,
+                        constraints](const CallInst *call) {
       const InlineAsm *inlineAsm =
           dyn_cast<InlineAsm>(call->getCalledOperand());
       if (!inlineAsm)
@@ -389,6 +356,30 @@ private:
         return formatted == asmStr &&
                (constraints.empty() ||
                 inlineAsm->getConstraintString() == constraints);
+    };
+
+    std::vector<CallInst *> calls;
+    for (Function &F : M) {
+      for (Instruction &inst : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (isTargetAsm(call))
+            calls.push_back(call);
+        }
+      }
+    }
+    return calls;
+  }
+
+  std::vector<CallInst *>
+  getTargetAsmCalls(Module &M, const std::set<std::string> &asmStr) {
+    auto isTargetAsm = [this, &asmStr](const CallInst *call) {
+      const InlineAsm *inlineAsm =
+          dyn_cast<InlineAsm>(call->getCalledOperand());
+      if (!inlineAsm)
+        return false;
+      // errs() << "before " << inlineAsm->getAsmString() << "\n";
+      std::string formatted = formatInlineAsm(inlineAsm->getAsmString());
+      return !!asmStr.count(formatted);
     };
 
     std::vector<CallInst *> calls;
@@ -421,17 +412,19 @@ private:
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *arg = call->getArgOperand(0);
+      Value *task;
       if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(arg)) {
-        Value *task = bitcast->getOperand(0);
-        if (isPtrToPtrToTask(bitcast->getSrcTy()) &&
-            isPtrToPtrToTask(bitcast->getDestTy()) &&
-            task->getName().equals("current_task")) {
-          Value *currentTask =
-              B.CreateLoad(task->getType()->getPointerElementType(), task);
-          Value *cast = B.CreatePtrToInt(currentTask, B.getInt32Ty());
-          call->replaceAllUsesWith(cast);
-          call->eraseFromParent();
-        }
+        task = bitcast->getOperand(0);
+      } else {
+        task = arg;
+      }
+      if (isPtrToPtrToTask(arg->getType()) &&
+          task->getName().equals("current_task")) {
+        Value *currentTask =
+            B.CreateLoad(task->getType()->getPointerElementType(), task);
+        Value *cast = B.CreatePtrToInt(currentTask, B.getInt32Ty());
+        call->replaceAllUsesWith(cast);
+        call->eraseFromParent();
       }
     }
   }
@@ -439,24 +432,6 @@ private:
   void handleBarrier(Module &M) {
     std::vector<CallInst *> calls =
         getTargetAsmCalls(M, "", false, BARRIER_CONSTRAINTS);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-  }
-
-  void handleWMB(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, WMB, false);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-  }
-
-  void handleUD2(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, UD2, false);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-  }
-
-  void handleSerialize(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, SERIALIZE, false);
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
@@ -479,20 +454,10 @@ private:
       call->eraseFromParent();
   }
 
-  void handleNop(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, NOP, false);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-  }
-
-  void handleLoadCr3(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, LOAD_CR3, false);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-  }
-
-  void handleLidt(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, LIDT, false);
+  void removeFunctions(Module &M) {
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, {WMB, UD2, SERIALIZE, SET_DEBUG_REGISTER_PREFIX,
+                              NOP, LOAD_CR3, LIDT});
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
@@ -637,16 +602,20 @@ private:
   }
 
   void handleDecl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, INCL, false);
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, DECL_PREFIX, true);
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *i8Ty = Type::getInt8Ty(ctx);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *val = call->getArgOperand(0);
       if (val->getType()->isPointerTy()) {
         Value *load = B.CreateLoad(i32Ty, val);
+        Value *isZero = B.CreateICmpEQ(load, B.getInt32(0));
+        Value *isZeroExt = B.CreateZExt(isZero, i8Ty);
         Value *dec = B.CreateSub(load, B.getInt32(1));
         B.CreateStore(dec, val);
-        call->replaceAllUsesWith(dec);
+        call->replaceAllUsesWith(isZeroExt);
       } else {
         errs() << "TODO: handleDecl\n";
       }
@@ -673,17 +642,19 @@ private:
   }
 
   void handleMov(Module &M) {
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    Type *i8Ty = Type::getInt8Ty(M.getContext());
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *i8Ty = Type::getInt8Ty(ctx);
 
-    auto replaceMov = [this, &M](const std::string &targetAsm, Type *intTy) {
+    auto replaceMov = [this, &M](const std::string &targetAsm, Type *intTy,
+                                 unsigned srcIdx, unsigned dstIdx) {
       std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
       for (CallInst *call : calls) {
         IRBuilder<> B(call);
         Value *replace;
         if (call->getType()->isVoidTy()) {
-          Value *src = call->getArgOperand(1);
-          Value *dst = call->getArgOperand(0);
+          Value *src = call->getArgOperand(srcIdx);
+          Value *dst = call->getArgOperand(dstIdx);
           Type *srcType = src->getType();
           Type *dstType = dst->getType();
           if (srcType->isPointerTy()) {
@@ -705,7 +676,12 @@ private:
           Value *src = call->getArgOperand(0);
           Type *srcType = src->getType();
           if (srcType->isPointerTy()) {
-            replace = B.CreateLoad(srcType->getPointerElementType(), src);
+            if (srcType->getPointerElementType()->isFunctionTy()) {
+              Function *f = M.getFunction(src->getName());
+              replace = B.CreateCall(f);
+            } else {
+              replace = B.CreateLoad(srcType->getPointerElementType(), src);
+            }
           } else {
             replace = src;
           }
@@ -718,8 +694,9 @@ private:
       }
     };
 
-    replaceMov(MOVB, i8Ty);
-    replaceMov(MOVL, i32Ty);
+    replaceMov(MOVB, i8Ty, 1, 0);
+    replaceMov(MOVL_0_1, i32Ty, 0, 1);
+    replaceMov(MOVL_1_0, i32Ty, 1, 0);
   }
 
   void handleAddl(Module &M) {
@@ -786,28 +763,58 @@ private:
     }
   }
 
-  void handleOr(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, ORB, false);
+  void handleAndl(Module &M) {
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, ANDL, false);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *dst = call->getArgOperand(0);
       Value *src = call->getArgOperand(1);
       Type *dstType = dst->getType();
-
       if (dstType->isPointerTy()) {
-        if (src->getType()->isIntegerTy()) {
-          // LHS value does not exists.
-          Type *innerType = dstType->getPointerElementType();
-          Value *cast = B.CreateIntCast(src, innerType, true);
-          Value *loaded = B.CreateLoad(innerType, dst);
-          Value *or_ = B.CreateOr(loaded, cast);
-          B.CreateStore(or_, dst);
-        }
+        Value *load = B.CreateLoad(dstType->getPointerElementType(), dst);
+        Value *and_ = B.CreateAnd(load, src);
+        B.CreateStore(and_, dst);
+
+        call->replaceAllUsesWith(and_);
+        call->eraseFromParent();
       } else {
-        errs() << "TODO: handleOr\n";
+        errs() << "TODO: handleAddl\n";
       }
-      call->eraseFromParent();
     }
+  }
+
+  void handleOr(Module &M) {
+    auto replace = [this, &M](const std::string &targetAsm) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *dst = call->getArgOperand(0);
+        Value *src = call->getArgOperand(1);
+        Type *dstType = dst->getType();
+
+        if (dstType->isPointerTy()) {
+          if (src->getType()->isIntegerTy()) {
+            // LHS value does not exists.
+            Type *innerType = dstType->getPointerElementType();
+            Value *cast = B.CreateIntCast(src, innerType, true);
+            Value *loaded = B.CreateLoad(innerType, dst);
+            Value *or_ = B.CreateOr(loaded, cast);
+            B.CreateStore(or_, dst);
+          } else {
+            Value *load = B.CreateLoad(dstType->getPointerElementType(), dst);
+            Value *or_ = B.CreateOr(load, src);
+            B.CreateStore(or_, dst);
+            call->replaceAllUsesWith(or_);
+          }
+        } else {
+          errs() << "TODO: handleOr\n";
+        }
+        call->eraseFromParent();
+      }
+    };
+
+    replace(ORB);
+    replace(ORL);
   }
 
   void handleCpuid(Module &M) {
@@ -834,27 +841,26 @@ private:
   }
 
   void handleIn(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, IN, false);
-    Type *i8Ty = Type::getInt8Ty(M.getContext());
-    FunctionCallee ndf = getNondetFn(i8Ty, M);
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *replace = B.CreateCall(ndf);
-      call->replaceAllUsesWith(replace);
-      call->eraseFromParent();
-    }
+    auto replace = [this, &M](const std::string &targetAsm, Type *type) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
+      FunctionCallee ndf = getNondetFn(type, M);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *replace = B.CreateCall(ndf);
+        call->replaceAllUsesWith(replace);
+        call->eraseFromParent();
+      }
+    };
+
+    LLVMContext &ctx = M.getContext();
+    replace(INB, Type::getInt8Ty(ctx));
+    replace(INW, Type::getInt16Ty(ctx));
+    replace(INL, Type::getInt32Ty(ctx));
   }
 
   void handleOut(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, OUT, false);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-
-    calls = getTargetAsmCalls(M, OUT_AL_0x80, false);
-    for (CallInst *call : calls)
-      call->eraseFromParent();
-
-    calls = getTargetAsmCalls(M, OUT_AL_0xed, false);
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, {OUTB, OUTL, OUT_AL_0x80, OUT_AL_0xed});
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
