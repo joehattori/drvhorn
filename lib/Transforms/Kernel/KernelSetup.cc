@@ -201,6 +201,7 @@ public:
     handleMemMove(M);
     handleStrCopy(M);
     handleStrnCopy(M);
+    handleStrCat(M);
 
     handleAcpiDivide(M);
 
@@ -410,10 +411,10 @@ private:
   }
 
   void handleStrnCopy(Module &M) {
-    LLVMContext &ctx = M.getContext();
     Function *f = M.getFunction("strncpy");
     if (!f)
       return;
+    LLVMContext &ctx = M.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strncpy_wrapper";
@@ -449,6 +450,62 @@ private:
     B.CreateStore(srcChar, dstPtr);
     B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
     B.CreateBr(loopCond);
+
+    B.SetInsertPoint(end);
+    B.CreateRet(dst);
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrCat(Module &M) {
+    Function *f = M.getFunction("strcat");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strncpy_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *dst = wrapper->getArg(0);
+    Value *src = wrapper->getArg(1);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *skipCond = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *skipBody = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *copyCond = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *copyBody = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(skipCond);
+
+    B.SetInsertPoint(skipCond);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
+    Value *dstChar = B.CreateLoad(i8Type, dstPtr);
+    B.CreateCondBr(B.CreateICmpEQ(dstChar, B.getInt8(0)), copyCond, skipBody);
+
+    B.SetInsertPoint(skipBody);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateBr(skipCond);
+
+    B.SetInsertPoint(copyCond);
+    loadedIt = B.CreateLoad(i32Type, it);
+    Value *srcPtr = B.CreateGEP(i8Type, src, loadedIt);
+    Value *srcChar = B.CreateLoad(i8Type, srcPtr);
+    Value *isEnd = B.CreateICmpEQ(srcChar, B.getInt8(0));
+    B.CreateCondBr(isEnd, end, copyBody);
+
+    B.SetInsertPoint(copyBody);
+    loadedIt = B.CreateLoad(i32Type, it);
+    dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
+    B.CreateStore(srcChar, dstPtr);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateBr(copyCond);
 
     B.SetInsertPoint(end);
     B.CreateRet(dst);
