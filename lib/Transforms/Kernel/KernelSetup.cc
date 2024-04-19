@@ -200,8 +200,10 @@ public:
     handleMemcpy(M);
     handleMemMove(M);
     handleStrCopy(M);
-    handleStrnCopy(M);
+    handleStrNCopy(M);
     handleStrCat(M);
+    handleStrCmp(M);
+    handleStrNCmp(M);
 
     handleAcpiDivide(M);
 
@@ -410,7 +412,7 @@ private:
     f->eraseFromParent();
   }
 
-  void handleStrnCopy(Module &M) {
+  void handleStrNCopy(Module &M) {
     Function *f = M.getFunction("strncpy");
     if (!f)
       return;
@@ -464,7 +466,7 @@ private:
     LLVMContext &ctx = M.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strncpy_wrapper";
+    std::string wrapperName = "strcat_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
         wrapperName, &M);
@@ -509,6 +511,110 @@ private:
 
     B.SetInsertPoint(end);
     B.CreateRet(dst);
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrCmp(Module &M) {
+    Function *f = M.getFunction("strcmp");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strcmp_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *s1 = wrapper->getArg(0);
+    Value *s2 = wrapper->getArg(1);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *retNonZero = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(loop);
+
+    B.SetInsertPoint(loop);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *s1Ptr = B.CreateGEP(i8Type, s1, loadedIt);
+    Value *s2Ptr = B.CreateGEP(i8Type, s2, loadedIt);
+    Value *s1Char = B.CreateLoad(i8Type, s1Ptr);
+    Value *s2Char = B.CreateLoad(i8Type, s2Ptr);
+    B.CreateCondBr(B.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
+
+    B.SetInsertPoint(retNonZero);
+    Value *ret = B.CreateSelect(B.CreateICmpULT(s1Char, s2Char), B.getInt32(-1),
+                                B.getInt32(1));
+    B.CreateRet(ret);
+
+    B.SetInsertPoint(loopEnd);
+    Value *isEnd = B.CreateICmpEQ(s1Char, B.getInt8(0));
+    loadedIt = B.CreateLoad(i32Type, it);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateCondBr(isEnd, retZero, loop);
+
+    B.SetInsertPoint(retZero);
+    B.CreateRet(B.getInt32(0));
+
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrNCmp(Module &M) {
+    Function *f = M.getFunction("strncmp");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strncmp_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *s1 = wrapper->getArg(0);
+    Value *s2 = wrapper->getArg(1);
+    Value *size = wrapper->getArg(2);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *retNonZero = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(loop);
+
+    B.SetInsertPoint(loop);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *s1Ptr = B.CreateGEP(i8Type, s1, loadedIt);
+    Value *s2Ptr = B.CreateGEP(i8Type, s2, loadedIt);
+    Value *s1Char = B.CreateLoad(i8Type, s1Ptr);
+    Value *s2Char = B.CreateLoad(i8Type, s2Ptr);
+    B.CreateCondBr(B.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
+
+    B.SetInsertPoint(retNonZero);
+    Value *ret = B.CreateSelect(B.CreateICmpULT(s1Char, s2Char), B.getInt32(-1),
+                                B.getInt32(1));
+    B.CreateRet(ret);
+
+    B.SetInsertPoint(loopEnd);
+    loadedIt = B.CreateLoad(i32Type, it);
+    Value *isNull = B.CreateICmpEQ(s1Char, B.getInt8(0));
+    Value *isEnd = B.CreateOr(isNull, B.CreateICmpUGE(loadedIt, size));
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateCondBr(isEnd, retZero, loop);
+
+    B.SetInsertPoint(retZero);
+    B.CreateRet(B.getInt32(0));
+
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
   }
