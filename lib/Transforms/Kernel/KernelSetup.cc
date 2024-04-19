@@ -198,6 +198,9 @@ public:
     handleKmemCache(M);
 
     handleMemcpy(M);
+    handleMemMove(M);
+    handleStrCopy(M);
+    handleStrnCopy(M);
 
     handleAcpiDivide(M);
 
@@ -341,6 +344,116 @@ private:
       f->replaceAllUsesWith(wrapper);
       f->eraseFromParent();
     }
+  }
+
+  void handleMemMove(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    Function *f = M.getFunction("memmove");
+    if (!f)
+      return;
+    std::string wrapperName = "memmove_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+    Value *dst = wrapper->getArg(0);
+    Value *src = wrapper->getArg(1);
+    Value *size = wrapper->getArg(2);
+    IRBuilder<> B(block);
+    B.CreateMemMove(dst, MaybeAlign(), src, MaybeAlign(), size);
+    B.CreateRet(dst);
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrCopy(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    Function *f = M.getFunction("strcpy");
+    if (!f)
+      return;
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i64Type = Type::getInt64Ty(ctx);
+    std::string wrapperName = "strcpy_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *dst = wrapper->getArg(0);
+    Value *src = wrapper->getArg(1);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopCond = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopBody = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i64Type);
+    B.CreateStore(B.getInt64(0), it);
+    B.CreateBr(loopCond);
+
+    B.SetInsertPoint(loopCond);
+    Value *srcPtr = B.CreateGEP(i8Type, src, B.CreateLoad(i64Type, it));
+    Value *srcChar = B.CreateLoad(i8Type, srcPtr);
+    Value *isEnd = B.CreateICmpEQ(srcChar, B.getInt8(0));
+    B.CreateCondBr(isEnd, end, loopBody);
+
+    B.SetInsertPoint(loopBody);
+    Value *loadedIt = B.CreateLoad(i64Type, it);
+    Value *dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
+    B.CreateStore(srcChar, dstPtr);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt64(1)), it);
+    B.CreateBr(loopCond);
+
+    B.SetInsertPoint(end);
+    B.CreateRet(dst);
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrnCopy(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    Function *f = M.getFunction("strncpy");
+    if (!f)
+      return;
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strncpy_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *dst = wrapper->getArg(0);
+    Value *src = wrapper->getArg(1);
+    Value *size = wrapper->getArg(2);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopCond = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopBody = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(loopCond);
+
+    B.SetInsertPoint(loopCond);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *srcPtr = B.CreateGEP(i8Type, src, loadedIt);
+    Value *srcChar = B.CreateLoad(i8Type, srcPtr);
+    Value *isNull = B.CreateICmpEQ(srcChar, B.getInt8(0));
+    Value *isOver = B.CreateICmpUGE(loadedIt, size);
+    Value *isEnd = B.CreateOr(isNull, isOver);
+    B.CreateCondBr(isEnd, end, loopBody);
+
+    B.SetInsertPoint(loopBody);
+    loadedIt = B.CreateLoad(i32Type, it);
+    Value *dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
+    B.CreateStore(srcChar, dstPtr);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateBr(loopCond);
+
+    B.SetInsertPoint(end);
+    B.CreateRet(dst);
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
   }
 
   void handleAcpiDivide(Module &M) {
