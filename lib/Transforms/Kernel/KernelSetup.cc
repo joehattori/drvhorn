@@ -24,7 +24,9 @@ using namespace llvm;
 #define OPTIMIZER_HIDE_VAR_CONSTRAINTS "=r,0,~{dirflag},~{fpsr},~{flags}"
 
 #define BIT_TEST_PREFIX "btl $2,$1"
-#define BIT_TEST_AND_SET_PREFIX "btsl $1,$0"
+#define BIT_TEST_AND_SET_1_0_PREFIX "btsl $1,$0"
+#define BIT_TEST_AND_SET_2_0_PREFIX "btsl $2,$0"
+#define BIT_TEST_AND_SET_2_1_PREFIX "btsl $2,$1"
 #define BIT_TEST_AND_RESET_1_0_PREFIX "btrl $1,$0"
 #define BIT_TEST_AND_RESET_2_1_PREFIX "btrl $2,$1"
 
@@ -39,6 +41,7 @@ using namespace llvm;
 #define MOVL_1_0 "movl $1,$0"
 #define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
 #define ADDL "addl $1,$0"
+#define ANDB "andb ${1:b},$0"
 #define ANDL "andl $1,$0"
 #define MULL "mull $3"
 #define DIVL "divl $2"
@@ -91,7 +94,7 @@ using namespace llvm;
   ".altinstructions,\"a\"; "                                                   \
   ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
   "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
-  "replacement 1;6641:;popcntl $1,$0;6651:;.popsection;"
+  "replacement 1;6641:;popcntl $1,$0;6651:;.popsection"
 #define NATIVE_READ_MSR_SAFE                                                   \
   "1: rdmsr ; xor $0,$0;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; "    \
   ".long "                                                                     \
@@ -104,7 +107,7 @@ using namespace llvm;
   "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
   "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
   "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
-  "reg=$0,type=11 ;.purgem extable_type_reg; .popsection;"
+  "reg=$0,type=11 ;.purgem extable_type_reg; .popsection"
 #define NATIVE_WRITE_MSR_SAFE                                                  \
   "1: wrmsr ; xor $0,$0;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; "    \
   ".long "                                                                     \
@@ -117,15 +120,31 @@ using namespace llvm;
   "ifc \\reg,%\\rs;.set .Lfound,.Lfound+1;.long \\type + (.Lregnr << "         \
   "8);.endif;.set .Lregnr,.Lregnr+1;.endr;.if (.Lfound != 1);.error "          \
   "\"extable_type_reg: bad register argument\";.endif;.endm;extable_type_reg " \
-  "reg=$0,type=10 ;.purgem extable_type_reg; .popsection;"
+  "reg=$0,type=10 ;.purgem extable_type_reg; .popsection"
 #define RDMSR                                                                  \
   "1: rdmsr;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; .long (1b) - "   \
   ".; "                                                                        \
-  ".long (2b) - .; .long 9 ; .popsection;"
+  ".long (2b) - .; .long 9 ; .popsection"
 #define WRMSR                                                                  \
   "1: wrmsr;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; .long (1b) - "   \
   ".; "                                                                        \
-  ".long (2b) - .; .long 8 ; .popsection;"
+  ".long (2b) - .; .long 8 ; .popsection"
+#define MB                                                                     \
+  "# ALT: oldnstr;661:;lock; addl $$0,-4(%esp);662:;# ALT: padding;.skip "     \
+  "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
+  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection "                        \
+  ".altinstructions,\"a\"; "                                                   \
+  ".long 661b - .; .long 6641f - .; .word ( 0*32+26); .byte 663b-661b; .byte " \
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
+  "replacement 1;6641:;mfence;6651:;.popsection"
+#define RMB                                                                    \
+  "# ALT: oldnstr;661:;lock; addl $$0,-4(%esp);662:;# ALT: padding;.skip "     \
+  "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
+  "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection "                        \
+  ".altinstructions,\"a\"; "                                                   \
+  ".long 661b - .; .long 6641f - .; .word ( 0*32+26); .byte 663b-661b; .byte " \
+  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
+  "replacement 1;6641:;lfence;6651:;.popsection"
 #define WMB                                                                    \
   "# ALT: oldnstr;661:;lock; addl $$0,-4(%esp);662:;# ALT: padding;.skip "     \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
@@ -133,7 +152,7 @@ using namespace llvm;
   ".altinstructions,\"a\"; "                                                   \
   ".long 661b - .; .long 6641f - .; .word ( 0*32+26); .byte 663b-661b; .byte " \
   "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
-  "replacement 1;6641:;sfence;6651:;.popsection;"
+  "replacement 1;6641:;sfence;6651:;.popsection"
 #define LOAD_GS                                                                \
   "1:movl ${0:k},%gs; .pushsection \"__ex_table\",\"a\"; .balign 4; .long "    \
   "(1b) "                                                                      \
@@ -159,7 +178,7 @@ using namespace llvm;
   "6651f-6641f; .long 661b - .; .long 6642f - .; .word ( 1*32+27); .byte "     \
   "663b-661b; .byte 6652f-6642f;.popsection;.pushsection "                     \
   ".altinstr_replacement,\"ax\";# ALT: replacement 1;6641:;lfence; "           \
-  "rdtsc;6651:;# ALT: replacement 2;6642:;rdtscp;6652:;.popsection;"
+  "rdtsc;6651:;# ALT: replacement 2;6642:;rdtscp;6652:;.popsection"
 
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 
@@ -382,7 +401,7 @@ private:
   }
 
   void handleInlineAssembly(Module &M) {
-    // handleBitTest(M);
+    handleBitTest(M);
     handleBitTestAndSet(M);
     handleBitTestAndReset(M);
     handleFFS(M);
@@ -426,7 +445,6 @@ private:
     handleCurrentTask(M);
     handleBarrier(M);
     removeFunctions(M);
-    // handleWMB(M);
     // handleSerialize(M);
     // handleIretToSelf(M);
     handleDebugRegisters(M);
@@ -576,8 +594,8 @@ private:
 
   void removeFunctions(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, {WMB, UD2, SERIALIZE, SET_DEBUG_REGISTER_PREFIX,
-                              NOP, LOAD_CR3, LIDT});
+        getTargetAsmCalls(M, {MB, RMB, WMB, UD2, SERIALIZE,
+                              SET_DEBUG_REGISTER_PREFIX, NOP, LOAD_CR3, LIDT});
     for (CallInst *call : calls)
       call->eraseFromParent();
   }
@@ -647,28 +665,35 @@ private:
   }
 
   void handleBitTestAndSet(Module &M) {
-    std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, BIT_TEST_AND_SET_PREFIX, true);
     Type *i32Ty = Type::getInt32Ty(M.getContext());
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *base = call->getArgOperand(0);
-      Value *offset = call->getArgOperand(1);
 
-      Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
-      Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
-      Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
-      Value *load = B.CreateLoad(i32Ty, byte);
-      Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
-      Value *bit = B.CreateAnd(load, mask);
-      Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
-      B.CreateStore(B.CreateOr(load, mask), byte);
-      if (!call->getType()->isVoidTy()) {
-        Value *replace = B.CreateZExt(isSet, call->getType());
-        call->replaceAllUsesWith(replace);
+    auto replace = [this, &M, i32Ty](const std::string &targetAsmPrefix) {
+      std::vector<CallInst *> calls =
+          getTargetAsmCalls(M, targetAsmPrefix, true);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *base = call->getArgOperand(0);
+        Value *offset = call->getArgOperand(1);
+
+        Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
+        Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
+        Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
+        Value *load = B.CreateLoad(i32Ty, byte);
+        Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+        Value *bit = B.CreateAnd(load, mask);
+        Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
+        B.CreateStore(B.CreateOr(load, mask), byte);
+        if (!call->getType()->isVoidTy()) {
+          Value *replace = B.CreateZExt(isSet, call->getType());
+          call->replaceAllUsesWith(replace);
+        }
+        call->eraseFromParent();
       }
-      call->eraseFromParent();
-    }
+    };
+
+    replace(BIT_TEST_AND_SET_1_0_PREFIX);
+    replace(BIT_TEST_AND_SET_2_0_PREFIX);
+    replace(BIT_TEST_AND_SET_2_1_PREFIX);
   }
 
   void handleBitTestAndReset(Module &M) {
@@ -826,23 +851,31 @@ private:
   }
 
   void handleAndl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, ANDL, false);
-    for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *dst = call->getArgOperand(0);
-      Value *src = call->getArgOperand(1);
-      Type *dstType = dst->getType();
-      if (dstType->isPointerTy()) {
-        Value *load = B.CreateLoad(dstType->getPointerElementType(), dst);
-        Value *and_ = B.CreateAnd(load, src);
-        B.CreateStore(and_, dst);
+    auto replace = [this, &M](const std::string &targetAsm) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *dst = call->getArgOperand(0);
+        Value *src = call->getArgOperand(1);
+        Type *dstType = dst->getType();
+        if (dstType->isPointerTy()) {
+          Value *load = B.CreateLoad(dstType->getPointerElementType(), dst);
+          if (load->getType() != src->getType()) {
+            src = B.CreateIntCast(src, load->getType(), true);
+          }
+          Value *and_ = B.CreateAnd(load, src);
+          B.CreateStore(and_, dst);
 
-        call->replaceAllUsesWith(and_);
-        call->eraseFromParent();
-      } else {
-        errs() << "TODO: handleAddl\n";
+          call->replaceAllUsesWith(and_);
+          call->eraseFromParent();
+        } else {
+          errs() << "TODO: handleAndl\n";
+        }
       }
-    }
+    };
+
+    replace(ANDB);
+    replace(ANDL);
   }
 
   void handleOr(Module &M) {

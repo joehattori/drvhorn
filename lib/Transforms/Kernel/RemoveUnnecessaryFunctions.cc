@@ -32,11 +32,12 @@ public:
     verify(M);
     updateLinkage(M);
 
-    GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME);
-    Type *ty = compilerUsed->getType();
-    compilerUsed->eraseFromParent();
-    // llvm.compiler.used seems to be required, so insert an empty value
-    M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
+    if (GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME)) {
+      Type *ty = compilerUsed->getType();
+      compilerUsed->eraseFromParent();
+      // llvm.compiler.used seems to be required, so insert an empty value
+      M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
+    }
 
     removeFunctions(M);
     verify(M);
@@ -92,7 +93,7 @@ private:
   void removeFunctions(Module &M) {
     // first key: name of the function
     // second key: strategy to replace the function
-    std::pair<StringRef, ReplacementType> fns[] = {
+    std::pair<StringRef, ReplacementType> replacements[] = {
         // lock
         {"mutex_lock", ReplacementType::Zero},
         {"mutex_unlock", ReplacementType::Zero},
@@ -140,7 +141,6 @@ private:
         {"__local_bh_enable_ip", ReplacementType::Zero},
         {"__local_bh_disable_ip", ReplacementType::Zero},
         {"synchronize_irq", ReplacementType::Zero},
-        {"__synchronize_irq", ReplacementType::Zero},
         {"synchronize_hardirq", ReplacementType::Zero},
         {"__synchronize_hardirq", ReplacementType::Zero},
         // tasklet
@@ -152,12 +152,14 @@ private:
         {"default_get_nmi_reason", ReplacementType::Nondet},
         // others
         {"panic", ReplacementType::Fail},
+        {"add_taint", ReplacementType::Zero},
     };
-    for (const std::pair<StringRef, ReplacementType> &fn : fns) {
-      StringRef name = fn.first;
+
+    for (const std::pair<StringRef, ReplacementType> &replacement : replacements) {
+      StringRef name = replacement.first;
       if (Function *f = M.getFunction(name)) {
         Function *dummy;
-        switch (fn.second) {
+        switch (replacement.second) {
         case ReplacementType::Zero:
           dummy = getDummyFunction(f->getFunctionType(), M);
           break;
@@ -176,20 +178,21 @@ private:
 
   Function *getDummyFunction(FunctionType *type, Module &M) {
     auto it = dummyFn.find(type);
-    if (it != failureFn.end()) {
+    if (it != dummyFn.end()) {
       return it->second;
     }
 
     LLVMContext &ctx = M.getContext();
-    Function *res = makeNewFn(M, type, dummyFn.size(), "verifier.dummy.");
-    BasicBlock *block = BasicBlock::Create(ctx, "", res);
-    Value *ret = nullptr;
+    Function *f = makeNewFn(M, type, dummyFn.size(), "verifier.dummy.");
+    BasicBlock *block = BasicBlock::Create(ctx, "", f);
     Type *retType = type->getReturnType();
     if (!retType->isVoidTy()) {
-      ret = Constant::getNullValue(retType);
+      Value *ret = Constant::getNullValue(retType);
+      ReturnInst::Create(ctx, ret, block);
+    } else {
+      ReturnInst::Create(ctx, block);
     }
-    ReturnInst::Create(ctx, ret, block);
-    return res;
+    return f;
   }
 
   Function *getFailureFn(FunctionType *type, Module &M) {
