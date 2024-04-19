@@ -1,4 +1,5 @@
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
@@ -30,7 +31,10 @@ using namespace llvm;
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
 #define XADDL_PREFIX "xaddl $0,$1"
-#define MOVB "movb $1,$0"
+#define MOVB_0_1 "movb $0,$1"
+#define MOVB_1_0 "movb $1,$0"
+#define MOVW_0_1 "movw $0,$1"
+#define MOVW_1_0 "movw $1,$0"
 #define MOVL_0_1 "movl $0,$1"
 #define MOVL_1_0 "movl $1,$0"
 #define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
@@ -57,9 +61,10 @@ using namespace llvm;
 #define ARRAY_INDEX_MASK_NOSPEC "cmp $1,$2; sbb $0,$0;"
 #define CPUID "cpuid"
 #define INB "inb ${1:w},${0:b}"
-#define INW "inl ${1:w},${0:w}"
+#define INW "inw ${1:w},${0:w}"
 #define INL "inl ${1:w},$0"
 #define OUTB "outb ${0:b},${1:w}"
+#define OUTW "outw ${0:w},${1:w}"
 #define OUTL "outl $0,${1:w}"
 #define OUT_AL_0x80 "outb %al,$$0x80"
 #define OUT_AL_0xed "outb %al,$$0xed"
@@ -172,6 +177,11 @@ public:
     handleMalloc(M);
     handleFree(M);
     handleKmemCache(M);
+
+    handleMemcpy(M);
+
+    handleAcpiDivide(M);
+
     handleInlineAssembly(M);
     insertMain(M);
     return true;
@@ -264,6 +274,113 @@ private:
     }
   }
 
+  void handleMemcpy(Module &M) {
+    enum RetType {
+      Void,
+      Len,
+      Dest,
+    };
+
+    struct MemcpyInfo {
+      std::string name;
+      RetType returnType;
+    };
+
+    LLVMContext &ctx = M.getContext();
+    MemcpyInfo memcpyFuncNames[] = {
+        MemcpyInfo{"memcpy", RetType::Dest},
+        MemcpyInfo{"memcpy_fromio", RetType::Void},
+        MemcpyInfo{"memcpy_toio", RetType::Void},
+        MemcpyInfo{"__copy_user_ll", RetType::Len},
+        MemcpyInfo{"__copy_user_ll_nocache_nozero", RetType::Len},
+    };
+    for (const MemcpyInfo &info : memcpyFuncNames) {
+      Function *f = M.getFunction(info.name);
+      if (!f)
+        continue;
+      std::string wrapperName = info.name + "_wrapper";
+      Function *wrapper = Function::Create(
+          f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+          wrapperName, &M);
+      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+      Value *dst = wrapper->getArg(0);
+      Value *src = wrapper->getArg(1);
+      Value *size = wrapper->getArg(2);
+      IRBuilder<> B(block);
+      B.CreateMemCpy(dst, MaybeAlign(), src, MaybeAlign(), size);
+      switch (info.returnType) {
+      case RetType::Void:
+        B.CreateRetVoid();
+        break;
+      case RetType::Len:
+        B.CreateRet(size);
+        break;
+      case RetType::Dest:
+        B.CreateRet(dst);
+        break;
+      }
+      f->replaceAllUsesWith(wrapper);
+      f->eraseFromParent();
+    }
+  }
+
+  void handleAcpiDivide(Module &M) {
+    Function *f = M.getFunction("acpi_ut_divide");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i32Type = Type::getInt32Ty(ctx);
+    Type *i64Type = Type::getInt64Ty(ctx);
+    std::string wrapperName = "acpi_ut_divide_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+
+    Value *dividend = wrapper->getArg(0);
+    Value *divisor = wrapper->getArg(1);
+    Value *quotientPtr = wrapper->getArg(2);
+    Value *remainderPtr = wrapper->getArg(3);
+
+    BasicBlock *err = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *checkQuotient = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *storeQuotient = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *checkRemainder = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *storeRemainder = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(block);
+    Value *divisorIsZero = B.CreateICmpEQ(divisor, B.getInt64(0));
+    B.CreateCondBr(divisorIsZero, err, checkQuotient);
+
+    B.SetInsertPoint(err);
+    B.CreateRet(ConstantInt::get(i32Type, 0xc));
+
+    B.SetInsertPoint(checkQuotient);
+    Value *quotientInt = B.CreatePtrToInt(quotientPtr, i64Type);
+    Value *hasDivisor = B.CreateICmpNE(quotientInt, B.getInt64(0));
+    B.CreateCondBr(hasDivisor, storeQuotient, checkRemainder);
+
+    B.SetInsertPoint(storeQuotient);
+    B.CreateStore(B.CreateUDiv(dividend, divisor), quotientPtr);
+    B.CreateBr(checkRemainder);
+
+    B.SetInsertPoint(checkRemainder);
+    Value *remainderInt = B.CreatePtrToInt(remainderPtr, i64Type);
+    Value *hasRemainder = B.CreateICmpNE(remainderInt, B.getInt64(0));
+    B.CreateCondBr(hasRemainder, storeRemainder, end);
+
+    B.SetInsertPoint(storeRemainder);
+    B.CreateStore(B.CreateURem(dividend, divisor), remainderPtr);
+    B.CreateBr(end);
+
+    B.SetInsertPoint(end);
+    B.CreateRet(ConstantInt::get(i32Type, 0x0));
+
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
   void handleInlineAssembly(Module &M) {
     // handleBitTest(M);
     handleBitTestAndSet(M);
@@ -275,7 +392,6 @@ private:
     handleIncl(M);
     handleDecl(M);
     handleXAddl(M);
-    handleMov(M);
     handleAddl(M);
     handleMull(M);
     handleDivl(M);
@@ -284,6 +400,7 @@ private:
     // handleCpuid(M);
     handleIn(M);
     handleOut(M);
+    handleMov(M);
 
     handleAtomic64Read(M);
     handleAtomic64Set(M);
@@ -333,7 +450,10 @@ private:
     std::regex commaSpace(",\\s+");
     s = std::regex_replace(s, commaSpace, ",");
     std::regex spacesBeforeReg("\\s+\\$");
-    return std::regex_replace(s, spacesBeforeReg, " $");
+    s = std::regex_replace(s, spacesBeforeReg, " $");
+    while (s.back() == ';')
+      s.pop_back();
+    return s;
   }
 
   std::vector<CallInst *>
@@ -641,64 +761,6 @@ private:
     }
   }
 
-  void handleMov(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    Type *i8Ty = Type::getInt8Ty(ctx);
-
-    auto replaceMov = [this, &M](const std::string &targetAsm, Type *intTy,
-                                 unsigned srcIdx, unsigned dstIdx) {
-      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
-      for (CallInst *call : calls) {
-        IRBuilder<> B(call);
-        Value *replace;
-        if (call->getType()->isVoidTy()) {
-          Value *src = call->getArgOperand(srcIdx);
-          Value *dst = call->getArgOperand(dstIdx);
-          Type *srcType = src->getType();
-          Type *dstType = dst->getType();
-          if (srcType->isPointerTy()) {
-            LoadInst *load =
-                B.CreateLoad(srcType->getPointerElementType(), src);
-            B.CreateStore(load, dst);
-            replace = load;
-          } else {
-            Type *innerType = dstType->getPointerElementType();
-            if (innerType->isPointerTy() && srcType->isIntegerTy()) {
-              src = B.CreateIntToPtr(src, innerType);
-            } else if (srcType != innerType) {
-              errs() << "TODO: type mismatch in handleMov\n";
-            }
-            B.CreateStore(src, dst);
-            replace = src;
-          }
-        } else {
-          Value *src = call->getArgOperand(0);
-          Type *srcType = src->getType();
-          if (srcType->isPointerTy()) {
-            if (srcType->getPointerElementType()->isFunctionTy()) {
-              Function *f = M.getFunction(src->getName());
-              replace = B.CreateCall(f);
-            } else {
-              replace = B.CreateLoad(srcType->getPointerElementType(), src);
-            }
-          } else {
-            replace = src;
-          }
-        }
-        if (replace->getType()->isPointerTy()) {
-          replace = B.CreatePtrToInt(replace, intTy);
-        }
-        call->replaceAllUsesWith(replace);
-        call->eraseFromParent();
-      }
-    };
-
-    replaceMov(MOVB, i8Ty, 1, 0);
-    replaceMov(MOVL_0_1, i32Ty, 0, 1);
-    replaceMov(MOVL_1_0, i32Ty, 1, 0);
-  }
-
   void handleAddl(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, ADDL, false);
     for (CallInst *call : calls) {
@@ -860,9 +922,70 @@ private:
 
   void handleOut(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, {OUTB, OUTL, OUT_AL_0x80, OUT_AL_0xed});
+        getTargetAsmCalls(M, {OUTB, OUTW, OUTL, OUT_AL_0x80, OUT_AL_0xed});
     for (CallInst *call : calls)
       call->eraseFromParent();
+  }
+
+  void handleMov(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *i8Ty = Type::getInt8Ty(ctx);
+
+    auto replaceMov = [this, &M](const std::string &targetAsm, Type *intTy,
+                                 unsigned srcIdx, unsigned dstIdx) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
+      for (CallInst *call : calls) {
+        IRBuilder<> B(call);
+        Value *replace;
+        if (call->getType()->isVoidTy()) {
+          Value *src = call->getArgOperand(srcIdx);
+          Value *dst = call->getArgOperand(dstIdx);
+          Type *srcType = src->getType();
+          Type *dstType = dst->getType();
+          if (srcType->isPointerTy()) {
+            LoadInst *load =
+                B.CreateLoad(srcType->getPointerElementType(), src);
+            B.CreateStore(load, dst);
+            replace = load;
+          } else {
+            Type *innerType = dstType->getPointerElementType();
+            if (innerType->isPointerTy() && srcType->isIntegerTy()) {
+              src = B.CreateIntToPtr(src, innerType);
+            } else if (srcType != innerType) {
+              errs() << "TODO: type mismatch in handleMov\n";
+            }
+            B.CreateStore(src, dst);
+            replace = src;
+          }
+        } else {
+          Value *src = call->getArgOperand(0);
+          Type *srcType = src->getType();
+          if (srcType->isPointerTy()) {
+            if (srcType->getPointerElementType()->isFunctionTy()) {
+              Function *f = M.getFunction(src->getName());
+              replace = B.CreateCall(f);
+            } else {
+              replace = B.CreateLoad(srcType->getPointerElementType(), src);
+            }
+          } else {
+            replace = src;
+          }
+        }
+        if (replace->getType()->isPointerTy()) {
+          replace = B.CreatePtrToInt(replace, intTy);
+        }
+        call->replaceAllUsesWith(replace);
+        call->eraseFromParent();
+      }
+    };
+
+    replaceMov(MOVB_0_1, i8Ty, 0, 1);
+    replaceMov(MOVB_1_0, i8Ty, 1, 0);
+    replaceMov(MOVW_0_1, i32Ty, 0, 1);
+    replaceMov(MOVW_1_0, i32Ty, 1, 0);
+    replaceMov(MOVL_0_1, i32Ty, 0, 1);
+    replaceMov(MOVL_1_0, i32Ty, 1, 0);
   }
 
   void handleXchgl(Module &M) {
