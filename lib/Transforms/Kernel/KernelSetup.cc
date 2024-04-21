@@ -204,6 +204,7 @@ public:
     handleStrCat(M);
     handleStrCmp(M);
     handleStrNCmp(M);
+    handleStrChr(M);
 
     handleAcpiDivide(M);
 
@@ -614,6 +615,54 @@ private:
 
     B.SetInsertPoint(retZero);
     B.CreateRet(B.getInt32(0));
+
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrChr(Module &M) {
+    Function *f = M.getFunction("strchr");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strchr_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *str = wrapper->getArg(0);
+    Value *chr = wrapper->getArg(1);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *cmpChar = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(loop);
+
+    B.SetInsertPoint(loop);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
+    Value *curChar = B.CreateLoad(i8Type, strPtr);
+    Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
+    B.CreateCondBr(isNull, retZero, cmpChar);
+
+    B.SetInsertPoint(retZero);
+    Value *null = B.CreateIntToPtr(B.getInt32(0), i8Type->getPointerTo());
+    B.CreateRet(null);
+
+    B.SetInsertPoint(cmpChar);
+    Value *isHit = B.CreateICmpEQ(curChar, B.CreateTrunc(chr, i8Type));
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateCondBr(isHit, ret, loop);
+
+    B.SetInsertPoint(ret);
+    B.CreateRet(strPtr);
 
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
