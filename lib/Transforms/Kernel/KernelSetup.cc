@@ -205,6 +205,8 @@ public:
     handleStrCmp(M);
     handleStrNCmp(M);
     handleStrChr(M);
+    handleStrLen(M);
+    handleStrNLen(M);
 
     handleAcpiDivide(M);
 
@@ -663,6 +665,91 @@ private:
 
     B.SetInsertPoint(ret);
     B.CreateRet(strPtr);
+
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrLen(Module &M) {
+    Function *f = M.getFunction("strlen");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strlen_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *str = wrapper->getArg(0);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(loop);
+
+    B.SetInsertPoint(loop);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
+    Value *curChar = B.CreateLoad(i8Type, strPtr);
+    Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
+    B.CreateCondBr(isNull, ret, loopEnd);
+
+    B.SetInsertPoint(ret);
+    B.CreateRet(loadedIt);
+
+    B.SetInsertPoint(loopEnd);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateBr(loop);
+
+    f->replaceAllUsesWith(wrapper);
+    f->eraseFromParent();
+  }
+
+  void handleStrNLen(Module &M) {
+    Function *f = M.getFunction("strnlen");
+    if (!f)
+      return;
+    LLVMContext &ctx = M.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    std::string wrapperName = "strnlen_wrapper";
+    Function *wrapper = Function::Create(
+        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    Value *str = wrapper->getArg(0);
+    Value *size = wrapper->getArg(1);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
+    BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
+
+    IRBuilder<> B(entry);
+    Value *it = B.CreateAlloca(i32Type);
+    B.CreateStore(B.getInt32(0), it);
+    B.CreateBr(loop);
+
+    B.SetInsertPoint(loop);
+    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
+    Value *curChar = B.CreateLoad(i8Type, strPtr);
+    Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
+    Value *isOver = B.CreateICmpUGE(loadedIt, size);
+    Value *isEnd = B.CreateOr(isNull, isOver);
+    B.CreateCondBr(isEnd, ret, loopEnd);
+
+    B.SetInsertPoint(ret);
+    B.CreateRet(loadedIt);
+
+    B.SetInsertPoint(loopEnd);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateBr(loop);
 
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
