@@ -48,7 +48,11 @@ using namespace llvm;
 #define ORB "orb ${1:b},$0"
 #define ORL "orl $1,$0"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
+#define CMPXCHGL21_CONSTRAINTS                                                 \
+  "={ax},=*m,r,0,*m,~{memory},~{dirflag},~{fpsr},~{flags}"
 #define CMPXCHGL31_PREFIX "cmpxchgl $3,$1"
+#define CMPXCHGL31_CONSTRAINTS                                                 \
+  "={@ccz},=*m,={ax},r,*m,2,~{memory},~{dirflag},~{fpsr},~{flags}"
 #define CMPXCHG8B "cmpxchg8b $1"
 #define XCHGL "xchgl $0,$1;"
 #define XCGHL_CONSTRAINTS                                                      \
@@ -1451,43 +1455,51 @@ private:
   }
 
   void handleCmpxchgl(Module &M) {
-    auto replaceCmpxchg = [this, &M](const std::string &targetAsm,
-                                     bool isPrefix, int cmpIdx) {
-      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, isPrefix);
-      LLVMContext &ctx = M.getContext();
-      Type *i8Ty = Type::getInt8Ty(ctx);
-      for (CallInst *call : calls) {
-        IRBuilder<> B(call);
-        Value *acc = call->getArgOperand(0);
-        Value *cmp = call->getArgOperand(cmpIdx);
-        Value *new_ = call->getArgOperand(1);
-        AtomicCmpXchgInst *inst =
-            B.CreateAtomicCmpXchg(acc, cmp, new_, MaybeAlign(),
-                                  AtomicOrdering::SequentiallyConsistent,
-                                  AtomicOrdering::SequentiallyConsistent);
+    std::vector<CallInst *> calls =
+        getTargetAsmCalls(M, CMPXCHGL31_PREFIX, true, CMPXCHGL31_CONSTRAINTS);
+    LLVMContext &ctx = M.getContext();
+    Type *i8Ty = Type::getInt8Ty(ctx);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *acc = call->getArgOperand(0);
+      Value *cmp = call->getArgOperand(3);
+      Value *new_ = call->getArgOperand(1);
+      AtomicCmpXchgInst *inst = B.CreateAtomicCmpXchg(
+          acc, cmp, new_, MaybeAlign(), AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
 
-        // convert {ty, i1} to {i8, ty}
-        Value *val = B.CreateExtractValue(inst, {0});
+      // convert {ty, i1} to {i8, ty}
+      Value *val = B.CreateExtractValue(inst, {0});
+      Type *type = call->getType();
+      Value *empty = UndefValue::get(type);
+      Value *isSuccess = B.CreateExtractValue(inst, {1});
+      Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
+      Value *converted = B.CreateInsertValue(empty, castedSuccess, {0});
+      Value *replace = B.CreateInsertValue(converted, val, {1});
 
-        Value *replace;
-        Type *type = call->getType();
-        if (type->isStructTy()) {
-          Value *empty = UndefValue::get(type);
-          Value *isSuccess = B.CreateExtractValue(inst, {1});
-          Value *castedSuccess = B.CreateZExt(isSuccess, i8Ty);
-          Value *converted = B.CreateInsertValue(empty, castedSuccess, {0});
-          replace = B.CreateInsertValue(converted, val, {1});
-        } else {
-          replace = val;
-        }
+      call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
 
-        call->replaceAllUsesWith(replace);
-        call->eraseFromParent();
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    calls = getTargetAsmCalls(M, CMPXCHGL21, false, CMPXCHGL21_CONSTRAINTS);
+    for (CallInst *call : calls) {
+      IRBuilder<> B(call);
+      Value *acc = call->getArgOperand(0);
+      Value *cmp = call->getArgOperand(2);
+      Value *new_ = call->getArgOperand(1);
+      Type *type = call->getType();
+      if (type != i32Ty) {
+        acc = B.CreateBitCast(acc, type->getPointerTo());
       }
-    };
+      AtomicCmpXchgInst *inst = B.CreateAtomicCmpXchg(
+          acc, cmp, new_, MaybeAlign(), AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
 
-    replaceCmpxchg(CMPXCHGL31_PREFIX, true, 3);
-    replaceCmpxchg(CMPXCHGL21, false, 2);
+      Value *replace = B.CreateExtractValue(inst, {0});
+      call->replaceAllUsesWith(replace);
+      call->eraseFromParent();
+    }
   }
 
   void handleCmpxchg8b(Module &M) {
