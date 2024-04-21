@@ -150,6 +150,9 @@ private:
         {"kobject_uevent", ReplacementType::Zero},
         // hardware
         {"default_get_nmi_reason", ReplacementType::Nondet},
+        // delays
+        {"delay_loop", ReplacementType::Zero},
+        {"__const_udelay", ReplacementType::Zero},
         // others
         {"panic", ReplacementType::Fail},
         {"add_taint", ReplacementType::Zero},
