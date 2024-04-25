@@ -1,4 +1,5 @@
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -33,6 +34,8 @@ public:
     verify(M);
     updateLinkage(M);
 
+    runDCE(M);
+
     if (GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME)) {
       Type *ty = compilerUsed->getType();
       compilerUsed->eraseFromParent();
@@ -40,18 +43,27 @@ public:
       M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
     }
 
+    replaceSCTFunctions(M);
+    runDCE(M);
+
     removeFunctions(M);
     verify(M);
 
-    legacy::PassManager pm;
-    pm.add(createAggressiveDCEPass());
-    pm.add(createGlobalDCEPass());
-
-    while (pm.run(M))
-      ;
+    runDCE(M, true);
 
     verify(M);
     return true;
+  }
+
+  void runDCE(Module &M, bool removeArg = false) {
+    legacy::PassManager pm;
+    pm.add(createAggressiveDCEPass());
+    pm.add(createGlobalDCEPass());
+    if (removeArg)
+      pm.add(createDeadArgEliminationPass());
+    int c = 0;
+    while (pm.run(M) && c++ < 10) {
+    }
   }
 
   virtual StringRef getPassName() const override {
@@ -63,15 +75,6 @@ private:
   DenseMap<const FunctionType *, Function *> ndfn;
   DenseMap<const FunctionType *, Function *> failureFn;
   DenseMap<const FunctionType *, Function *> dummyFn;
-
-  void debug(Module &M, StringRef name) {
-    GlobalValue *f = M.getGlobalVariable(name);
-    // GlobalValue *f = M.getFunction(name);
-    if (f)
-      errs() << name << " found: " << f->isDiscardableIfUnused() << "\n";
-    else
-      errs() << name << " not found\n";
-  }
 
   void updateLinkage(Module &M) {
     for (Function &f : M) {
@@ -98,14 +101,79 @@ private:
     std::vector<unsigned> indices_to_replace = {};
   };
 
+  void replaceSCTFunctions(Module &M) {
+    ReplacePolicy replacements[] = {
+        {"__SCT__might_resched", ReplacementType::Zero},
+        {"__SCT__cond_resched", ReplacementType::Zero},
+        {"__SCT__pv_sched_clock", ReplacementType::Zero},
+        {"__SCT__x86_pmu_del", ReplacementType::Zero},
+        {"__SCT__x86_pmu_add", ReplacementType::Zero},
+        {"__SCT__x86_pmu_enable", ReplacementType::Zero},
+        {"__SCT__x86_pmu_disable", ReplacementType::Zero},
+        {"__SCT__x86_pmu_enable_all", ReplacementType::Zero},
+        {"__SCT__x86_pmu_disable_all", ReplacementType::Zero},
+        {"__SCT__x86_pmu_schedule_events", ReplacementType::Zero},
+        {"__SCT__x86_pmu_update", ReplacementType::Zero},
+        {"__SCT__x86_pmu_set_period", ReplacementType::Zero},
+        {"__SCT__x86_pmu_put_event_constraints", ReplacementType::Zero},
+        {"__SCT__x86_pmu_assign", ReplacementType::Zero},
+        {"__SCT__x86_pmu_swap_task_ctx", ReplacementType::Zero},
+        {"__SCT__x86_pmu_sched_task", ReplacementType::Zero},
+        {"__SCT__x86_pmu_read", ReplacementType::Zero},
+        {"__SCT__pv_steal_clock", ReplacementType::Zero},
+    };
+
+    for (const ReplacePolicy &policy : replacements) {
+      Function *f = M.getFunction(policy.name);
+      if (!f) {
+        errs() << "Could not find SCT function " << policy.name << "\n";
+        continue;
+      }
+      Function *dummy;
+      switch (policy.type) {
+      case ReplacementType::Zero:
+        dummy = getDummyFunction(f->getFunctionType(), M, {});
+        break;
+      case ReplacementType::Nondet:
+        dummy = getNondetFn(f->getFunctionType(), M, {});
+        break;
+      default:
+        errs() << "Unhandled case in replaceSCTFunctions\n";
+        continue;
+      };
+      f->replaceAllUsesWith(dummy);
+      f->eraseFromParent();
+    }
+
+    std::vector<std::pair<Function *, Function *>> toReplace;
+    for (Function &f : M) {
+      StringRef name = f.getName();
+      if (name.startswith("__SCT__tp_func_")) {
+        Function *dummy = getDummyFunction(f.getFunctionType(), M, {});
+        toReplace.push_back({&f, dummy});
+      }
+    }
+
+    for (std::pair<Function *, Function *> pair : toReplace) {
+      Function *f = pair.first;
+      Function *orig = pair.second;
+      f->replaceAllUsesWith(orig);
+      f->eraseFromParent();
+    }
+  }
+
   void removeFunctions(Module &M) {
     // first key: name of the function
     // second key: strategy to replace the function
     ReplacePolicy replacements[] = {
         // lock
         {"mutex_lock", ReplacementType::Zero},
+        {"mutex_lock_interruptible", ReplacementType::Zero},
+        {"mutex_is_locked", ReplacementType::Zero},
         {"mutex_unlock", ReplacementType::Zero},
         {"__mutex_init", ReplacementType::Zero},
+        {"spin_lock", ReplacementType::Zero},
+        {"spin_unlock", ReplacementType::Zero},
         // rcu
         {"__srcu_read_lock", ReplacementType::Zero},
         {"__srcu_read_unlock", ReplacementType::Zero},
@@ -115,6 +183,9 @@ private:
         {"chip_bus_unlock", ReplacementType::Zero},
         {"synchronize_srcu", ReplacementType::Zero},
         {"srcu_drive_gp", ReplacementType::Zero},
+        {"__rcu_read_lock", ReplacementType::Zero},
+        {"__rcu_read_unlock", ReplacementType::Zero},
+        {"exit_rcu", ReplacementType::Zero},
         // semaphore
         {"up", ReplacementType::Zero},
         {"__up", ReplacementType::Zero},
@@ -131,6 +202,7 @@ private:
         // scheduling
         {"__schedule", ReplacementType::Zero},
         {"schedule", ReplacementType::Zero},
+        {"might_resched", ReplacementType::Zero},
         {"__cond_sched", ReplacementType::Zero},
         {"need_resched", ReplacementType::Zero},
         {"try_to_wake_up", ReplacementType::Zero},
@@ -138,9 +210,9 @@ private:
         {"__queue_work", ReplacementType::Zero},
         {"queue_work_node", ReplacementType::Zero},
         {"queue_rcu_work", ReplacementType::Zero},
-        {"call_rcu", ReplacementType::Zero},
         {"flush_workqueue_prep_pwqs", ReplacementType::Zero},
         {"check_flush_dependency", ReplacementType::Zero},
+        {"kthread_create_on_node", ReplacementType::Zero},
         {"kthread_unpark", ReplacementType::Zero},
         {"resched_curr", ReplacementType::Zero},
         {"resched_cpu", ReplacementType::Zero},
@@ -152,6 +224,39 @@ private:
         {"add_wait_queue", ReplacementType::Zero},
         {"remove_wait_queue", ReplacementType::Zero},
         {"init_wait_entry", ReplacementType::Zero},
+        {"complete", ReplacementType::Zero},
+        {"complete_all", ReplacementType::Zero},
+        {"wait_for_common", ReplacementType::Nondet},
+        {"wait_for_common_io", ReplacementType::Nondet},
+        // syscall
+        {"syscall_init", ReplacementType::Zero},
+        {"ret_from_fork", ReplacementType::Zero},
+        {"task_current_syscall", ReplacementType::Zero},
+        // smp
+        {"asm_sysvec_reschedule_ipi", ReplacementType::Zero},
+        {"asm_sysvec_call_function", ReplacementType::Zero},
+        {"asm_sysvec_call_function_single", ReplacementType::Zero},
+        {"asm_sysvec_call_irq_move_cleanup", ReplacementType::Zero},
+        {"asm_sysvec_reboot", ReplacementType::Zero},
+        {"asm_sysvec_thermal", ReplacementType::Zero},
+        {"asm_sysvec_threshold", ReplacementType::Zero},
+        {"asm_sysvec_deferred_error", ReplacementType::Zero},
+        {"asm_sysvec_apic_timer_interrupt", ReplacementType::Zero},
+        {"asm_sysvec_x86_platform_ipi", ReplacementType::Zero},
+        {"asm_sysvec_kvm_posted_intr_ipi", ReplacementType::Zero},
+        {"asm_sysvec_kvm_posted_intr_wakeup_ipi", ReplacementType::Zero},
+        {"asm_sysvec_kvm_posted_intr_nested_ipi", ReplacementType::Zero},
+        {"asm_sysvec_irq_move_cleanup", ReplacementType::Zero},
+        {"asm_sysvec_irq_work", ReplacementType::Zero},
+        {"asm_sysvec_spurious_apic_interrupt", ReplacementType::Zero},
+        {"asm_sysvec_error_interrupt", ReplacementType::Zero},
+        // virt
+        {"_paravirt_nop", ReplacementType::Zero},
+        // cpu
+        {"start_cpu0", ReplacementType::Zero},
+        {"start_secondary", ReplacementType::Zero},
+        {"cpu_init", ReplacementType::Zero},
+        {"cpu_init_secondary", ReplacementType::Zero},
         // async
         {"async_schedule_node", ReplacementType::Nondet},
         // memory/page management
@@ -159,6 +264,11 @@ private:
         {"slob_alloc", ReplacementType::Nondet},
         {"slob_new_pages", ReplacementType::Nondet},
         {"__alloc_pages", ReplacementType::Nondet},
+        {"__get_vm_area_node", ReplacementType::Nondet},
+        {"vmap", ReplacementType::Nondet},
+        {"vmap_pfn", ReplacementType::Nondet},
+        {"vunmap", ReplacementType::Zero},
+        {"vfree", ReplacementType::Zero},
         {"ioremap", ReplacementType::Nondet},
         {"ioremap_uc", ReplacementType::Nondet},
         {"ioremap_wc", ReplacementType::Nondet},
@@ -184,12 +294,33 @@ private:
         {"devm_ioremap_resource", ReplacementType::Nondet},
         {"__devm_ioremap_resource", ReplacementType::Nondet},
         {"devm_iounmap", ReplacementType::Zero},
+        {"clear_page_orig", ReplacementType::Zero},
+        {"clear_page_rep", ReplacementType::Zero},
+        {"clear_page_erms", ReplacementType::Zero},
+        // tlb
+        {"flush_tlb_all", ReplacementType::Zero},
+        {"flush_tlb_kernel_range", ReplacementType::Zero},
+        {"native_flush_tlb_multi", ReplacementType::Zero},
         // resource
         {"__request_region", ReplacementType::Nondet},
         {"__release_region", ReplacementType::Nondet},
+        // task_struct
+        {"do_exit", ReplacementType::Zero},
+        {"make_task_dead", ReplacementType::Zero},
+        {"do_group_exit", ReplacementType::Zero},
+        {"kernel_clone", ReplacementType::Nondet},
+        {"kthread_stop", ReplacementType::Nondet},
+        {"kthreadd", ReplacementType::Nondet},
+        {"__kthread_init_worker", ReplacementType::Nondet},
+        {"kthread_worker_fn", ReplacementType::Nondet},
+        {"kthread_queue_work", ReplacementType::Nondet},
         // work_struct
         {"flush_work", ReplacementType::Zero},
         {"__flush_workqueue", ReplacementType::Zero},
+        // io-wq
+        {"io_wq_enqueue", ReplacementType::Zero},
+        {"io_wq_put_and_exit", ReplacementType::Zero},
+        {"io_wq_cpu_affinity", ReplacementType::Zero},
         // irq
         {"raise_softirq", ReplacementType::Zero},
         {"raise_softirq_irqoff", ReplacementType::Zero},
@@ -197,6 +328,7 @@ private:
         {"do_softirq", ReplacementType::Zero},
         {"invoke_softirq", ReplacementType::Zero},
         {"__local_bh_enable", ReplacementType::Zero},
+        {"local_bh_enable", ReplacementType::Zero},
         {"__local_bh_enable_ip", ReplacementType::Zero},
         {"__local_bh_disable_ip", ReplacementType::Zero},
         {"synchronize_irq", ReplacementType::Zero},
@@ -205,6 +337,7 @@ private:
         {"free_irq", ReplacementType::Zero},
         {"__free_irq", ReplacementType::Zero},
         {"__irq_disable", ReplacementType::Zero},
+        {"invalidate_bh_lrus", ReplacementType::Zero},
         // tasklet
         {"tasklet_action", ReplacementType::Zero},
         {"tasklet_action_common", ReplacementType::Zero},
@@ -230,6 +363,11 @@ private:
         // sleep
         {"msleep", ReplacementType::Zero},
         {"usleep_range_state", ReplacementType::Zero},
+        // iouring
+        {"io_req_task_submit", ReplacementType::Zero},
+        {"io_req_task_queue", ReplacementType::Zero},
+        {"io_req_task_queue_failed", ReplacementType::Zero},
+        {"io_req_task_complete", ReplacementType::Zero},
         // hardware
         {"default_get_nmi_reason", ReplacementType::Nondet},
         // delays
@@ -239,7 +377,11 @@ private:
         // drivers
         {"wait_for_device_probe", ReplacementType::Zero},
         {"driver_deferred_probe_trigger", ReplacementType::Zero},
-        // print
+        // random
+        {"rng_get_data", ReplacementType::Nondet},
+        {"add_early_randomness", ReplacementType::Zero},
+        {"hwrng_msleep", ReplacementType::Zero},
+        // print/logging
         {"vsprintf", ReplacementType::Zero},
         {"vsnprintf", ReplacementType::Zero},
         {"sprintf", ReplacementType::Zero},
@@ -248,22 +390,34 @@ private:
         {"kvasprintf", ReplacementType::Zero},
         {"kvasprintf_const", ReplacementType::Zero},
         {"kasprintf", ReplacementType::Zero},
+        {"_dev_emerg", ReplacementType::Zero},
+        {"_dev_alert", ReplacementType::Zero},
+        {"_dev_crit", ReplacementType::Zero},
+        {"_dev_err", ReplacementType::Zero},
+        {"_dev_warn", ReplacementType::Zero},
+        {"_dev_notice", ReplacementType::Zero},
+        {"_dev_info", ReplacementType::Zero},
         // acpi
         {"__acpi_acquire_global_lock", ReplacementType::Zero},
         {"__acpi_release_global_lock", ReplacementType::Zero},
+        {"acpi_os_acquire_lock", ReplacementType::Zero},
+        {"acpi_os_release_lock", ReplacementType::Zero},
         {"acpi_ut_acquire_mutex", ReplacementType::Zero},
         {"acpi_ut_release_mutex", ReplacementType::Zero},
         {"acpi_dev_get_resources", ReplacementType::Nondet, {3}},
+        {"acpi_dev_free_resource_list", ReplacementType::Zero},
         {"acpi_evaluate_object", ReplacementType::Nondet, {3}},
+        {"acpi_os_execute", ReplacementType::Nondet},
+        {"acpi_hw_validate_register", ReplacementType::Nondet},
+        {"acpi_os_vprintf", ReplacementType::Zero},
+        {"acpi_os_unmap_iomem", ReplacementType::Zero},
+        {"acpi_os_remove_interrupt_handler", ReplacementType::Zero},
         // others
         {"panic", ReplacementType::Fail},
         {"add_taint", ReplacementType::Zero},
         // debug
-        {"devm_kzalloc", ReplacementType::Nondet},
-        {"crb_map_io", ReplacementType::Zero},
-        {"tpmm_chip_alloc", ReplacementType::Nondet},
-        {"tpm_chip_register", ReplacementType::Zero},
-        {"acpi_tb_validate_table", ReplacementType::Zero},
+        {"tpm_chip_alloc", ReplacementType::Nondet},
+        {"tpm_chip_register", ReplacementType::Nondet},
     };
 
     for (const ReplacePolicy &policy : replacements) {

@@ -200,17 +200,19 @@ public:
     handleMalloc(M);
     handleFree(M);
     handleKmemCache(M);
+    
+    handleCallRcu(M);
 
-    handleMemcpy(M);
+    handleMemCpy(M);
     handleMemMove(M);
-    handleStrCopy(M);
-    handleStrNCopy(M);
-    handleStrCat(M);
-    handleStrCmp(M);
-    handleStrNCmp(M);
-    handleStrChr(M);
-    handleStrLen(M);
-    handleStrNLen(M);
+    // handleStrCopy(M);
+    // handleStrNCopy(M);
+    // handleStrCat(M);
+    // handleStrCmp(M);
+    // handleStrNCmp(M);
+    // handleStrChr(M);
+    // handleStrLen(M);
+    // handleStrNLen(M);
 
     handleAcpiDivide(M);
 
@@ -226,8 +228,10 @@ private:
 
   void handleMalloc(Module &M) {
     LLVMContext &ctx = M.getContext();
-    Type *addrType = Type::getInt8Ty(ctx)->getPointerTo();
-    FunctionCallee nd = getNondetFn(addrType, M);
+    Type *i32Type = Type::getInt32Ty(ctx);
+    Type *voidPtrType = Type::getInt8Ty(ctx)->getPointerTo();
+    FunctionCallee mallocFn =
+        M.getOrInsertFunction("malloc", voidPtrType, i32Type);
     std::string mallocFuncNames[] = {
         "__kmalloc",     "__kmalloc_node",     "__kmalloc_node_track_caller",
         "kmalloc_large", "kmalloc_large_node", "__vmalloc_node_range",
@@ -243,8 +247,10 @@ private:
           orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
           wrapperName, &M);
       BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-      CallInst *call = CallInst::Create(nd, "", block);
-      ReturnInst::Create(ctx, call, block);
+      IRBuilder<> B(block);
+      CallInst *call = B.CreateCall(mallocFn, {wrapper->getArg(0)});
+      call->setTailCall();
+      B.CreateRet(call);
       orig->replaceAllUsesWith(wrapper);
       orig->eraseFromParent();
     }
@@ -252,10 +258,10 @@ private:
 
   void handleFree(Module &M) {
     LLVMContext &ctx = M.getContext();
-    Type *addrType = Type::getInt8Ty(ctx)->getPointerTo();
     Type *voidType = Type::getVoidTy(ctx);
-    FunctionType *freeStubType = FunctionType::get(voidType, {addrType}, false);
-    FunctionCallee nd = M.getOrInsertFunction("free_stub", freeStubType);
+    Type *voidPtrType = Type::getInt8Ty(ctx)->getPointerTo();
+    FunctionCallee freeFunc =
+        M.getOrInsertFunction("free", voidType, voidPtrType);
     std::string freeFuncNames[] = {
         "kfree",
         "vfree",
@@ -270,9 +276,11 @@ private:
           orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
           wrapperName, &M);
       BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+      IRBuilder<> B(block);
       Argument *addr = wrapper->getArg(0);
-      CallInst::Create(nd, {addr}, "", block);
-      ReturnInst::Create(ctx, nullptr, block);
+      CallInst *call = B.CreateCall(freeFunc, {addr});
+      call->setTailCall();
+      B.CreateRetVoid();
       orig->replaceAllUsesWith(wrapper);
       orig->eraseFromParent();
     }
@@ -305,8 +313,30 @@ private:
       orig->eraseFromParent();
     }
   }
+  
+  void handleCallRcu(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    std::string name = "call_rcu";
+    Function *orig = M.getFunction(name);
+    if (!orig)
+      return;
+    std::string wrapperName = name + "_wrapper";
+    Function *wrapper = Function::Create(
+        orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+        wrapperName, &M);
+    BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+    Value *arg = wrapper->getArg(0);
+    Value *fn = wrapper->getArg(1);
+    // rcu_callback_t
+    FunctionType *fnType = FunctionType::get(Type::getVoidTy(ctx), {arg->getType()}, false);
+    FunctionCallee callee = FunctionCallee(fnType, fn);
+    CallInst::Create(callee, {arg}, "", block);
+    ReturnInst::Create(ctx, nullptr, block);
+    orig->replaceAllUsesWith(wrapper);
+    orig->eraseFromParent();
+  }
 
-  void handleMemcpy(Module &M) {
+  void handleMemCpy(Module &M) {
     enum RetType {
       Void,
       Len,
@@ -1190,14 +1220,10 @@ private:
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *src = call->getArgOperand(0);
-      Value *dst = call->getArgOperand(1);
       Value *load = B.CreateLoad(i32Ty, src);
-      Value *add = B.CreateAdd(load, dst);
-      B.CreateStore(dst, src);
-      if (dst->getType()->isPointerTy()) {
-        errs() << "TODO: handleXAddl\n";
-      }
-      call->replaceAllUsesWith(add);
+      Value *add = B.CreateAdd(load, call->getArgOperand(1));
+      B.CreateStore(add, src);
+      call->replaceAllUsesWith(load);
       call->eraseFromParent();
     }
   }
