@@ -29,8 +29,7 @@ public:
   bool runOnModule(Module &M) override {
     Function *main = M.getFunction("main");
     acpiInitialization(M, main);
-    CallInst *call = insertEntryCall(M, main);
-    buildErrorPathAssertion(M, main, call);
+    buildAssertion(M, main);
     return true;
   }
 
@@ -118,8 +117,10 @@ private:
     B.CreateStore(tpm2Int, intSignaturePtr);
   }
 
-  CallInst *insertEntryCall(Module &M, Function *main) {
+  void buildAssertion(Module &M, Function *main) {
+    LLVMContext &ctx = M.getContext();
     IRBuilder<> B(&main->back());
+
     assert(entry_point != "" && "entry-point not specified");
     Function *entry = M.getFunction(entry_point);
     assert(entry && "entry-point not found");
@@ -128,22 +129,13 @@ private:
       FunctionCallee ndf = getNondetFn(A.getType(), M);
       args.push_back(B.CreateCall(ndf));
     }
-    return B.CreateCall(entry, args);
-  }
+    B.CreateCall(entry, args);
 
-  void buildErrorPathAssertion(Module &M, Function *main, CallInst *entryCall) {
-    LLVMContext &ctx = M.getContext();
-    IRBuilder<> B(&main->back());
     Type *i32Ty = Type::getInt32Ty(ctx);
-    Value *isFailure = B.CreateICmpNE(entryCall, ConstantInt::get(i32Ty, 0));
-    BasicBlock *failBlock = BasicBlock::Create(ctx, "", main);
     BasicBlock *errBlock = BasicBlock::Create(ctx, "", main);
     BasicBlock *retBlock = BasicBlock::Create(ctx, "", main);
 
-    B.CreateCondBr(isFailure, failBlock, retBlock);
-
     // build failure path
-    B.SetInsertPoint(failBlock);
     StructType *acpiTableType =
         StructType::getTypeByName(ctx, "struct.acpi_table_list");
     GlobalVariable *acpiTable = M.getGlobalVariable("acpi_gbl_root_table_list");
