@@ -226,27 +226,21 @@ private:
 
   void handleMalloc(Module &M) {
     LLVMContext &ctx = M.getContext();
-    Type *i32Type = Type::getInt32Ty(ctx);
-    Type *i64Type = Type::getInt64Ty(ctx);
-    Type *voidPtrType = Type::getInt8Ty(ctx)->getPointerTo();
-    FunctionCallee mallocFn =
-        M.getOrInsertFunction("malloc", voidPtrType, i64Type);
-    Function *memset = M.getFunction("memset");
-    if (!memset) {
-      errs() << "memset not found\n";
-      std::exit(42);
+    Function *malloc = M.getFunction("__VERIFIER_malloc");
+    if (!malloc) {
+      errs() << "__VERIFIER_malloc not found\n";
+      std::exit(1);
     }
-    std::pair<std::string, unsigned> mallocFns[] = {
-        {"__kmalloc", 1},
-        {"__kmalloc_node", 1},
-        {"__kmalloc_node_track_caller", 1},
-        {"kmalloc_large", 1},
-        {"kmalloc_large_node", 1},
-        {"__vmalloc_node_range", 4},
-        {"pcpu_alloc", 3},
+    std::string mallocFns[] = {
+        "__kmalloc",
+        "__kmalloc_node",
+        "__kmalloc_node_track_caller",
+        "kmalloc_large",
+        "kmalloc_large_node",
+        "__vmalloc_node_range",
+        "pcpu_alloc",
     };
-    for (const std::pair<std::string, unsigned> &m : mallocFns) {
-      const std::string &name = m.first;
+    for (const std::string &name : mallocFns) {
       Function *orig = M.getFunction(name);
       if (!orig)
         continue;
@@ -255,27 +249,11 @@ private:
       Function *wrapper = Function::Create(
           orig->getFunctionType(), GlobalValue::LinkageTypes::PrivateLinkage,
           wrapperName, &M);
-      BasicBlock *entryBlock = BasicBlock::Create(ctx, "", wrapper);
-      BasicBlock *zeroOutBlock = BasicBlock::Create(ctx, "", wrapper);
-      BasicBlock *retBlock = BasicBlock::Create(ctx, "", wrapper);
+      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
 
-      IRBuilder<> B(entryBlock);
+      IRBuilder<> B(block);
       Value *size = wrapper->getArg(0);
-      CallInst *call = B.CreateCall(mallocFn, {size});
-      call->setTailCall();
-      Value *flag = wrapper->getArg(m.second);
-      // __GFP_ZERO: 0x100u
-      Value *masked = B.CreateAnd(flag, ConstantInt::get(i32Type, 0x100u));
-      Value *normalMalloc =
-          B.CreateICmpEQ(masked, ConstantInt::get(i32Type, 0));
-      B.CreateCondBr(normalMalloc, retBlock, zeroOutBlock);
-
-      B.SetInsertPoint(zeroOutBlock);
-      B.CreateCall(memset->getFunctionType(), memset,
-                   {call, ConstantInt::get(i32Type, 0), size});
-      B.CreateBr(retBlock);
-
-      B.SetInsertPoint(retBlock);
+      CallInst *call = B.CreateCall(malloc->getFunctionType(), malloc, {size});
       B.CreateRet(call);
 
       orig->replaceAllUsesWith(wrapper);
