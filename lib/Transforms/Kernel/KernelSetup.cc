@@ -17,7 +17,6 @@
 using namespace llvm;
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
-#define SPLIT_U64_CONSTRAINTS "={ax},={dx},A,~{dirflag},~{fpsr},~{flags}"
 #define BUILD_U64_CONSTRAINTS "=A,{ax},{dx},~{dirflag},~{fpsr},~{flags}"
 #define ARCH_ATOMIC64_XCHG_CONSTRAINTS                                         \
   "=&A,i,{si},{bx},{cx},~{memory},~{dirflag},~{fpsr},~{flags}"
@@ -32,7 +31,7 @@ using namespace llvm;
 
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
-#define XADDL "xaddl $0,$1;"
+#define XADDL "xaddl $0,$1"
 #define MOVB_0_1 "movb $0,$1"
 #define MOVB_1_0 "movb $1,$0"
 #define MOVW_0_1 "movw $0,$1"
@@ -214,7 +213,7 @@ public:
     handleStrLen(M);
     // handleStrNLen(M);
 
-    // handleInlineAssembly(M);
+    handleInlineAssembly(M);
     insertMain(M);
     return true;
   }
@@ -802,7 +801,7 @@ private:
     handleBitTestAndReset(M);
     handleFFS(M);
     handleFLS(M);
-    // handleHWeight(M);
+    handleHWeight(M);
 
     handleIncl(M);
     handleDecl(M);
@@ -845,11 +844,10 @@ private:
     // handleIretToSelf(M);
     handleDebugRegisters(M);
     // handleLoadGs(M);
-    // handleSplitU64(M);
     // handleBuildU64(M);
     // handleCallOnStack(M);
     // handleOptimizerHideVar(M);
-    // // handleGetUser(M);
+    // handleGetUser(M);
   }
 
   std::string formatInlineAsm(std::string s) {
@@ -1004,23 +1002,6 @@ private:
       IRBuilder<> B(call);
       Value *v = B.CreateCall(ndf);
       call->replaceAllUsesWith(v);
-      call->eraseFromParent();
-    }
-  }
-
-  void handleSplitU64(Module &M) {
-    std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, "", false, SPLIT_U64_CONSTRAINTS);
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    for (CallInst *call : calls) {
-      Value *v = call->getArgOperand(0);
-      IRBuilder<> B(call);
-      Value *low = B.CreateTrunc(v, i32Ty);
-      Value *high = B.CreateTrunc(B.CreateLShr(v, 32), i32Ty);
-      Value *empty = UndefValue::get(call->getType());
-      Value *setLow = B.CreateInsertValue(empty, low, {0});
-      Value *replace = B.CreateInsertValue(setLow, high, {1});
-      call->replaceAllUsesWith(replace);
       call->eraseFromParent();
     }
   }
@@ -1502,14 +1483,14 @@ private:
     std::vector<CallInst *> calls = getTargetAsmCalls(M, FFS, false);
     LLVMContext &ctx = M.getContext();
     Function *cttz =
-        Intrinsic::getDeclaration(&M, Intrinsic::cttz, {Type::getInt32Ty(ctx)});
+        Intrinsic::getDeclaration(&M, Intrinsic::cttz, {Type::getInt64Ty(ctx)});
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *v = call->getArgOperand(0);
-      Value *zero = B.getInt32(0);
+      Value *zero = B.getInt64(0);
       Value *isZero = B.CreateICmpEQ(v, zero);
       Value *cttzCall = B.CreateCall(cttz, {v, B.getFalse()});
-      Value *nonZero = B.CreateAdd(cttzCall, B.getInt32(1));
+      Value *nonZero = B.CreateAdd(cttzCall, B.getInt64(1));
       Value *replace = B.CreateSelect(isZero, zero, nonZero);
       call->replaceAllUsesWith(replace);
       call->eraseFromParent();
@@ -1520,14 +1501,14 @@ private:
     std::vector<CallInst *> calls = getTargetAsmCalls(M, FLS, false);
     LLVMContext &ctx = M.getContext();
     Function *ctlz =
-        Intrinsic::getDeclaration(&M, Intrinsic::ctlz, {Type::getInt32Ty(ctx)});
+        Intrinsic::getDeclaration(&M, Intrinsic::ctlz, {Type::getInt64Ty(ctx)});
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *v = call->getArgOperand(0);
-      Value *zero = B.getInt32(0);
+      Value *zero = B.getInt64(0);
       Value *isZero = B.CreateICmpEQ(v, zero);
       Value *ctlzCall = B.CreateCall(ctlz, {v, B.getFalse()});
-      Value *nonZero = B.CreateSub(B.getInt32(32), ctlzCall);
+      Value *nonZero = B.CreateSub(B.getInt64(32), ctlzCall);
       Value *replace = B.CreateSelect(isZero, zero, nonZero);
       call->replaceAllUsesWith(replace);
       call->eraseFromParent();
