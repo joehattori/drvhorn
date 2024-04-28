@@ -227,9 +227,10 @@ private:
   void handleMalloc(Module &M) {
     LLVMContext &ctx = M.getContext();
     Type *i32Type = Type::getInt32Ty(ctx);
+    Type *i64Type = Type::getInt64Ty(ctx);
     Type *voidPtrType = Type::getInt8Ty(ctx)->getPointerTo();
     FunctionCallee mallocFn =
-        M.getOrInsertFunction("malloc", voidPtrType, i32Type);
+        M.getOrInsertFunction("malloc", voidPtrType, i64Type);
     Function *memset = M.getFunction("memset");
     if (!memset) {
       errs() << "memset not found\n";
@@ -738,7 +739,7 @@ private:
       return;
     LLVMContext &ctx = M.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
+    Type *i64Type = Type::getInt64Ty(ctx);
     std::string wrapperName = "strlen_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
@@ -751,12 +752,12 @@ private:
     BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
 
     IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
+    Value *it = B.CreateAlloca(i64Type);
+    B.CreateStore(B.getInt64(0), it);
     B.CreateBr(loop);
 
     B.SetInsertPoint(loop);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
+    Value *loadedIt = B.CreateLoad(i64Type, it);
     Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
     Value *curChar = B.CreateLoad(i8Type, strPtr);
     Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
@@ -766,7 +767,7 @@ private:
     B.CreateRet(loadedIt);
 
     B.SetInsertPoint(loopEnd);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
+    B.CreateStore(B.CreateAdd(loadedIt, B.getInt64(1)), it);
     B.CreateBr(loop);
 
     f->replaceAllUsesWith(wrapper);
