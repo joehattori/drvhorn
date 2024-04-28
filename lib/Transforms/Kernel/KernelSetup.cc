@@ -32,7 +32,7 @@ using namespace llvm;
 
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
-#define XADDL_PREFIX "xaddl $0,$1"
+#define XADDL "xaddl $0,$1;"
 #define MOVB_0_1 "movb $0,$1"
 #define MOVB_1_0 "movb $1,$0"
 #define MOVW_0_1 "movw $0,$1"
@@ -210,13 +210,11 @@ public:
     // handleStrCat(M);
     // handleStrCmp(M);
     // handleStrNCmp(M);
-    // handleStrChr(M);
-    // handleStrLen(M);
+    handleStrChr(M);
+    handleStrLen(M);
     // handleStrNLen(M);
 
-    handleAcpiDivide(M);
-
-    handleInlineAssembly(M);
+    // handleInlineAssembly(M);
     insertMain(M);
     return true;
   }
@@ -232,25 +230,53 @@ private:
     Type *voidPtrType = Type::getInt8Ty(ctx)->getPointerTo();
     FunctionCallee mallocFn =
         M.getOrInsertFunction("malloc", voidPtrType, i32Type);
-    std::string mallocFuncNames[] = {
-        "__kmalloc",     "__kmalloc_node",     "__kmalloc_node_track_caller",
-        "kmalloc_large", "kmalloc_large_node", "__vmalloc_node_range",
-        "pcpu_alloc",
+    Function *memset = M.getFunction("memset");
+    if (!memset) {
+      errs() << "memset not found\n";
+      std::exit(42);
+    }
+    std::pair<std::string, unsigned> mallocFns[] = {
+        {"__kmalloc", 1},
+        {"__kmalloc_node", 1},
+        {"__kmalloc_node_track_caller", 1},
+        {"kmalloc_large", 1},
+        {"kmalloc_large_node", 1},
+        {"__vmalloc_node_range", 4},
+        {"pcpu_alloc", 3},
     };
-    for (const std::string &name : mallocFuncNames) {
-      std::string wrapperName = name + "_wrapper";
+    for (const std::pair<std::string, unsigned> &m : mallocFns) {
+      const std::string &name = m.first;
       Function *orig = M.getFunction(name);
       if (!orig)
         continue;
 
+      std::string wrapperName = name + "_wrapper";
       Function *wrapper = Function::Create(
-          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
+          orig->getFunctionType(), GlobalValue::LinkageTypes::PrivateLinkage,
           wrapperName, &M);
-      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-      IRBuilder<> B(block);
-      CallInst *call = B.CreateCall(mallocFn, {wrapper->getArg(0)});
+      BasicBlock *entryBlock = BasicBlock::Create(ctx, "", wrapper);
+      BasicBlock *zeroOutBlock = BasicBlock::Create(ctx, "", wrapper);
+      BasicBlock *retBlock = BasicBlock::Create(ctx, "", wrapper);
+
+      IRBuilder<> B(entryBlock);
+      Value *size = wrapper->getArg(0);
+      CallInst *call = B.CreateCall(mallocFn, {size});
       call->setTailCall();
+      Value *flag = wrapper->getArg(m.second);
+      // __GFP_ZERO: 0x100u
+      Value *masked = B.CreateAnd(flag, ConstantInt::get(i32Type, 0x100u));
+      Value *normalMalloc =
+          B.CreateICmpEQ(masked, ConstantInt::get(i32Type, 0));
+      B.CreateCondBr(normalMalloc, retBlock, zeroOutBlock);
+
+      B.SetInsertPoint(zeroOutBlock);
+      B.CreateCall(memset->getFunctionType(), memset,
+                   {call, ConstantInt::get(i32Type, 0), size});
+      B.CreateBr(retBlock);
+
+      B.SetInsertPoint(retBlock);
       B.CreateRet(call);
+
       orig->replaceAllUsesWith(wrapper);
       orig->eraseFromParent();
     }
@@ -353,8 +379,10 @@ private:
         MemcpyInfo{"memcpy", RetType::Dest},
         MemcpyInfo{"memcpy_fromio", RetType::Void},
         MemcpyInfo{"memcpy_toio", RetType::Void},
-        MemcpyInfo{"__copy_user_ll", RetType::Len},
-        MemcpyInfo{"__copy_user_ll_nocache_nozero", RetType::Len},
+        MemcpyInfo{"_copy_user_ll", RetType::Len},
+        MemcpyInfo{"_copy_user_ll_nocache_nozero", RetType::Len},
+        MemcpyInfo{"_copy_to_user", RetType::Len},
+        MemcpyInfo{"_copy_from_user", RetType::Len},
     };
     for (const MemcpyInfo &info : memcpyFuncNames) {
       Function *f = M.getFunction(info.name);
@@ -789,63 +817,6 @@ private:
     f->eraseFromParent();
   }
 
-  void handleAcpiDivide(Module &M) {
-    Function *f = M.getFunction("acpi_ut_divide");
-    if (!f)
-      return;
-    LLVMContext &ctx = M.getContext();
-    Type *i32Type = Type::getInt32Ty(ctx);
-    Type *i64Type = Type::getInt64Ty(ctx);
-    std::string wrapperName = "acpi_ut_divide_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
-    BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-
-    Value *dividend = wrapper->getArg(0);
-    Value *divisor = wrapper->getArg(1);
-    Value *quotientPtr = wrapper->getArg(2);
-    Value *remainderPtr = wrapper->getArg(3);
-
-    BasicBlock *err = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *checkQuotient = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *storeQuotient = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *checkRemainder = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *storeRemainder = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> B(block);
-    Value *divisorIsZero = B.CreateICmpEQ(divisor, B.getInt64(0));
-    B.CreateCondBr(divisorIsZero, err, checkQuotient);
-
-    B.SetInsertPoint(err);
-    B.CreateRet(ConstantInt::get(i32Type, 0xc));
-
-    B.SetInsertPoint(checkQuotient);
-    Value *quotientInt = B.CreatePtrToInt(quotientPtr, i64Type);
-    Value *hasDivisor = B.CreateICmpNE(quotientInt, B.getInt64(0));
-    B.CreateCondBr(hasDivisor, storeQuotient, checkRemainder);
-
-    B.SetInsertPoint(storeQuotient);
-    B.CreateStore(B.CreateUDiv(dividend, divisor), quotientPtr);
-    B.CreateBr(checkRemainder);
-
-    B.SetInsertPoint(checkRemainder);
-    Value *remainderInt = B.CreatePtrToInt(remainderPtr, i64Type);
-    Value *hasRemainder = B.CreateICmpNE(remainderInt, B.getInt64(0));
-    B.CreateCondBr(hasRemainder, storeRemainder, end);
-
-    B.SetInsertPoint(storeRemainder);
-    B.CreateStore(B.CreateURem(dividend, divisor), remainderPtr);
-    B.CreateBr(end);
-
-    B.SetInsertPoint(end);
-    B.CreateRet(ConstantInt::get(i32Type, 0x0));
-
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
   void handleInlineAssembly(Module &M) {
     handleBitTest(M);
     handleBitTestAndSet(M);
@@ -1215,7 +1186,7 @@ private:
   }
 
   void handleXAddl(Module &M) {
-    std::vector<CallInst *> calls = getTargetAsmCalls(M, XADDL_PREFIX, true);
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, XADDL, false);
     Type *i32Ty = Type::getInt32Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);

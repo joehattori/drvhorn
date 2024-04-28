@@ -131,7 +131,9 @@ private:
     }
     B.CreateCall(entry, args);
 
+    Type *i16Ty = Type::getInt16Ty(ctx);
     Type *i32Ty = Type::getInt32Ty(ctx);
+
     BasicBlock *errBlock = BasicBlock::Create(ctx, "", main);
     BasicBlock *retBlock = BasicBlock::Create(ctx, "", main);
 
@@ -147,7 +149,6 @@ private:
         B.CreateLoad(descType->getPointerTo(), tablesPtr);
     Value *validationCountPtr =
         B.CreateStructGEP(descType, firstTableDescPtr, VALIDATION_COUNT_INDEX);
-    Type *i16Ty = Type::getInt16Ty(ctx);
     LoadInst *validationCount = B.CreateLoad(i16Ty, validationCountPtr);
     Value *isZero = B.CreateICmpEQ(validationCount, ConstantInt::get(i16Ty, 0));
     B.CreateCondBr(isZero, retBlock, errBlock);
