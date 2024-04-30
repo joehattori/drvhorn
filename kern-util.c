@@ -1,7 +1,8 @@
 extern void __VERIFIER_assume(int);
 extern void *nd_malloc(void);
 
-inline void *__VERIFIER_memset(void *s, int c, unsigned long n) {
+__attribute__((always_inline)) void *__VERIFIER_memset(void *s, char c,
+                                                       unsigned long n) {
   int i;
   for (i = 0; i < n; i++)
     ((char*)s)[i] = 0;

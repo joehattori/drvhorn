@@ -4,6 +4,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Pass.h"
 
@@ -202,6 +203,7 @@ public:
     
     handleCallRcu(M);
 
+    handleMemset(M);
     handleMemCpy(M);
     handleMemMove(M);
     // handleStrCopy(M);
@@ -338,6 +340,36 @@ private:
     ReturnInst::Create(ctx, nullptr, block);
     orig->replaceAllUsesWith(wrapper);
     orig->eraseFromParent();
+  }
+
+  void handleMemset(Module &M) {
+    Function *memsetFn = M.getFunction("__VERIFIER_memset");
+    if (!memsetFn) {
+      errs() << "__VERIFIER_memset not found\n";
+      std::exit(1);
+    }
+    std::vector<MemSetInst *> memsetCalls;
+    for (Function &F : M) {
+      for (Instruction &I : instructions(F)) {
+        if (CallInst *call = dyn_cast<CallInst>(&I)) {
+          if (MemSetInst *memset = dyn_cast<MemSetInst>(call))
+            memsetCalls.push_back(memset);
+        }
+      }
+    }
+    for (MemSetInst *memset : memsetCalls) {
+      Value *dst = memset->getArgOperand(0);
+      Value *val = memset->getArgOperand(1);
+      Value *len = memset->getArgOperand(2);
+      IRBuilder<> B(memset);
+      CallInst *newCall =
+          B.CreateCall(memsetFn->getFunctionType(), memsetFn, {dst, val, len});
+      memset->replaceAllUsesWith(newCall);
+      memset->eraseFromParent();
+    }
+    if (Function *llvmMemset = M.getFunction("llvm.memset.p0i8.i64")) {
+      llvmMemset->eraseFromParent();
+    }
   }
 
   void handleMemCpy(Module &M) {

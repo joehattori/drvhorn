@@ -17,8 +17,8 @@ LLVM_COMPILER=clang WLLVM_OBJCOPY=llvm-objcopy wllvm \
   -include ./kernel/include/linux/compiler-version.h \
   -include ./kernel/include/linux/kconfig.h \
   -include ./kernel/include/linux/compiler_types.h \
+  -Os \
   -D__KERNEL__ \
-  -D__i386__ \
   -std=gnu11 \
   -DCC_USING_FENTRY \
   -DMODULE \

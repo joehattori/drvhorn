@@ -377,6 +377,16 @@ private:
         // drivers
         {"wait_for_device_probe", ReplacementType::Zero},
         {"driver_deferred_probe_trigger", ReplacementType::Zero},
+        // devices
+        {"device_add", ReplacementType::Zero},
+        {"device_del", ReplacementType::Zero},
+        {"dev_set_name", ReplacementType::Zero},
+        {"device_get_ownership", ReplacementType::Zero},
+        {"device_initialize", ReplacementType::Zero},
+        {"device_release", ReplacementType::Zero},
+        {"device_namespace", ReplacementType::Zero},
+        {"dev_attr_show", ReplacementType::Zero},
+        {"dev_attr_store", ReplacementType::Zero},
         // random
         {"rng_get_data", ReplacementType::Nondet},
         {"add_early_randomness", ReplacementType::Zero},
@@ -561,6 +571,11 @@ private:
 
   void verify(Module &M) {
     if (verifyModule(M, &errs())) {
+      for (Function &f : M) {
+        if (verifyFunction(f, &errs())) {
+          errs() << "Function " << f.getName() << " verification failed\n";
+        }
+      }
       errs() << "Module verification failed\n";
     } else {
       errs() << "Module verification Ok\n";
