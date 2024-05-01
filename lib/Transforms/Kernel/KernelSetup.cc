@@ -23,12 +23,12 @@ using namespace llvm;
   "=&A,i,{si},{bx},{cx},~{memory},~{dirflag},~{fpsr},~{flags}"
 #define OPTIMIZER_HIDE_VAR_CONSTRAINTS "=r,0,~{dirflag},~{fpsr},~{flags}"
 
-#define BIT_TEST_PREFIX "btl $2,$1"
-#define BIT_TEST_AND_SET_1_0_PREFIX "btsl $1,$0"
-#define BIT_TEST_AND_SET_2_0_PREFIX "btsl $2,$0"
-#define BIT_TEST_AND_SET_2_1_PREFIX "btsl $2,$1"
-#define BIT_TEST_AND_RESET_1_0_PREFIX "btrl $1,$0"
-#define BIT_TEST_AND_RESET_2_1_PREFIX "btrl $2,$1"
+#define BIT_TEST_PREFIX "btq $2,$1"
+#define BIT_TEST_AND_SET_1_0_PREFIX "btsq $1,$0"
+#define BIT_TEST_AND_SET_2_0_PREFIX "btsq $2,$0"
+#define BIT_TEST_AND_SET_2_1_PREFIX "btsq $2,$1"
+#define BIT_TEST_AND_RESET_1_0_PREFIX "btrq $1,$0"
+#define BIT_TEST_AND_RESET_2_1_PREFIX "btrq $2,$1"
 
 #define INCL "incl $0"
 #define DECL_PREFIX "decl $0"
@@ -81,6 +81,8 @@ using namespace llvm;
 #define IRET_TO_SELF "pushfl;pushl %cs;pushl $$1f;iret;1:"
 #define SET_DEBUG_REGISTER_PREFIX "mov $0,%db"
 #define NOP "rep; nop"
+#define LFENCE "lfence"
+#define SFENCE "sfence"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -880,6 +882,8 @@ private:
     // handleCallOnStack(M);
     // handleOptimizerHideVar(M);
     // handleGetUser(M);
+
+    handleFence(M);
   }
 
   std::string formatInlineAsm(std::string s) {
@@ -1054,19 +1058,19 @@ private:
 
   void handleBitTest(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, BIT_TEST_PREFIX, true);
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *base = call->getArgOperand(0);
       Value *offset = call->getArgOperand(1);
 
-      Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
-      Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
-      Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
-      Value *load = B.CreateLoad(i32Ty, byte);
-      Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+      Value *byteIdx = B.CreateLShr(offset, B.getInt64(5)); // divide by 32
+      Value *bitIdx = B.CreateAnd(offset, B.getInt64(31));  // mod 32
+      Value *byte = B.CreateGEP(i64Ty, base, byteIdx);
+      Value *load = B.CreateLoad(i64Ty, byte);
+      Value *mask = B.CreateShl(B.getInt64(1), bitIdx);
       Value *bit = B.CreateAnd(load, mask);
-      Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
+      Value *isSet = B.CreateICmpNE(bit, B.getInt64(0));
       Value *replace = B.CreateZExt(isSet, call->getType());
       call->replaceAllUsesWith(replace);
       call->eraseFromParent();
@@ -1074,9 +1078,9 @@ private:
   }
 
   void handleBitTestAndSet(Module &M) {
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
 
-    auto replace = [this, &M, i32Ty](const std::string &targetAsmPrefix) {
+    auto replace = [this, &M, i64Ty](const std::string &targetAsmPrefix) {
       std::vector<CallInst *> calls =
           getTargetAsmCalls(M, targetAsmPrefix, true);
       for (CallInst *call : calls) {
@@ -1084,13 +1088,13 @@ private:
         Value *base = call->getArgOperand(0);
         Value *offset = call->getArgOperand(1);
 
-        Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
-        Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
-        Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
-        Value *load = B.CreateLoad(i32Ty, byte);
-        Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+        Value *byteIdx = B.CreateLShr(offset, B.getInt64(5)); // divide by 32
+        Value *bitIdx = B.CreateAnd(offset, B.getInt64(31));  // mod 32
+        Value *byte = B.CreateGEP(i64Ty, base, byteIdx);
+        Value *load = B.CreateLoad(i64Ty, byte);
+        Value *mask = B.CreateShl(B.getInt64(1), bitIdx);
         Value *bit = B.CreateAnd(load, mask);
-        Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
+        Value *isSet = B.CreateICmpNE(bit, B.getInt64(0));
         B.CreateStore(B.CreateOr(load, mask), byte);
         if (!call->getType()->isVoidTy()) {
           Value *replace = B.CreateZExt(isSet, call->getType());
@@ -1106,8 +1110,8 @@ private:
   }
 
   void handleBitTestAndReset(Module &M) {
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    auto replaceBtrl = [this, &M, i32Ty](const std::string &targetAsmPrefix,
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
+    auto replaceBtrl = [this, &M, i64Ty](const std::string &targetAsmPrefix,
                                          unsigned addrIdx, unsigned offIdx) {
       std::vector<CallInst *> calls =
           getTargetAsmCalls(M, targetAsmPrefix, true);
@@ -1116,14 +1120,14 @@ private:
         Value *base = call->getArgOperand(0);
         Value *offset = call->getArgOperand(1);
 
-        Value *byteIdx = B.CreateLShr(offset, B.getInt32(5)); // divide by 32
-        Value *bitIdx = B.CreateAnd(offset, B.getInt32(31));  // mod 32
-        Value *byte = B.CreateGEP(i32Ty, base, byteIdx);
-        Value *load = B.CreateLoad(i32Ty, byte);
-        Value *mask = B.CreateShl(B.getInt32(1), bitIdx);
+        Value *byteIdx = B.CreateLShr(offset, B.getInt64(5)); // divide by 32
+        Value *bitIdx = B.CreateAnd(offset, B.getInt64(31));  // mod 32
+        Value *byte = B.CreateGEP(i64Ty, base, byteIdx);
+        Value *load = B.CreateLoad(i64Ty, byte);
+        Value *mask = B.CreateShl(B.getInt64(1), bitIdx);
         Value *bit = B.CreateAnd(load, mask);
-        Value *isSet = B.CreateICmpNE(bit, B.getInt32(0));
-        Value *flipped = B.CreateXor(mask, B.getInt32(0xffffffff));
+        Value *isSet = B.CreateICmpNE(bit, B.getInt64(0));
+        Value *flipped = B.CreateXor(mask, B.getInt64(0xffffffff));
         B.CreateStore(B.CreateAnd(load, flipped), byte);
         if (!call->getType()->isVoidTy()) {
           Value *replace = B.CreateZExt(isSet, call->getType());
@@ -1844,6 +1848,18 @@ private:
   //     call->eraseFromParent();
   //   }
   // }
+
+  void handleFence(Module &M) {
+    // simply ignore the FENCE instruction.
+    std::vector<CallInst *> calls = getTargetAsmCalls(M, LFENCE, false);
+    for (CallInst *call : calls) {
+      call->eraseFromParent();
+    }
+    calls = getTargetAsmCalls(M, SFENCE, false);
+    for (CallInst *call : calls) {
+      call->eraseFromParent();
+    }
+  }
 
   void handleCallOnStack(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, CALL_ON_STACK, false);
