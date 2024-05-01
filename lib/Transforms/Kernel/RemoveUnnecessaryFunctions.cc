@@ -425,9 +425,6 @@ private:
         // others
         {"panic", ReplacementType::Fail},
         {"add_taint", ReplacementType::Zero},
-        // debug
-        {"tpm_chip_alloc", ReplacementType::Nondet},
-        {"tpm_chip_register", ReplacementType::Nondet},
     };
 
     for (const ReplacePolicy &policy : replacements) {
