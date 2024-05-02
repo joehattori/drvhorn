@@ -1889,7 +1889,6 @@ private:
 
   void insertMain(Module &M) {
     if (M.getFunction("main")) {
-      LOG("ACPI", errs() << "ACPI: Main already exists.\n");
       return;
     }
 

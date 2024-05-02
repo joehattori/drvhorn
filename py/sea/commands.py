@@ -255,11 +255,12 @@ def get_sea_horn_dsa (opts):
 
 class Seapp(sea.LimitedCmd):
     def __init__(self, quiet=False, internalize=False, strip_extern=False,
-                 keep_lib_fn=False):
+                 keep_lib_fn=False, kernel=False):
         super(Seapp, self).__init__('pp', 'Pre-processing', allow_extra=True)
         self._internalize = internalize
         self._strip_extern = strip_extern
         self._keep_lib_fn = keep_lib_fn
+        self._kernel = kernel
 
     @property
     def stdout (self):
@@ -477,6 +478,9 @@ class Seapp(sea.LimitedCmd):
 
             if args.acpi:
                 argv.append ('--dd-acpi')
+
+            if self._kernel:
+                argv.append ('--kernel')
 
             if args.kill_vaarg:
                 argv.append('--kill-vaarg=true')
@@ -1698,5 +1702,5 @@ Fpcf = sea.SeqCmd('fpcf', 'clang|fat-bnd-check|fec|unroll|cut-loops|opt|horn --s
                  [Clang(), FatBoundsCheck()] + FECrab.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
 Spf = sea.SeqCmd('spf', 'clang|add-branch-sentinel|fat-bnd-check|fe|unroll|cut-loops|opt|horn --solve',
                  [Clang(), AddBranchSentinel(), FatBoundsCheck()] + FrontEnd.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
-DD = sea.SeqCmd('dd', 'Linux device driver verification: alias for pp|ms|opt|horn --solve',
-                 [Seapp(), MixedSem(), Seaopt(), Seahorn(solve=True)])
+Kernel = sea.SeqCmd('kernel', 'Linux kernel verification: alias for pp|ms|opt|horn --solve',
+                 [Seapp(kernel=True), MixedSem(), Seaopt(), Seahorn(solve=True)])

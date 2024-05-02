@@ -123,7 +123,10 @@ private:
 
     assert(entry_point != "" && "entry-point not specified");
     Function *entry = M.getFunction(entry_point);
-    assert(entry && "entry-point not found");
+    if (!entry) {
+      errs() << "entry-point " << entry_point << " not found\n";
+      std::exit(1);
+    }
     SmallVector<Value *, 16> args;
     for (Argument &A : entry->args()) {
       FunctionCallee ndf = getNondetFn(A.getType(), M);

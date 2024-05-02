@@ -286,6 +286,11 @@ static llvm::cl::opt<bool> PrintStats("seapp-stats",
                                       llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
+    Kernel("kernel",
+               llvm::cl::desc("Target the Linux kernel"),
+               llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
     Acpi("dd-acpi",
                llvm::cl::desc("Target an ACPI driver"),
                llvm::cl::init(false));
@@ -501,8 +506,7 @@ int main(int argc, char **argv) {
     // -- Externalize some user-selected functions
     pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
 
-    bool isKernel = Acpi;
-    if (isKernel) {
+    if (Kernel) {
       pm_wrapper.add(seahorn::createKernelSetupPass());
     } else {
       // -- Create a main function if we do not have one.
@@ -511,6 +515,9 @@ int main(int argc, char **argv) {
 
     if (Acpi) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
+    }
+    
+    if (Kernel) {
       pm_wrapper.add(seahorn::createRemoveUnnecessaryFunctionsPass());
       pm_wrapper.add(seahorn::createKernelDebugPass());
     }
