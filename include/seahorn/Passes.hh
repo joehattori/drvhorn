@@ -19,6 +19,7 @@ terms.
 #include "seahorn/config.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 
@@ -112,7 +113,7 @@ llvm::ModulePass *createDebugVerifierPass(int instanceID, llvm::StringRef name);
 llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
 
-llvm::Pass *createAcpiSetupPass(std::string entry);
+llvm::Pass *createAcpiSetupPass(const llvm::cl::list<std::string> &acpiDrivers);
 llvm::Pass *createKernelSetupPass();
 llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();

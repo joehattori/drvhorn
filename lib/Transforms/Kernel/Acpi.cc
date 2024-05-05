@@ -5,6 +5,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
 
 #include <iostream>
 
@@ -15,6 +16,10 @@
 // indices of fields in struct acpi_table_desc
 #define SIGNATURE_INDEX 3
 #define VALIDATION_COUNT_INDEX 6
+// indices of fields in struct acpi_driver
+#define ACPI_DEVICE_OPS_INDEX 4
+// indices of fields in struct acpi_device_ops
+#define ACPI_OP_ADD_INDEX 0
 
 using namespace llvm;
 
@@ -24,12 +29,24 @@ class AcpiSetup : public ModulePass {
 public:
   static char ID;
 
-  AcpiSetup(std::string entry) : ModulePass(ID), entry_point(entry) {}
+  AcpiSetup(const cl::list<std::string> &acpiDrivers) : ModulePass(ID) {
+    for (StringRef acpiDriver : acpiDrivers) {
+      acpiDriverNames.push_back(acpiDriver);
+    }
+  }
 
   bool runOnModule(Module &M) override {
+    LLVMContext &ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(ctx);
     Function *main = M.getFunction("main");
     acpiInitialization(M, main);
-    buildAssertion(M, main);
+    SmallVector<Function *> acpiOpAddFns = getAcpiOpAddFns(M);
+    IRBuilder<> B(&main->back());
+    for (Function *acpiOpAdd : acpiOpAddFns) {
+      Function *caller = acpiAddCaller(M, acpiOpAdd);
+      B.CreateCall(caller->getFunctionType(), caller);
+    }
+    B.CreateRet(ConstantInt::get(i32Ty, 42));
     return true;
   }
 
@@ -38,7 +55,7 @@ public:
 private:
   // Basically copied from DummyMainFunction.cc
   DenseMap<const Type *, FunctionCallee> ndfn;
-  std::string entry_point;
+  SmallVector<StringRef> acpiDriverNames;
 
   FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,
                                  std::string prefix) {
@@ -61,6 +78,47 @@ private:
         makeNewNondetFn(M, *type, ndfn.size(), "verifier.nondet.");
     ndfn[type] = res;
     return res;
+  }
+
+  SmallVector<GlobalVariable *> getAcpiDrivers(Module &M) {
+    SmallVector<GlobalVariable *> drivers;
+    if (acpiDriverNames.size() == 1 && acpiDriverNames[0].equals("all")) {
+      for (GlobalVariable &gv : M.globals()) {
+        Type *type = gv.getType();
+        if (!type->isPointerTy())
+          continue;
+        type = type->getPointerElementType();
+        if (!type->isStructTy())
+          continue;
+        if (type->getStructName().startswith("struct.acpi_driver")) {
+          drivers.push_back(&gv);
+        }
+      }
+    } else {
+      for (StringRef name : acpiDriverNames) {
+        GlobalVariable *driver = M.getGlobalVariable(name, true);
+        if (!driver) {
+          errs() << "global variable " << name << " not found\n";
+        }
+        drivers.push_back(driver);
+      }
+    }
+    return drivers;
+  }
+
+  SmallVector<Function *> getAcpiOpAddFns(Module &M) {
+    SmallVector<Function *> acpiOpAddFns;
+    SmallVector<GlobalVariable *> drivers = getAcpiDrivers(M);
+    for (GlobalVariable *driver : drivers) {
+      Constant *init = driver->getInitializer();
+      ConstantStruct *cs = cast<ConstantStruct>(init);
+      ConstantStruct *acpiDeviceOps =
+          cast<ConstantStruct>(cs->getOperand(ACPI_DEVICE_OPS_INDEX));
+      Function *acpiOpAdd =
+          cast<Function>(acpiDeviceOps->getOperand(ACPI_OP_ADD_INDEX));
+      acpiOpAddFns.push_back(acpiOpAdd);
+    }
+    return acpiOpAddFns;
   }
 
   void acpiInitialization(Module &M, Function *main) {
@@ -117,30 +175,21 @@ private:
     B.CreateStore(tpm2Int, intSignaturePtr);
   }
 
-  void buildAssertion(Module &M, Function *main) {
+  Function *acpiAddCaller(Module &M, Function *acpiOpAdd) {
     LLVMContext &ctx = M.getContext();
-    IRBuilder<> B(&main->back());
-
-    assert(entry_point != "" && "entry-point not specified");
-    Function *entry = M.getFunction(entry_point);
-    if (!entry) {
-      errs() << "entry-point " << entry_point << " not found\n";
-      std::exit(1);
-    }
-    SmallVector<Value *, 16> args;
-    for (Argument &A : entry->args()) {
-      FunctionCallee ndf = getNondetFn(A.getType(), M);
-      args.push_back(B.CreateCall(ndf));
-    }
-    B.CreateCall(entry, args);
 
     Type *i16Ty = Type::getInt16Ty(ctx);
-    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *voidType = Type::getVoidTy(ctx);
 
-    BasicBlock *errBlock = BasicBlock::Create(ctx, "", main);
-    BasicBlock *retBlock = BasicBlock::Create(ctx, "", main);
+    std::string callerName = acpiOpAdd->getName().str() + ".caller";
+    Function *caller =
+        Function::Create(FunctionType::get(voidType, false),
+                         Function::InternalLinkage, callerName, &M);
+    BasicBlock *mainBlock = BasicBlock::Create(ctx, "", caller);
+    BasicBlock *errBlock = BasicBlock::Create(ctx, "", caller);
+    BasicBlock *retBlock = BasicBlock::Create(ctx, "", caller);
+    IRBuilder<> B(mainBlock);
 
-    // build failure path
     StructType *acpiTableType =
         StructType::getTypeByName(ctx, "struct.acpi_table_list");
     GlobalVariable *acpiTable = M.getGlobalVariable("acpi_gbl_root_table_list");
@@ -152,6 +201,13 @@ private:
         B.CreateLoad(descType->getPointerTo(), tablesPtr);
     Value *validationCountPtr =
         B.CreateStructGEP(descType, firstTableDescPtr, VALIDATION_COUNT_INDEX);
+
+    SmallVector<Value *> args;
+    for (Argument &A : acpiOpAdd->args()) {
+      FunctionCallee ndf = getNondetFn(A.getType(), M);
+      args.push_back(B.CreateCall(ndf));
+    }
+    B.CreateCall(acpiOpAdd, args);
     LoadInst *validationCount = B.CreateLoad(i16Ty, validationCountPtr);
     Value *isZero = B.CreateICmpEQ(validationCount, ConstantInt::get(i16Ty, 0));
     B.CreateCondBr(isZero, retBlock, errBlock);
@@ -161,15 +217,18 @@ private:
     FunctionCallee errFn = M.getOrInsertFunction(
         "__VERIFIER_error", FunctionType::get(Type::getVoidTy(ctx), false));
     B.CreateCall(errFn);
-    B.CreateBr(retBlock);
+    B.CreateRetVoid();
 
     // build success path
     B.SetInsertPoint(retBlock);
-    B.CreateRet(ConstantInt::get(i32Ty, 42));
+    B.CreateRetVoid();
+    return caller;
   }
 };
 
 char AcpiSetup::ID = 0;
 
-Pass *createAcpiSetupPass(std::string entry) { return new AcpiSetup(entry); }
+Pass *createAcpiSetupPass(const cl::list<std::string> &acpiDrivers) {
+  return new AcpiSetup(acpiDrivers);
+}
 } // namespace seahorn

@@ -28,6 +28,7 @@ using namespace llvm;
 #define BIT_TEST_AND_SET_2_0_PREFIX "btsq $2,$0"
 #define BIT_TEST_AND_SET_2_1_PREFIX "btsq $2,$1"
 #define BIT_TEST_AND_RESET_1_0_PREFIX "btrq $1,$0"
+#define BIT_TEST_AND_RESET_2_0_PREFIX "btrq $2,$0"
 #define BIT_TEST_AND_RESET_2_1_PREFIX "btrq $2,$1"
 
 #define INCL "incl $0"
@@ -39,7 +40,9 @@ using namespace llvm;
 #define MOVW_1_0 "movw $1,$0"
 #define MOVL_0_1 "movl $0,$1"
 #define MOVL_1_0 "movl $1,$0"
-#define MOVL_POSITION_INDEPENDENT "movl ${1:P},$0"
+#define MOVQ_0_1 "movq $0,$1"
+#define MOVQ_1_0 "movq $1,$0"
+#define MOVQ_POSITION_INDEPENDENT "movq ${1:P},$0"
 #define ADDL "addl $1,$0"
 #define ANDB "andb ${1:b},$0"
 #define ANDL "andl $1,$0"
@@ -83,6 +86,7 @@ using namespace llvm;
 #define NOP "rep; nop"
 #define LFENCE "lfence"
 #define SFENCE "sfence"
+#define MFENCE "mfence"
 
 #define LOAD_CR3 "mov $0,%cr3"
 #define LIDT "lidt $0"
@@ -345,31 +349,13 @@ private:
   }
 
   void handleMemset(Module &M) {
-    Function *memsetFn = M.getFunction("__VERIFIER_memset");
-    if (!memsetFn) {
-      errs() << "__VERIFIER_memset not found\n";
-      std::exit(1);
-    }
-    std::vector<MemSetInst *> memsetCalls;
-    for (Function &F : M) {
-      for (Instruction &I : instructions(F)) {
-        if (CallInst *call = dyn_cast<CallInst>(&I)) {
-          if (MemSetInst *memset = dyn_cast<MemSetInst>(call))
-            memsetCalls.push_back(memset);
-        }
-      }
-    }
-    for (MemSetInst *memset : memsetCalls) {
-      Value *dst = memset->getArgOperand(0);
-      Value *val = memset->getArgOperand(1);
-      Value *len = memset->getArgOperand(2);
-      IRBuilder<> B(memset);
-      CallInst *newCall =
-          B.CreateCall(memsetFn->getFunctionType(), memsetFn, {dst, val, len});
-      memset->replaceAllUsesWith(newCall);
-      memset->eraseFromParent();
-    }
     if (Function *llvmMemset = M.getFunction("llvm.memset.p0i8.i64")) {
+      Function *memsetFn = M.getFunction("__VERIFIER_memset");
+      if (!memsetFn) {
+        errs() << "__VERIFIER_memset not found\n";
+        std::exit(1);
+      }
+      llvmMemset->replaceAllUsesWith(memsetFn);
       llvmMemset->eraseFromParent();
     }
   }
@@ -976,7 +962,7 @@ private:
     };
 
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, MOVL_POSITION_INDEPENDENT, false);
+        getTargetAsmCalls(M, MOVQ_POSITION_INDEPENDENT, false);
     for (CallInst *call : calls) {
       IRBuilder<> B(call);
       Value *arg = call->getArgOperand(0);
@@ -990,7 +976,7 @@ private:
           task->getName().equals("current_task")) {
         Value *currentTask =
             B.CreateLoad(task->getType()->getPointerElementType(), task);
-        Value *cast = B.CreatePtrToInt(currentTask, B.getInt32Ty());
+        Value *cast = B.CreatePtrToInt(currentTask, B.getInt64Ty());
         call->replaceAllUsesWith(cast);
         call->eraseFromParent();
       }
@@ -1138,6 +1124,7 @@ private:
     };
 
     replaceBtrl(BIT_TEST_AND_RESET_1_0_PREFIX, 1, 0);
+    replaceBtrl(BIT_TEST_AND_RESET_2_0_PREFIX, 2, 0);
     replaceBtrl(BIT_TEST_AND_RESET_2_1_PREFIX, 2, 1);
   }
 
@@ -1371,8 +1358,9 @@ private:
 
   void handleMov(Module &M) {
     LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt32Ty(ctx);
     Type *i8Ty = Type::getInt8Ty(ctx);
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *i64Ty = Type::getInt64Ty(ctx);
 
     auto replaceMov = [this, &M](const std::string &targetAsm, Type *intTy,
                                  unsigned srcIdx, unsigned dstIdx) {
@@ -1428,6 +1416,8 @@ private:
     replaceMov(MOVW_1_0, i32Ty, 1, 0);
     replaceMov(MOVL_0_1, i32Ty, 0, 1);
     replaceMov(MOVL_1_0, i32Ty, 1, 0);
+    replaceMov(MOVQ_0_1, i64Ty, 0, 1);
+    replaceMov(MOVQ_1_0, i64Ty, 1, 0);
   }
 
   void handleXchgl(Module &M) {
@@ -1856,6 +1846,10 @@ private:
       call->eraseFromParent();
     }
     calls = getTargetAsmCalls(M, SFENCE, false);
+    for (CallInst *call : calls) {
+      call->eraseFromParent();
+    }
+    calls = getTargetAsmCalls(M, MFENCE, false);
     for (CallInst *call : calls) {
       call->eraseFromParent();
     }

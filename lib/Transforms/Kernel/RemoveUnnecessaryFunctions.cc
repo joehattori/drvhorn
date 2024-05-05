@@ -80,18 +80,19 @@ private:
     for (Function &f : M) {
       if (f.isDeclaration())
         continue;
-      if (!f.getName().equals("main"))
-        f.setLinkage(GlobalValue::LinkageTypes::PrivateLinkage);
+      if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_"))
+        continue;
+      f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
     for (GlobalVariable &v : M.globals()) {
       if (v.isDeclaration())
         continue;
-      v.setLinkage(GlobalValue::LinkageTypes::PrivateLinkage);
+      v.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
     for (GlobalAlias &alias : M.aliases()) {
       if (alias.isDeclaration())
         continue;
-      alias.setLinkage(GlobalValue::LinkageTypes::PrivateLinkage);
+      alias.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
   }
 
@@ -169,6 +170,7 @@ private:
         // lock
         {"mutex_lock", ReplacementType::Zero},
         {"mutex_lock_interruptible", ReplacementType::Zero},
+        {"mutex_trylock", ReplacementType::Zero},
         {"mutex_is_locked", ReplacementType::Zero},
         {"mutex_unlock", ReplacementType::Zero},
         {"__mutex_init", ReplacementType::Zero},
@@ -191,17 +193,18 @@ private:
         {"__up", ReplacementType::Zero},
         {"__init_rwsem", ReplacementType::Zero},
         {"down_read", ReplacementType::Zero},
-        {"__down_read_common", ReplacementType::Zero},
-        {"rwsem_mark_wake", ReplacementType::Zero},
         {"down_write", ReplacementType::Zero},
-        {"rwsem_down_write_slowpath", ReplacementType::Zero},
         {"up_read", ReplacementType::Zero},
-        {"rwsem_wake", ReplacementType::Zero},
         {"up_write", ReplacementType::Zero},
+        {"__down_read_common", ReplacementType::Zero},
+        {"rwsem_wake", ReplacementType::Zero},
+        {"rwsem_mark_wake", ReplacementType::Zero},
+        {"rwsem_down_write_slowpath", ReplacementType::Zero},
         {"down_timeout", ReplacementType::Zero},
         // scheduling
         {"__schedule", ReplacementType::Zero},
         {"schedule", ReplacementType::Zero},
+        {"schedule_timeout", ReplacementType::Zero},
         {"might_resched", ReplacementType::Zero},
         {"__cond_sched", ReplacementType::Zero},
         {"need_resched", ReplacementType::Zero},
@@ -210,6 +213,7 @@ private:
         {"__queue_work", ReplacementType::Zero},
         {"queue_work_node", ReplacementType::Zero},
         {"queue_rcu_work", ReplacementType::Zero},
+        {"queue_delayed_work_on", ReplacementType::Zero},
         {"flush_workqueue_prep_pwqs", ReplacementType::Zero},
         {"check_flush_dependency", ReplacementType::Zero},
         {"kthread_create_on_node", ReplacementType::Zero},
@@ -228,6 +232,8 @@ private:
         {"complete_all", ReplacementType::Zero},
         {"wait_for_common", ReplacementType::Nondet},
         {"wait_for_common_io", ReplacementType::Nondet},
+        {"finish_wait", ReplacementType::Zero},
+        {"prepare_to_wait_event", ReplacementType::Zero},
         // syscall
         {"syscall_init", ReplacementType::Zero},
         {"ret_from_fork", ReplacementType::Zero},
@@ -317,6 +323,13 @@ private:
         // work_struct
         {"flush_work", ReplacementType::Zero},
         {"__flush_workqueue", ReplacementType::Zero},
+        {"cancel_work_sync", ReplacementType::Zero},
+        {"flush_delayed_work", ReplacementType::Zero},
+        {"flush_rcu_work", ReplacementType::Zero},
+        {"cancel_work", ReplacementType::Zero},
+        {"cancel_delayed_work", ReplacementType::Zero},
+        {"cancel_delayed_work_sync", ReplacementType::Zero},
+        {"execute_in_process_context", ReplacementType::Zero},
         // io-wq
         {"io_wq_enqueue", ReplacementType::Zero},
         {"io_wq_put_and_exit", ReplacementType::Zero},
@@ -338,12 +351,34 @@ private:
         {"__free_irq", ReplacementType::Zero},
         {"__irq_disable", ReplacementType::Zero},
         {"invalidate_bh_lrus", ReplacementType::Zero},
+        {"enable_irq", ReplacementType::Zero},
+        {"request_threaded_irq", ReplacementType::Zero},
+        {"request_nmi", ReplacementType::Zero},
+        {"setup_percpu_irq", ReplacementType::Zero},
+        {"__request_percpu_irq", ReplacementType::Zero},
+        {"request_percpu_nmi", ReplacementType::Zero},
         // tasklet
         {"tasklet_action", ReplacementType::Zero},
         {"tasklet_action_common", ReplacementType::Zero},
         // notification
         {"kobject_uevent", ReplacementType::Zero},
+        {"notifier_call_chain", ReplacementType::Zero},
+        {"atomic_notifier_chain_register", ReplacementType::Zero},
+        {"atomic_notifier_chain_register_unique_prio", ReplacementType::Zero},
+        {"atomic_notifier_chain_unregister", ReplacementType::Zero},
+        {"atomic_notifier_call_chain", ReplacementType::Zero},
+        {"blocking_notifier_chain_register", ReplacementType::Zero},
+        {"blocking_notifier_chain_register_unique_prio", ReplacementType::Zero},
+        {"blocking_notifier_chain_unregister", ReplacementType::Zero},
+        {"blocking_notifier_call_chain_robust", ReplacementType::Zero},
         {"blocking_notifier_call_chain", ReplacementType::Zero},
+        {"raw_notifier_chain_register", ReplacementType::Zero},
+        {"raw_notifier_chain_unregister", ReplacementType::Zero},
+        {"raw_notifier_call_chain_robust", ReplacementType::Zero},
+        {"raw_notifier_call_chain", ReplacementType::Zero},
+        {"notify_die", ReplacementType::Zero},
+        {"register_die_notifier", ReplacementType::Zero},
+        {"unregister_die_notifier", ReplacementType::Zero},
         // timer
         {"schedule_hrtimeout_range", ReplacementType::Zero},
         {"schedule_hrtimeout_range_clock", ReplacementType::Zero},
@@ -407,21 +442,40 @@ private:
         {"_dev_warn", ReplacementType::Zero},
         {"_dev_notice", ReplacementType::Zero},
         {"_dev_info", ReplacementType::Zero},
+        // reboot.c
+        {"machine_power_off", ReplacementType::Fail},
+        {"machine_shutdown", ReplacementType::Fail},
+        {"machine_emergency_restart", ReplacementType::Fail},
+        {"machine_restart", ReplacementType::Fail},
+        {"machine_halt", ReplacementType::Zero},
+        {"orderly_poweroff", ReplacementType::Fail},
+        {"orderly_reboot", ReplacementType::Fail},
+        {"kernel_can_power_off", ReplacementType::Zero},
+        {"kernel_power_off", ReplacementType::Fail},
+        {"hw_protection_shutdown", ReplacementType::Fail},
         // acpi
         {"__acpi_acquire_global_lock", ReplacementType::Zero},
         {"__acpi_release_global_lock", ReplacementType::Zero},
-        {"acpi_os_acquire_lock", ReplacementType::Zero},
-        {"acpi_os_release_lock", ReplacementType::Zero},
+        {"acpi_acquire_global_lock", ReplacementType::Zero},
+        {"acpi_release_global_lock", ReplacementType::Zero},
         {"acpi_ut_acquire_mutex", ReplacementType::Zero},
         {"acpi_ut_release_mutex", ReplacementType::Zero},
+        {"acpi_ex_acquire_mutex", ReplacementType::Zero},
+        {"acpi_ex_release_mutex", ReplacementType::Zero},
+        {"acpi_os_acquire_lock", ReplacementType::Zero},
+        {"acpi_os_release_lock", ReplacementType::Zero},
         {"acpi_dev_get_resources", ReplacementType::Nondet, {3}},
         {"acpi_dev_free_resource_list", ReplacementType::Zero},
-        {"acpi_evaluate_object", ReplacementType::Nondet, {3}},
+        {"acpi_evaluate_object", ReplacementType::Zero},
         {"acpi_os_execute", ReplacementType::Nondet},
-        {"acpi_hw_validate_register", ReplacementType::Nondet},
         {"acpi_os_vprintf", ReplacementType::Zero},
         {"acpi_os_unmap_iomem", ReplacementType::Zero},
         {"acpi_os_remove_interrupt_handler", ReplacementType::Zero},
+        {"acpi_walk_resources", ReplacementType::Zero},
+        {"acpi_enable_subsystem", ReplacementType::Zero},
+        {"acpi_install_address_space_handler", ReplacementType::Zero},
+        {"acpi_remove_address_space_handler", ReplacementType::Zero},
+        {"acpi_handle_printk", ReplacementType::Zero},
         // others
         {"panic", ReplacementType::Fail},
         {"add_taint", ReplacementType::Zero},

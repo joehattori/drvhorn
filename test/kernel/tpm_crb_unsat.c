@@ -4,7 +4,7 @@
 // RUN: %wllvm --target=x86_64-unknown-linux-gnu -I%kernel-dir/arch/x86/include -I%kernel-dir/arch/x86/include/generated -I%kernel-dir/arch/x86/include/uapi -I%kernel-dir/arch/x86/include/generated/uapi -I%kernel-dir/include -I%kernel-dir/include/uapi -I%kernel-dir/include/generated/uapi -include %kernel-dir/include/linux/compiler-version.h -include %kernel-dir/include/linux/kconfig.h -include %kernel-dir/include/linux/compiler_types.h -Os -D__KERNEL__ -std=gnu11 -DCC_USING_FENTRY -DMODULE -DKBUILD_BASENAME=seahorn -DKBUILD_MODNAME=seahorn -D__KBUILD_MODNAME=seahorn -fshort-wchar -c %s -o %t.o 2> /dev/null
 // RUN: %extract-bc %t.o
 // RUN: %llvm-link %t-kernel.bc %t.o.bc -o %t-merged.bc
-// RUN: %sea kernel --dd-acpi --entry=crb_acpi_add_ok --track=mem --horn-stats --devirt-functions=types --inline "%t-merged.bc" | OutputCheck %s
+// RUN: %sea kernel --acpi-driver=crb_acpi_driver_ok --track=mem --horn-stats --externalize-addr-taken-functions --devirt-functions=types --inline "%t-merged.bc" | OutputCheck %s
 // CHECK: ^unsat$
 
 #include <linux/acpi.h>
@@ -107,3 +107,34 @@ out:
   acpi_put_table((struct acpi_table_header *)buf);
   return rc;
 }
+
+static int crb_acpi_remove_ok(struct acpi_device *device)
+{
+	struct device *dev = &device->dev;
+	struct tpm_chip *chip = dev_get_drvdata(dev);
+
+	tpm_chip_unregister(chip);
+
+	return 0;
+}
+
+static const struct acpi_device_id crb_device_ids_ok[] = {
+	{"MSFT0101", 0},
+	{"", 0},
+};
+
+static const struct dev_pm_ops crb_pm_ok = {
+	SET_SYSTEM_SLEEP_PM_OPS(tpm_pm_suspend, tpm_pm_resume)
+};
+
+struct acpi_driver crb_acpi_driver_ok = {
+	.name = "tpm_crb_ok",
+	.ids = crb_device_ids_ok,
+	.ops = {
+		.add = crb_acpi_add_ok,
+		.remove = crb_acpi_remove_ok,
+	},
+	.drv = {
+		.pm = &crb_pm_ok,
+	},
+};

@@ -290,10 +290,10 @@ static llvm::cl::opt<bool>
                llvm::cl::desc("Target the Linux kernel"),
                llvm::cl::init(false));
 
-static llvm::cl::opt<bool>
-    Acpi("dd-acpi",
-               llvm::cl::desc("Target an ACPI driver"),
-               llvm::cl::init(false));
+static llvm::cl::list<std::string>
+    AcpiDrivers("acpi-driver",
+               llvm::cl::desc("Target ACPI drivers"),
+               llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated);
 
 static llvm::cl::opt<std::string>
     EntryPoint("entry-point",
@@ -513,8 +513,8 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
     }
 
-    if (Acpi) {
-      pm_wrapper.add(seahorn::createAcpiSetupPass(EntryPoint));
+    if (AcpiDrivers.begin() != AcpiDrivers.end()) {
+      pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDrivers));
     }
     
     if (Kernel) {

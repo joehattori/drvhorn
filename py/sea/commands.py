@@ -312,8 +312,8 @@ class Seapp(sea.LimitedCmd):
                          default='none')
         ap.add_argument ('--entry', dest='entry', help='Make entry point if main does not exist',
                          default=None, metavar='str')
-        ap.add_argument ('--dd-acpi', dest='acpi', help='Target an ACPI driver',
-                         default=False, action='store_true')
+        ap.add_argument ('--acpi-driver', dest='acpi_driver', help='Specify an ACPI driver to validate',
+                         type=str, metavar='str,...')
         ap.add_argument ('--externalize-addr-taken-functions',
                          help='Externalize uses of address-taken functions',
                          dest='enable_ext_funcs', default=False,
@@ -476,8 +476,9 @@ class Seapp(sea.LimitedCmd):
             if args.entry is not None:
                 argv.append ('--entry-point={0}'.format (args.entry))
 
-            if args.acpi:
-                argv.append ('--dd-acpi')
+            if args.acpi_driver:
+                for driver in args.acpi_driver.split(','):
+                    argv.append ('--acpi-driver={0}'.format (driver))
 
             if self._kernel:
                 argv.append ('--kernel')
