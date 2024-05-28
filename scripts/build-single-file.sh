@@ -14,6 +14,7 @@ LLVM_COMPILER=clang WLLVM_OBJCOPY=llvm-objcopy wllvm \
   -I./kernel/include \
   -I./kernel/include/uapi \
   -I./kernel/include/generated/uapi \
+  -I./kernel/drivers/acpi \
   -include ./kernel/include/linux/compiler-version.h \
   -include ./kernel/include/linux/kconfig.h \
   -include ./kernel/include/linux/compiler_types.h \

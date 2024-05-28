@@ -290,10 +290,13 @@ static llvm::cl::opt<bool>
                llvm::cl::desc("Target the Linux kernel"),
                llvm::cl::init(false));
 
-static llvm::cl::list<std::string>
-    AcpiDrivers("acpi-driver",
-               llvm::cl::desc("Target ACPI drivers"),
-               llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated);
+static llvm::cl::opt<std::string>
+    AcpiDriver("acpi-driver", llvm::cl::desc("Target ACPI drivers"),
+               llvm::cl::init(""));
+
+static llvm::cl::opt<std::string>
+    PlatformDriver("platform-driver", llvm::cl::desc("Target Platform drivers"),
+                   llvm::cl::init(""));
 
 static llvm::cl::opt<std::string>
     EntryPoint("entry-point",
@@ -513,10 +516,10 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
     }
 
-    if (AcpiDrivers.begin() != AcpiDrivers.end()) {
-      pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDrivers));
+    if (!AcpiDriver.empty()) {
+      pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
     }
-    
+
     if (Kernel) {
       pm_wrapper.add(seahorn::createRemoveUnnecessaryFunctionsPass());
       pm_wrapper.add(seahorn::createKernelDebugPass());
@@ -676,7 +679,7 @@ int main(int argc, char **argv) {
     }
 
     // run inliner pass
-    if (InlineAll || InlineAllocFn || InlineConstructFn) {
+    if (InlineAll || InlineAllocFn || InlineConstructFn || Kernel) {
       pm_wrapper.add(llvm::createAlwaysInlinerLegacyPass());
       pm_wrapper.add(
           llvm::createGlobalDCEPass()); // kill unused internal global

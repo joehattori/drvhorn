@@ -7,15 +7,6 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 
-#include <iostream>
-
-// indices of fields in struct acpi_table_list
-#define ACPI_TABLE_DESC_INDEX 0
-#define CURRENT_TABLE_COUNT_INDEX 1
-#define MAX_TABLE_COUNT_INDEX 2
-// indices of fields in struct acpi_table_desc
-#define SIGNATURE_INDEX 3
-#define VALIDATION_COUNT_INDEX 6
 // indices of fields in struct acpi_driver
 #define ACPI_DEVICE_OPS_INDEX 4
 // indices of fields in struct acpi_device_ops
@@ -29,206 +20,59 @@ class AcpiSetup : public ModulePass {
 public:
   static char ID;
 
-  AcpiSetup(const cl::list<std::string> &acpiDrivers) : ModulePass(ID) {
-    for (StringRef acpiDriver : acpiDrivers) {
-      acpiDriverNames.push_back(acpiDriver);
-    }
-  }
+  AcpiSetup(StringRef acpiDriver)
+      : ModulePass(ID), acpiDriverName(acpiDriver) {}
 
   bool runOnModule(Module &M) override {
-    LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    Function *main = M.getFunction("main");
-    acpiInitialization(M, main);
-    SmallVector<Function *> acpiOpAddFns = getAcpiOpAddFns(M);
-    IRBuilder<> B(&main->back());
-    for (Function *acpiOpAdd : acpiOpAddFns) {
-      Function *caller = acpiAddCaller(M, acpiOpAdd);
-      B.CreateCall(caller->getFunctionType(), caller);
+    Function *placeholder = M.getFunction("__PLACEHOLDER_acpi_driver_add");
+    if (!placeholder) {
+      errs() << "Placeholder not found\n";
+      return false;
+      // std::exit(1);
     }
-    B.CreateRet(ConstantInt::get(i32Ty, 42));
+    Function *acpiOpAddFn = getAcpiOpAddFns(M);
+    if (!acpiOpAddFn) {
+      errs() << "ACPI driver initialization function not found\n";
+      std::exit(1);
+    }
+    Type *addArgType = acpiOpAddFn->getArg(0)->getType();
+    for (User *u : placeholder->users()) {
+      if (CallInst *call = dyn_cast<CallInst>(u)) {
+        IRBuilder<> B(call);
+        Value *arg = call->getArgOperand(0);
+        if (arg->getType() != addArgType) {
+          arg = B.CreateBitCast(arg, addArgType);
+        }
+        CallInst *newCall =
+            B.CreateCall(acpiOpAddFn->getFunctionType(), acpiOpAddFn, arg);
+        call->replaceAllUsesWith(newCall);
+        call->dropAllReferences();
+        call->eraseFromParent();
+      }
+    }
     return true;
   }
 
   virtual StringRef getPassName() const override { return "AcpiSetup"; }
 
 private:
-  // Basically copied from DummyMainFunction.cc
-  DenseMap<const Type *, FunctionCallee> ndfn;
-  SmallVector<StringRef> acpiDriverNames;
+  StringRef acpiDriverName;
 
-  FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,
-                                 std::string prefix) {
-    std::string name;
-    unsigned c = num;
-    do {
-      name = prefix + std::to_string(c++);
-    } while (m.getNamedValue(name));
-    FunctionCallee res = m.getOrInsertFunction(name, &type);
-    return res;
-  }
-
-  FunctionCallee getNondetFn(Type *type, Module &M) {
-    auto it = ndfn.find(type);
-    if (it != ndfn.end()) {
-      return it->second;
-    }
-
-    FunctionCallee res =
-        makeNewNondetFn(M, *type, ndfn.size(), "verifier.nondet.");
-    ndfn[type] = res;
-    return res;
-  }
-
-  SmallVector<GlobalVariable *> getAcpiDrivers(Module &M) {
-    SmallVector<GlobalVariable *> drivers;
-    if (acpiDriverNames.size() == 1 && acpiDriverNames[0].equals("all")) {
-      for (GlobalVariable &gv : M.globals()) {
-        Type *type = gv.getType();
-        if (!type->isPointerTy())
-          continue;
-        type = type->getPointerElementType();
-        if (!type->isStructTy())
-          continue;
-        if (type->getStructName().startswith("struct.acpi_driver")) {
-          drivers.push_back(&gv);
-        }
-      }
-    } else {
-      for (StringRef name : acpiDriverNames) {
-        GlobalVariable *driver = M.getGlobalVariable(name, true);
-        if (!driver) {
-          errs() << "global variable " << name << " not found\n";
-        }
-        drivers.push_back(driver);
-      }
-    }
-    return drivers;
-  }
-
-  SmallVector<Function *> getAcpiOpAddFns(Module &M) {
-    SmallVector<Function *> acpiOpAddFns;
-    SmallVector<GlobalVariable *> drivers = getAcpiDrivers(M);
-    for (GlobalVariable *driver : drivers) {
-      Constant *init = driver->getInitializer();
-      ConstantStruct *cs = cast<ConstantStruct>(init);
-      ConstantStruct *acpiDeviceOps =
-          cast<ConstantStruct>(cs->getOperand(ACPI_DEVICE_OPS_INDEX));
-      Function *acpiOpAdd =
-          cast<Function>(acpiDeviceOps->getOperand(ACPI_OP_ADD_INDEX));
-      acpiOpAddFns.push_back(acpiOpAdd);
-    }
-    return acpiOpAddFns;
-  }
-
-  void acpiInitialization(Module &M, Function *main) {
-    LLVMContext &ctx = M.getContext();
-    BasicBlock *block = BasicBlock::Create(ctx, "", main);
-    IRBuilder<> B(block);
-
-    StructType *acpiTableType =
-        StructType::getTypeByName(ctx, "struct.acpi_table_list");
-    GlobalVariable *acpiTable = M.getGlobalVariable("acpi_gbl_root_table_list");
-    assert(acpiTable && "initial_tables not found");
-
-    StructType *descType =
-        StructType::getTypeByName(ctx, "struct.acpi_table_desc");
-    ArrayType *initialTablesType = ArrayType::get(descType, 128);
-    Constant *initialTables =
-        M.getOrInsertGlobal("initial_tables", initialTablesType);
-    assert(initialTables && "initial_tables not found");
-    Value *castedInitialTables =
-        B.CreateBitCast(initialTables, descType->getPointerTo());
-    Value *tablesPtr =
-        B.CreateStructGEP(acpiTableType, acpiTable, ACPI_TABLE_DESC_INDEX);
-    B.CreateStore(castedInitialTables, tablesPtr);
-
-    // acpi_gbl_root_table_list.current_table_count = 1;
-    Value *currentTableCountPtr =
-        B.CreateStructGEP(acpiTableType, acpiTable, CURRENT_TABLE_COUNT_INDEX);
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    Constant *one = ConstantInt::get(i32Ty, 1);
-    B.CreateStore(one, currentTableCountPtr);
-
-    // acpi_gbl_root_table_list.max_table_count = ACPI_MAX_TABLES;
-    Value *maxTableCountPtr =
-        B.CreateStructGEP(acpiTableType, acpiTable, MAX_TABLE_COUNT_INDEX);
-    Constant *maxTableCount = ConstantInt::get(i32Ty, 128);
-    B.CreateStore(maxTableCount, maxTableCountPtr);
-
-    // acpi_gbl_root_table_list.tables[0].validation_count = 0;
-    Value *firstTableDescPtr =
-        B.CreateLoad(descType->getPointerTo(), tablesPtr);
-    Value *validationCountPtr =
-        B.CreateStructGEP(descType, firstTableDescPtr, VALIDATION_COUNT_INDEX);
-    Type *i16Ty = Type::getInt16Ty(ctx);
-    Constant *zero = ConstantInt::get(i16Ty, 0);
-    B.CreateStore(zero, validationCountPtr);
-
-    // acpi_gbl_root_table_list.tables[0].signature.integer = 0x324d5054;
-    // // 0x324d5054: int of "2MPT", reversed "TPM2"
-    Value *signaturePtr =
-        B.CreateStructGEP(descType, firstTableDescPtr, SIGNATURE_INDEX);
-    Value *intSignaturePtr = B.CreateStructGEP(
-        signaturePtr->getType()->getPointerElementType(), signaturePtr, 0);
-    Constant *tpm2Int = ConstantInt::get(i32Ty, 0x324d5054);
-    B.CreateStore(tpm2Int, intSignaturePtr);
-  }
-
-  Function *acpiAddCaller(Module &M, Function *acpiOpAdd) {
-    LLVMContext &ctx = M.getContext();
-
-    Type *i16Ty = Type::getInt16Ty(ctx);
-    Type *voidType = Type::getVoidTy(ctx);
-
-    std::string callerName = acpiOpAdd->getName().str() + ".caller";
-    Function *caller =
-        Function::Create(FunctionType::get(voidType, false),
-                         Function::InternalLinkage, callerName, &M);
-    BasicBlock *mainBlock = BasicBlock::Create(ctx, "", caller);
-    BasicBlock *errBlock = BasicBlock::Create(ctx, "", caller);
-    BasicBlock *retBlock = BasicBlock::Create(ctx, "", caller);
-    IRBuilder<> B(mainBlock);
-
-    StructType *acpiTableType =
-        StructType::getTypeByName(ctx, "struct.acpi_table_list");
-    GlobalVariable *acpiTable = M.getGlobalVariable("acpi_gbl_root_table_list");
-    Value *tablesPtr =
-        B.CreateStructGEP(acpiTableType, acpiTable, ACPI_TABLE_DESC_INDEX);
-    StructType *descType =
-        StructType::getTypeByName(ctx, "struct.acpi_table_desc");
-    Value *firstTableDescPtr =
-        B.CreateLoad(descType->getPointerTo(), tablesPtr);
-    Value *validationCountPtr =
-        B.CreateStructGEP(descType, firstTableDescPtr, VALIDATION_COUNT_INDEX);
-
-    SmallVector<Value *> args;
-    for (Argument &A : acpiOpAdd->args()) {
-      FunctionCallee ndf = getNondetFn(A.getType(), M);
-      args.push_back(B.CreateCall(ndf));
-    }
-    B.CreateCall(acpiOpAdd, args);
-    LoadInst *validationCount = B.CreateLoad(i16Ty, validationCountPtr);
-    Value *isZero = B.CreateICmpEQ(validationCount, ConstantInt::get(i16Ty, 0));
-    B.CreateCondBr(isZero, retBlock, errBlock);
-
-    // build error path
-    B.SetInsertPoint(errBlock);
-    FunctionCallee errFn = M.getOrInsertFunction(
-        "__VERIFIER_error", FunctionType::get(Type::getVoidTy(ctx), false));
-    B.CreateCall(errFn);
-    B.CreateRetVoid();
-
-    // build success path
-    B.SetInsertPoint(retBlock);
-    B.CreateRetVoid();
-    return caller;
+  Function *getAcpiOpAddFns(Module &M) {
+    GlobalVariable *driver = M.getGlobalVariable(acpiDriverName, true);
+    Constant *init = driver->getInitializer();
+    ConstantStruct *cs = cast<ConstantStruct>(init);
+    ConstantStruct *acpiDeviceOps =
+        cast<ConstantStruct>(cs->getOperand(ACPI_DEVICE_OPS_INDEX));
+    Function *acpiOpAdd =
+        cast<Function>(acpiDeviceOps->getOperand(ACPI_OP_ADD_INDEX));
+    return acpiOpAdd;
   }
 };
 
 char AcpiSetup::ID = 0;
 
-Pass *createAcpiSetupPass(const cl::list<std::string> &acpiDrivers) {
+Pass *createAcpiSetupPass(StringRef acpiDrivers) {
   return new AcpiSetup(acpiDrivers);
 }
 } // namespace seahorn

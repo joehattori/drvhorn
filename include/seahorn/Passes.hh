@@ -113,7 +113,7 @@ llvm::ModulePass *createDebugVerifierPass(int instanceID, llvm::StringRef name);
 llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
 
-llvm::Pass *createAcpiSetupPass(const llvm::cl::list<std::string> &acpiDrivers);
+llvm::Pass *createAcpiSetupPass(llvm::StringRef acpiDrivers);
 llvm::Pass *createKernelSetupPass();
 llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();
