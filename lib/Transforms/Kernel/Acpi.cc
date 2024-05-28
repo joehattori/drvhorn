@@ -1,3 +1,5 @@
+#include "seahorn/Transforms/Kernel/SlimDown.hh"
+
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -24,32 +26,9 @@ public:
       : ModulePass(ID), acpiDriverName(acpiDriver) {}
 
   bool runOnModule(Module &M) override {
-    Function *placeholder = M.getFunction("__PLACEHOLDER_acpi_driver_add");
-    if (!placeholder) {
-      errs() << "Placeholder not found\n";
-      return false;
-      // std::exit(1);
-    }
-    Function *acpiOpAddFn = getAcpiOpAddFns(M);
-    if (!acpiOpAddFn) {
-      errs() << "ACPI driver initialization function not found\n";
-      std::exit(1);
-    }
-    Type *addArgType = acpiOpAddFn->getArg(0)->getType();
-    for (User *u : placeholder->users()) {
-      if (CallInst *call = dyn_cast<CallInst>(u)) {
-        IRBuilder<> B(call);
-        Value *arg = call->getArgOperand(0);
-        if (arg->getType() != addArgType) {
-          arg = B.CreateBitCast(arg, addArgType);
-        }
-        CallInst *newCall =
-            B.CreateCall(acpiOpAddFn->getFunctionType(), acpiOpAddFn, arg);
-        call->replaceAllUsesWith(newCall);
-        call->dropAllReferences();
-        call->eraseFromParent();
-      }
-    }
+    fillPlaceholder(M);
+    GlobalVariable *acpiRoot = M.getNamedGlobal("acpi_gbl_root_table_list");
+    slimDown(M, acpiRoot);
     return true;
   }
 
@@ -67,6 +46,33 @@ private:
     Function *acpiOpAdd =
         cast<Function>(acpiDeviceOps->getOperand(ACPI_OP_ADD_INDEX));
     return acpiOpAdd;
+  }
+
+  void fillPlaceholder(Module &M) {
+    Function *placeholder = M.getFunction("__PLACEHOLDER_acpi_driver_add");
+    if (!placeholder) {
+      errs() << "Placeholder not found\n";
+      std::exit(1);
+    }
+    Function *acpiOpAddFn = getAcpiOpAddFns(M);
+    if (!acpiOpAddFn) {
+      errs() << "ACPI driver initialization function not found\n";
+      std::exit(1);
+    }
+    Type *addArgType = acpiOpAddFn->getArg(0)->getType();
+    for (User *u : placeholder->users()) {
+      if (CallInst *call = dyn_cast<CallInst>(u)) {
+        IRBuilder<> B(call);
+        Value *arg = call->getArgOperand(0);
+        if (arg->getType() != addArgType)
+          arg = B.CreateBitCast(arg, addArgType);
+        CallInst *newCall =
+            B.CreateCall(acpiOpAddFn->getFunctionType(), acpiOpAddFn, arg);
+        call->replaceAllUsesWith(newCall);
+        call->dropAllReferences();
+        call->eraseFromParent();
+      }
+    }
   }
 };
 

@@ -521,7 +521,6 @@ int main(int argc, char **argv) {
     }
 
     if (Kernel) {
-      pm_wrapper.add(seahorn::createRemoveUnnecessaryFunctionsPass());
       pm_wrapper.add(seahorn::createKernelDebugPass());
     }
 
