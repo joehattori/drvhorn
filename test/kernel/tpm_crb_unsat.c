@@ -1,9 +1,6 @@
-// RUN: %wllvm --target=x86_64-unknown-linux-gnu -I%kernel-dir/arch/x86/include -I%kernel-dir/arch/x86/include/generated -I%kernel-dir/arch/x86/include/uapi -I%kernel-dir/arch/x86/include/generated/uapi -I%kernel-dir/include -I%kernel-dir/include/uapi -I%kernel-dir/include/generated/uapi -I%kernel-dir/driver/acpi -include %kernel-dir/include/linux/compiler-version.h -include %kernel-dir/include/linux/kconfig.h -include %kernel-dir/include/linux/compiler_types.h -Os -D__KERNEL__ -std=gnu11 -DCC_USING_FENTRY -DMODULE -DKBUILD_BASENAME=seahorn -DKBUILD_MODNAME=seahorn -D__KBUILD_MODNAME=seahorn -fshort-wchar -c %kern-util -o %t-util.o 2> /dev/null
-// RUN: %extract-bc %t-util.o
-// RUN: %llvm-link %vmlinux-bc %t-util.o.bc -o %t-kernel.bc
-// RUN: %wllvm --target=x86_64-unknown-linux-gnu -I%kernel-dir/arch/x86/include -I%kernel-dir/arch/x86/include/generated -I%kernel-dir/arch/x86/include/uapi -I%kernel-dir/arch/x86/include/generated/uapi -I%kernel-dir/include -I%kernel-dir/include/uapi -I%kernel-dir/include/generated/uapi -I%kernel-dir/driver/acpi -include %kernel-dir/include/linux/compiler-version.h -include %kernel-dir/include/linux/kconfig.h -include %kernel-dir/include/linux/compiler_types.h -Os -D__KERNEL__ -std=gnu11 -DCC_USING_FENTRY -DMODULE -DKBUILD_BASENAME=seahorn -DKBUILD_MODNAME=seahorn -D__KBUILD_MODNAME=seahorn -fshort-wchar -c %s -o %t.o 2> /dev/null
-// RUN: %extract-bc %t.o
-// RUN: %llvm-link %t-kernel.bc %t.o.bc -o %t-merged.bc
+// RUN: set -e
+// RUN: %merge %drvhorn-util %kernel-dir/vmlinux.bc %t-kernel.bc %kernel-dir
+// RUN: %merge %s %t-kernel.bc %t-merged.bc %kernel-dir
 // RUN: %sea kernel --acpi-driver=crb_acpi_driver_unsat --inline %t-merged.bc | OutputCheck %s
 // CHECK: ^unsat$
 
@@ -18,6 +15,7 @@
 #include <acpi/actypes.h>
 #include <acpica/aclocal.h>
 #include <acpica/actables.h>
+#include <tpm/tpm.h>
 
 extern void __VERIFIER_error(void);
 #define sassert(X) (void)((X) || (__VERIFIER_error(), 0))
@@ -32,10 +30,6 @@ struct tpm2_crb_smc {
 	u32 smc_func_id;
 };
 
-extern struct acpi_table_list acpi_gbl_root_table_list;
-
-int acpi_device_add(struct acpi_device *device);
-
 struct crb_priv {
   u32 sm;
   const char *hid;
@@ -46,6 +40,11 @@ struct crb_priv {
   u32 cmd_size;
   u32 smc_func_id;
 };
+
+extern struct acpi_table_list acpi_gbl_root_table_list;
+
+int acpi_device_add(struct acpi_device *device);
+int crb_map_io(struct acpi_device *device, struct crb_priv *priv, struct acpi_table_tpm2 *buf);
 
 int crb_acpi_add_unsat(struct acpi_device *device)
 {

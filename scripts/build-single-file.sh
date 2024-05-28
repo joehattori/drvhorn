@@ -5,19 +5,21 @@ set -eu
 FILE=$1
 OUT=$2
 
+KERNEL_DIR=${KERNEL_DIR:-./kernel}
+
 LLVM_COMPILER=clang WLLVM_OBJCOPY=llvm-objcopy wllvm \
   --target=x86_64-unknown-linux-gnu \
-  -I./kernel/arch/x86/include \
-  -I./kernel/arch/x86/include/generated \
-  -I./kernel/arch/x86/include/uapi \
-  -I./kernel/arch/x86/include/generated/uapi \
-  -I./kernel/include \
-  -I./kernel/include/uapi \
-  -I./kernel/include/generated/uapi \
-  -I./kernel/drivers/acpi \
-  -include ./kernel/include/linux/compiler-version.h \
-  -include ./kernel/include/linux/kconfig.h \
-  -include ./kernel/include/linux/compiler_types.h \
+  -I${KERNEL_DIR}/arch/x86/include \
+  -I${KERNEL_DIR}/arch/x86/include/generated \
+  -I${KERNEL_DIR}/arch/x86/include/uapi \
+  -I${KERNEL_DIR}/arch/x86/include/generated/uapi \
+  -I${KERNEL_DIR}/include \
+  -I${KERNEL_DIR}/include/uapi \
+  -I${KERNEL_DIR}/include/generated/uapi \
+  -I${KERNEL_DIR}/drivers/acpi \
+  -include ${KERNEL_DIR}/include/linux/compiler-version.h \
+  -include ${KERNEL_DIR}/include/linux/kconfig.h \
+  -include ${KERNEL_DIR}/include/linux/compiler_types.h \
   -Os \
   -D__KERNEL__ \
   -std=gnu11 \
