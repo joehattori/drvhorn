@@ -266,7 +266,7 @@ private:
     std::string mallocFns[] = {
         "__kmalloc",     "__kmalloc_node",     "__kmalloc_node_track_caller",
         "kmalloc_large", "kmalloc_large_node", "__vmalloc_node_range",
-        "pcpu_alloc",    "__ioremap_caller",
+        "pcpu_alloc",    "__ioremap_caller",   "__early_ioremap",
     };
     for (const std::string &name : mallocFns) {
       Function *orig = M.getFunction(name);

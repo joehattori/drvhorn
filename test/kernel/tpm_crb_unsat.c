@@ -59,9 +59,12 @@ int crb_acpi_add_unsat(struct acpi_device *device)
 
 	status = acpi_get_table(ACPI_SIG_TPM2, 1,
 				(struct acpi_table_header **) &buf);
-	sassert(status == 0);
-	if (ACPI_FAILURE(status) || buf->header.length < sizeof(*buf)) {
+	if (ACPI_FAILURE(status)) {
 	  return -EINVAL;
+	}
+	if (buf->header.length < sizeof(*buf)) {
+	  rc = -EINVAL;
+	  goto out;
 	}
   
   sm = buf->start_method;
@@ -144,23 +147,18 @@ struct acpi_driver crb_acpi_driver_unsat = {
 
 static struct acpi_table_desc my_initial_tables[128];
 
+extern int nd_int();
+extern char nd_char();
+
 void setup_acpi_tables(void) {
   struct acpi_table_tpm2 *tpm2;
 
 	acpi_gbl_root_table_list.current_table_count = 1;
 	acpi_gbl_root_table_list.max_table_count = 128;
 	acpi_gbl_root_table_list.tables = my_initial_tables;
-	acpi_gbl_root_table_list.tables[0].signature.integer = 0x324d5054;
+	acpi_gbl_root_table_list.tables[0].signature.integer = nd_int();
   acpi_gbl_root_table_list.tables[0].validation_count = 0;
-
-  tpm2 = kmalloc(sizeof(*tpm2), GFP_KERNEL);
-  tpm2->header.signature[0] = 'T';
-  tpm2->header.signature[1] = 'P';
-  tpm2->header.signature[2] = 'M';
-  tpm2->header.signature[3] = '2';
-  tpm2->header.length = sizeof(*tpm2) + sizeof(struct tpm2_crb_smc);
-  tpm2->start_method = 2;
-  acpi_gbl_root_table_list.tables[0].pointer = (struct acpi_table_header *)tpm2;
+  acpi_gbl_root_table_list.tables[0].flags = nd_char();
 }
 
 extern int __PLACEHOLDER_acpi_driver_add(struct acpi_device *dev);

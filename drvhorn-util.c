@@ -66,6 +66,11 @@ void *__DRVHORN___ioremap_caller(unsigned long long addr, unsigned long size, in
   return __DRVHORN_malloc(size);
 }
 
+void *__DRVHORN___early_ioremap(resource_size_t phys_addr, unsigned long size,
+                                pgprot_t prot) {
+  return __DRVHORN_malloc(size);
+}
+
 struct page __DRVHORN_pages[0x100000];
 struct page *__DRVHORN___alloc_pages() {
   static unsigned long long base = 0;

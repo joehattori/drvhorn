@@ -48,6 +48,7 @@ def main (argv):
             sea.commands.Fpcf,
             sea.commands.Spf,
             sea.commands.Kernel,
+            sea.commands.ExeKernel,
             sea.yama.Yama(),
             sea.cex.CexGen(),
             sea.cex.SeaExeCex(),

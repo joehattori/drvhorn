@@ -424,6 +424,14 @@ int main(int argc, char **argv) {
   pm_wrapper.add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
   pm_wrapper.add(seahorn::createSeaBuiltinsWrapperPass());
 
+  if (Kernel) {
+    pm_wrapper.add(seahorn::createKernelSetupPass());
+  }
+
+  if (!AcpiDriver.empty()) {
+    pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
+  }
+
   if (RenameNondet)
     // -- ren-nondet utility pass
     pm_wrapper.add(seahorn::createRenameNondetPass());
@@ -508,16 +516,9 @@ int main(int argc, char **argv) {
   else {
     // -- Externalize some user-selected functions
     pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
-
-    if (Kernel) {
-      pm_wrapper.add(seahorn::createKernelSetupPass());
-    } else {
+    if (!Kernel) {
       // -- Create a main function if we do not have one.
       pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
-    }
-
-    if (!AcpiDriver.empty()) {
-      pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
     }
 
     if (Kernel) {

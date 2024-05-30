@@ -18,17 +18,12 @@ struct acpi_table_list {
 	unsigned char flags;
 };
 
-struct tpm2_crb_smc {
-	u32 interrupt;
-	u8 interrupt_flags;
-	u8 op_flags;
-	u16 reserved2;
-	u32 smc_func_id;
-};
-
 extern struct acpi_table_list acpi_gbl_root_table_list;
 
 static struct acpi_table_desc my_initial_tables[128];
+
+extern int nd_int();
+extern char nd_char();
 
 void setup_acpi_tables(void) {
   struct acpi_table_tpm2 *tpm2;
@@ -36,17 +31,9 @@ void setup_acpi_tables(void) {
 	acpi_gbl_root_table_list.current_table_count = 1;
 	acpi_gbl_root_table_list.max_table_count = 128;
 	acpi_gbl_root_table_list.tables = my_initial_tables;
-	acpi_gbl_root_table_list.tables[0].signature.integer = 0x324d5054;
+	acpi_gbl_root_table_list.tables[0].signature.integer = nd_int();
   acpi_gbl_root_table_list.tables[0].validation_count = 0;
-
-  tpm2 = kmalloc(sizeof(*tpm2), GFP_KERNEL);
-  tpm2->header.signature[0] = 'T';
-  tpm2->header.signature[1] = 'P';
-  tpm2->header.signature[2] = 'M';
-  tpm2->header.signature[3] = '2';
-  tpm2->header.length = sizeof(*tpm2) + sizeof(struct tpm2_crb_smc);
-  tpm2->start_method = 2;
-  acpi_gbl_root_table_list.tables[0].pointer = (struct acpi_table_header *)tpm2;
+  acpi_gbl_root_table_list.tables[0].flags = nd_char();
 }
 
 extern int __PLACEHOLDER_acpi_driver_add(struct acpi_device *dev);

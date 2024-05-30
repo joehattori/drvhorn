@@ -404,6 +404,9 @@ class Seapp(sea.LimitedCmd):
         # for now, there is no option to undo this switch
         argv.append('--simplifycfg-sink-common=false')
 
+        if self._kernel:
+            argv.append ('--kernel')
+
         # internalize takes precedence over all other options and must run alone
         if self._strip_extern:
             argv.append ('--only-strip-extern=true')
@@ -483,9 +486,6 @@ class Seapp(sea.LimitedCmd):
 
             if args.platform_driver:
                 argv.append ('--platform-driver={0}'.format (args.platform_driver))
-
-            if self._kernel:
-                argv.append ('--kernel')
 
             if args.kill_vaarg:
                 argv.append('--kill-vaarg=true')
@@ -1709,3 +1709,6 @@ Spf = sea.SeqCmd('spf', 'clang|add-branch-sentinel|fat-bnd-check|fe|unroll|cut-l
                  [Clang(), AddBranchSentinel(), FatBoundsCheck()] + FrontEnd.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
 Kernel = sea.SeqCmd('kernel', 'Linux kernel verification: alias for pp|ms|opt|horn --solve',
                  [Seapp(kernel=True), MixedSem(), Seaopt(), Seahorn(solve=True)])
+ExeKernel = sea.SeqCmd ('exe-kernel', 'alias for clang|pp --strip-extern|pp --internalize|wmem|rmtf|linkrt',
+                  [Seapp(strip_extern=True, keep_lib_fn=True, kernel=True),
+                   Seapp(internalize=True), WrapMem(), RemoveTargetFeatures(), LinkRt()])
