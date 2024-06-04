@@ -219,6 +219,21 @@ using namespace llvm;
   "${4:l};6651:;# ALT: replacement 2;6642:;6652:;.popsection;.pushsection "    \
   ".altinstr_aux,\"ax\";6:;testb $1,${2:P} (% rip);jnz ${3:l};jmp "            \
   "${4:l};.popsection"
+#define GET_USER_ASM_Q                                                         \
+  "1:movq $1,$0;.pushsection \"__ex_table\",\"a\";.balign 4;.long (1b) - "     \
+  ".;.long (${2:l}) - .;.long 3;.popsection"
+#define GET_USER_ASM_L                                                         \
+  "1:movl $1,$0;.pushsection \"__ex_table\",\"a\";.balign 4;.long (1b) - "     \
+  ".;.long (${2:l}) - .;.long 3;.popsection"
+#define GET_USER_ASM_W                                                         \
+  "1:movw $1,$0;.pushsection \"__ex_table\",\"a\";.balign 4;.long (1b) - "     \
+  ".;.long (${2:l}) - .;.long 3;.popsection"
+#define GET_USER_ASM_B                                                         \
+  "1:movb $1,$0;.pushsection \"__ex_table\",\"a\";.balign 4;.long (1b) - "     \
+  ".;.long (${2:l}) - .;.long 3;.popsection"
+#define CPU_VMX_OFF                                                            \
+  "1: vmxoff;.pushsection \"__ex_table\",\"a\";.balign 4;.long (1b) - "        \
+  ".;.long (${0:l}) - .;.long 1;.popsection"
 
 #define NATIVE_SAVE_FL "# __raw_save_flags;pushf ; pop $0"
 
@@ -921,7 +936,9 @@ private:
     handleRandom(M);
 
     // handleFence(M);
-    // handleStaticCpuHas(M);
+    handleStaticCpuHas(M);
+    handleGetUserAsm(M);
+    handleCpuVmxOff(M);
   }
 
   std::string splitAndJoin(std::string s, std::string delimiter,
@@ -2026,26 +2043,6 @@ private:
     }
   }
 
-  // void handleGetUser(Module &M) {
-  //   std::vector<CallInst *> calls =
-  //       getTargetAsmCalls(M, GET_USER, false, GET_USER_CONSTRAINTS);
-  //   for (CallInst *call : calls) {
-  //     IRBuilder<> B(call);
-  //     Value *addr = call->getArgOperand(0);
-  //     Value *stackPointer = call->getArgOperand(2);
-  //
-  //     Value *empty = UndefValue::get(call->getType());
-  //     Value *ok = B.CreateInsertValue(empty, B.getInt32(0), {0});
-  //     Value *loaded = B.CreateLoad(addr->getType()->getPointerElementType(),
-  //     addr); if (loaded->getType()->isIntegerTy()) {
-  //     }
-  //     Value *setLoaded = B.CreateInsertValue(ok, loaded, {1});
-  //     Value *completed = B.CreateInsertValue(setLoaded, stackPointer, {2});
-  //     call->replaceAllUsesWith(completed);
-  //     call->eraseFromParent();
-  //   }
-  // }
-
   void handleFence(Module &M) {
     // simply ignore the FENCE instruction.
     std::vector<CallInst *> calls = getTargetAsmCalls(M, LFENCE, false);
@@ -2067,8 +2064,45 @@ private:
         getTargetAsmCallBrs(M, STATIC_CPU_HAS_BRANCH, false);
     for (CallBrInst *callbr : calls) {
       IRBuilder<> B(callbr);
+      // TODO: Randomizing the destination should be better.
       BranchInst *branch = B.CreateBr(callbr->getIndirectDest(1));
       callbr->replaceAllUsesWith(branch);
+      callbr->eraseFromParent();
+    }
+  }
+
+  void handleGetUserAsm(Module &M) {
+    auto replace = [this, &M](const std::string &targetAsm,
+                              const std::string &utilSuffix) {
+      std::vector<CallBrInst *> calls =
+          getTargetAsmCallBrs(M, targetAsm, false);
+      for (CallBrInst *callbr : calls) {
+        IRBuilder<> B(callbr);
+        Value *largeStruct = callbr->getArgOperand(0);
+        Value *bytes =
+            B.CreateGEP(largeStruct->getType(), largeStruct, B.getInt32(0));
+        Function *f = M.getFunction("__DRVHORN_util_read_" + utilSuffix);
+        CallInst *val = B.CreateCall(f, bytes);
+        // TODO: Randomizing the destination should be better.
+        B.CreateBr(callbr->getDefaultDest());
+        callbr->replaceAllUsesWith(val);
+        callbr->eraseFromParent();
+      }
+    };
+    replace(GET_USER_ASM_Q, "u64");
+    replace(GET_USER_ASM_L, "u32");
+    replace(GET_USER_ASM_W, "u16");
+    replace(GET_USER_ASM_B, "u8");
+  }
+
+  void handleCpuVmxOff(Module &M) {
+    std::vector<CallBrInst *> calls =
+        getTargetAsmCallBrs(M, CPU_VMX_OFF, false);
+    for (CallBrInst *callbr : calls) {
+      IRBuilder<> B(callbr);
+      BasicBlock *block = callbr->getDefaultDest();
+      BranchInst *br = B.CreateBr(block);
+      callbr->replaceAllUsesWith(br);
       callbr->eraseFromParent();
     }
   }

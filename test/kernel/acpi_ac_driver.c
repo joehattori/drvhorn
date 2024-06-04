@@ -1,8 +1,8 @@
 // RUN: set -e
 // RUN: %merge %drvhorn-util %kernel-dir/vmlinux.bc %t-kernel.bc %kernel-dir
 // RUN: %merge %s %t-kernel.bc %t-merged.bc %kernel-dir
-// RUN: %sea kernel --acpi-driver=crb_acpi_driver --inline %t-merged.bc | OutputCheck %s
-// CHECK: ^sat$
+// RUN: %sea kernel --acpi-driver=acpi_ac_driver --inline %t-merged.bc | OutputCheck %s
+// CHECK: ^unsat$
 
 #include <linux/acpi.h>
 #include <linux/slab.h>

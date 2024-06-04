@@ -151,12 +151,10 @@ extern int nd_int();
 extern char nd_char();
 
 void setup_acpi_tables(void) {
-  struct acpi_table_tpm2 *tpm2;
-
-	acpi_gbl_root_table_list.current_table_count = 1;
-	acpi_gbl_root_table_list.max_table_count = 128;
-	acpi_gbl_root_table_list.tables = my_initial_tables;
-	acpi_gbl_root_table_list.tables[0].signature.integer = nd_int();
+  acpi_gbl_root_table_list.current_table_count = 1;
+  acpi_gbl_root_table_list.max_table_count = 128;
+  acpi_gbl_root_table_list.tables = my_initial_tables;
+  acpi_gbl_root_table_list.tables[0].signature.integer = nd_int();
   acpi_gbl_root_table_list.tables[0].validation_count = 0;
   acpi_gbl_root_table_list.tables[0].flags = nd_char();
 }

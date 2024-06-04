@@ -9,6 +9,9 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
 
+#include <map>
+#include <queue>
+
 #define COMPILER_USED_NAME "llvm.compiler.used"
 
 using namespace llvm;
@@ -19,16 +22,44 @@ public:
   DenseSet<const Instruction *> &build(Module &M, User *user) {
     visitUser(user, user);
     visitVerifierFns(M);
+    applyDirectModifierCallers();
     return targets;
   }
 
 private:
   DenseSet<const User *> visited;
   DenseSet<const Instruction *> targets;
+  DenseSet<const StoreInst *> directModifiers;
 
   bool isUpdatableType(const Type *type) {
     return type->isPointerTy() &&
            !type->getPointerElementType()->isFunctionTy();
+  }
+
+  void applyDirectModifierCallers() {
+    std::queue<const Function *> fns;
+    for (const StoreInst *store : directModifiers) {
+      fns.push(store->getFunction());
+    }
+    DenseSet<const Function *> callers;
+    while (!fns.empty()) {
+      const Function *fn = fns.front();
+      fns.pop();
+      if (!callers.insert(fn).second)
+        continue;
+      for (const User *user : fn->users()) {
+        if (const CallInst *call = dyn_cast<CallInst>(user)) {
+          fns.push(call->getFunction());
+        }
+      }
+    }
+    for (const Function *f : callers) {
+      for (const User *user : f->users()) {
+        if (const CallInst *call = dyn_cast<CallInst>(user)) {
+          targets.insert(call);
+        }
+      }
+    }
   }
 
   void visitVerifierFns(const Module &M) {
@@ -55,6 +86,7 @@ private:
 
   void visitInst(Instruction *inst, const Value *target) {
     if (StoreInst *store = dyn_cast<StoreInst>(inst)) {
+      directModifiers.insert(store);
       targets.insert(store);
       Value *src = store->getValueOperand();
       if (src->getType()->isPointerTy()) {
@@ -67,11 +99,10 @@ private:
         // visit arguments
         if (!f->isVarArg()) {
           for (unsigned index = 0; index < call->arg_size(); index++) {
-            Value *argVal = call->getArgOperand(index);
-            if (!isUpdatableType(argVal->getType())) {
+            Argument *arg = f->getArg(index);
+            if (!isUpdatableType(arg->getType())) {
               continue;
             }
-            Argument *arg = f->getArg(index);
             for (User *user : arg->users()) {
               visitUser(user, arg);
             }
@@ -141,82 +172,7 @@ static Function *makeNewFn(Module &M, FunctionType *type, unsigned startFrom,
                           name, &M);
 }
 
-static bool isConditionNondet(const Value *cond,
-                              const DenseSet<const Value *> &retain) {
-  if (const User *user = dyn_cast<User>(cond)) {
-    return !retain.count(user);
-  } else if (isa<Constant>(cond)) {
-    return false;
-  } else if (isa<Argument>(cond)) {
-    return false;
-  } else {
-    return true;
-  }
-}
-
-static void
-handleNonRetainedInst(Module &M, const DenseSet<const Value *> &retain,
-                      Instruction *inst,
-                      DenseMap<const Type *, Function *> &ndvalfn,
-                      std::set<Instruction *> &toRemoveInstructions) {
-  if (BranchInst *branch = dyn_cast<BranchInst>(inst)) {
-    if (branch->isConditional()) {
-      Value *cond = branch->getCondition();
-      if (isConditionNondet(cond, retain)) {
-        Function *nondetFn = getNondetValueFn(cond->getType(), M, ndvalfn);
-        CallInst *newCall = CallInst::Create(nondetFn, "", inst);
-        branch->setCondition(newCall);
-      }
-    }
-  } else if (SwitchInst *switchInst = dyn_cast<SwitchInst>(inst)) {
-    Value *cond = switchInst->getCondition();
-    if (isConditionNondet(cond, retain)) {
-      Function *nondetFn = getNondetValueFn(cond->getType(), M, ndvalfn);
-      CallInst *newCall = CallInst::Create(nondetFn, "", inst);
-      switchInst->setCondition(newCall);
-    }
-  } else if (ReturnInst *ret = dyn_cast<ReturnInst>(inst)) {
-    Value *retVal = ret->getReturnValue();
-    if (retVal) {
-      if (isConditionNondet(retVal, retain)) {
-        Function *nondetFn = getNondetValueFn(retVal->getType(), M, ndvalfn);
-        IRBuilder<> B(ret);
-        CallInst *call = B.CreateCall(nondetFn);
-        ReturnInst *newRet = B.CreateRet(call);
-        ret->replaceAllUsesWith(newRet);
-        toRemoveInstructions.insert(inst);
-      }
-    }
-  } else if (isa<UnreachableInst>(inst)) {
-    FunctionCallee err = M.getFunction("__VERIFIER_error");
-    CallInst *call = CallInst::Create(err, "", inst);
-    inst->replaceAllUsesWith(call);
-  } else if (isa<CallBrInst>(inst)) {
-  } else {
-    toRemoveInstructions.insert(inst);
-  }
-}
-
-static void handleRetainedInst(Module &M, const DenseSet<const Value *> &retain,
-                               Instruction *inst,
-                               DenseMap<const Type *, Function *> &ndvalfn,
-                               std::set<Instruction *> &toRemoveInstructions) {
-  if (CallInst *call = dyn_cast<CallInst>(inst)) {
-    bool nondet = true;
-    if (Function *f = call->getCalledFunction()) {
-      if (retain.count(f))
-        nondet = false;
-    }
-    if (nondet) {
-      Function *nondet = getNondetValueFn(inst->getType(), M, ndvalfn);
-      CallInst *newCall = CallInst::Create(nondet, "", inst);
-      inst->replaceAllUsesWith(newCall);
-      toRemoveInstructions.insert(inst);
-    }
-  }
-}
-
-static void collectOperands(const Value *value, DenseSet<const Value *> &retain,
+static void collectOperands(const Value *value, DenseSet<const User *> &retain,
                             DenseSet<const Value *> &visited) {
   if (!visited.insert(value).second)
     return;
@@ -225,6 +181,9 @@ static void collectOperands(const Value *value, DenseSet<const Value *> &retain,
     if (const Instruction *inst = dyn_cast<Instruction>(user)) {
       if (const CallInst *call = dyn_cast<CallInst>(inst)) {
         const Function *f = call->getCalledFunction();
+        // if the result of the called function is used, collect the operands of
+        // the ReturnInst.
+        // TODO: should check the pointer arguments as well
         if (!call->user_empty() && f) {
           for (const BasicBlock &block : *f) {
             if (const ReturnInst *ret =
@@ -234,12 +193,6 @@ static void collectOperands(const Value *value, DenseSet<const Value *> &retain,
         }
         for (const Use &u : call->args())
           collectOperands(u.get(), retain, visited);
-      }
-      retain.insert(inst->getFunction());
-      for (const User *user : inst->getFunction()->users()) {
-        if (isa<CallInst>(user)) {
-          collectOperands(user, retain, visited);
-        }
       }
       collectOperands(inst->getParent(), retain, visited);
     }
@@ -281,32 +234,96 @@ static void updateLinkage(Module &M) {
   }
 }
 
-static void replacePanic(Module &M) {
-  Function *panic = M.getFunction("panic");
-  Function *newPanic =
-      makeNewFn(M, panic->getFunctionType(), 0, "verifier.panic.");
-  BasicBlock *entry = BasicBlock::Create(M.getContext(), "entry", newPanic);
-  IRBuilder<> B(entry);
-  B.CreateUnreachable();
-  panic->replaceAllUsesWith(newPanic);
-  panic->eraseFromParent();
+static bool isNondet(const Value *cond, const DenseSet<const User *> &retain) {
+  if (const User *user = dyn_cast<User>(cond)) {
+    return !retain.count(user);
+  } else if (isa<Constant>(cond)) {
+    return false;
+  } else if (isa<Argument>(cond)) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+static void
+handleNonRetainedInst(Module &M, const DenseSet<const User *> &retain,
+                      Instruction *inst,
+                      DenseMap<const Type *, Function *> &ndvalfn,
+                      std::set<Instruction *> &toRemoveInstructions) {
+  if (BranchInst *branch = dyn_cast<BranchInst>(inst)) {
+    if (branch->isConditional()) {
+      Value *cond = branch->getCondition();
+      if (isNondet(cond, retain)) {
+        Function *nondetFn = getNondetValueFn(cond->getType(), M, ndvalfn);
+        CallInst *newCall = CallInst::Create(nondetFn, "", inst);
+        branch->setCondition(newCall);
+      }
+    }
+  } else if (SwitchInst *switchInst = dyn_cast<SwitchInst>(inst)) {
+    Value *cond = switchInst->getCondition();
+    if (isNondet(cond, retain)) {
+      Function *nondetFn = getNondetValueFn(cond->getType(), M, ndvalfn);
+      CallInst *newCall = CallInst::Create(nondetFn, "", inst);
+      switchInst->setCondition(newCall);
+    }
+  } else if (ReturnInst *ret = dyn_cast<ReturnInst>(inst)) {
+    Value *retVal = ret->getReturnValue();
+    if (retVal) {
+      if (isNondet(retVal, retain)) {
+        Function *nondetFn = getNondetValueFn(retVal->getType(), M, ndvalfn);
+        IRBuilder<> B(ret);
+        CallInst *call = B.CreateCall(nondetFn);
+        ReturnInst *newRet = B.CreateRet(call);
+        ret->replaceAllUsesWith(newRet);
+        toRemoveInstructions.insert(inst);
+      }
+    }
+  } else if (isa<UnreachableInst>(inst)) {
+    FunctionCallee err = M.getFunction("__VERIFIER_error");
+    CallInst *call = CallInst::Create(err, "", inst);
+    inst->replaceAllUsesWith(call);
+  } else if (isa<CallBrInst>(inst)) {
+    errs() << "unhandled CallBr " << *inst << '\n';
+    std::exit(1);
+  } else {
+    toRemoveInstructions.insert(inst);
+  }
+}
+
+static void stubEmptyFunctions(Module &M,
+                               const DenseSet<const User *> &retain) {
+  for (Function &f : M) {
+    if (f.isDeclaration())
+      continue;
+    bool empty = true;
+    for (Instruction &inst : instructions(f)) {
+      if (retain.count(&inst)) {
+        empty = false;
+        break;
+      }
+    }
+    if (empty) {
+      Function *stub = makeNewFn(M, f.getFunctionType(), 0, "verifier.stub.");
+      f.replaceAllUsesWith(stub);
+    }
+  }
 }
 
 static void slimDownOnlyReachables(Module &M, User *root) {
   TargetCollector collector;
   DenseSet<const Instruction *> &targets = collector.build(M, root);
-  DenseSet<const Value *> retain;
+  DenseSet<const User *> retain;
   DenseSet<const Value *> visited;
   for (const Value *v : targets) {
     collectOperands(v, retain, visited);
   }
+  stubEmptyFunctions(M, retain);
   std::set<Instruction *> toRemoveInstructions;
   DenseMap<const Type *, Function *> ndvalfn;
   for (Function &f : M) {
     for (Instruction &inst : instructions(f)) {
-      if (retain.count(&inst)) {
-        handleRetainedInst(M, retain, &inst, ndvalfn, toRemoveInstructions);
-      } else {
+      if (!retain.count(&inst)) {
         handleNonRetainedInst(M, retain, &inst, ndvalfn, toRemoveInstructions);
       }
     }
@@ -314,37 +331,48 @@ static void slimDownOnlyReachables(Module &M, User *root) {
   for (Instruction *inst : toRemoveInstructions) {
     inst->eraseFromParent();
   }
-  SmallVector<GlobalVariable *> toRemoveGlobalVars;
-  for (GlobalVariable &gv : M.globals()) {
-    if (!retain.count(&gv))
-      toRemoveGlobalVars.push_back(&gv);
-  }
-  for (GlobalVariable *gv : toRemoveGlobalVars) {
-    gv->dropAllReferences();
-    gv->eraseFromParent();
-  }
-  SmallVector<Function *> toRemoveFns;
-  for (Function &f : M) {
-    // nondet functions should not be removed.
-    if (f.isDeclaration())
-      continue;
-    if (!retain.count(&f))
-      toRemoveFns.push_back(&f);
-  }
-  for (Function *f : toRemoveFns) {
-    f->dropAllReferences();
-    f->eraseFromParent();
-  }
 }
 
 static void runDCE(Module &M, bool removeArg = false) {
   legacy::PassManager pm;
   pm.add(createAggressiveDCEPass());
   pm.add(createGlobalDCEPass());
+  pm.add(createCFGSimplificationPass());
   if (removeArg)
     pm.add(createDeadArgEliminationPass());
   int c = 0;
   while (pm.run(M) && c++ < 10) {
+  }
+}
+
+static void replacePanic(Module &M) {
+  Function *panic = M.getFunction("panic");
+  Function *newPanic =
+      makeNewFn(M, panic->getFunctionType(), 0, "verifier.panic.");
+  newPanic->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+  BasicBlock *entry = BasicBlock::Create(M.getContext(), "entry", newPanic);
+  IRBuilder<> B(entry);
+  B.CreateUnreachable();
+  panic->replaceAllUsesWith(newPanic);
+  panic->eraseFromParent();
+}
+
+static void cutHangingStubFunctionCalls(Module &M) {
+  std::vector<Instruction *> toRemove;
+  for (Function &f : M) {
+    for (Instruction &i : instructions(f)) {
+      if (CallInst *call = dyn_cast<CallInst>(&i)) {
+        if (Function *callee = call->getCalledFunction()) {
+          if (callee->getName().startswith("verifier.stub.") &&
+              call->user_empty()) {
+            toRemove.push_back(call);
+          }
+        }
+      }
+    }
+  }
+  for (Instruction *i : toRemove) {
+    i->eraseFromParent();
   }
 }
 
@@ -362,6 +390,8 @@ void slimDown(Module &M, User *root) {
 
   replacePanic(M);
   slimDownOnlyReachables(M, root);
+  runDCE(M, true);
+  cutHangingStubFunctionCalls(M);
   runDCE(M, true);
 }
 } // namespace seahorn
