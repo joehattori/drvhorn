@@ -316,6 +316,8 @@ class Seapp(sea.LimitedCmd):
                          type=str, metavar='str')
         ap.add_argument ('--platform-driver', dest='platform_driver', help='Specify a platform driver to validate',
                          type=str, metavar='str,..')
+        ap.add_argument ('--file-operations', dest='file_operations', help='Specify a file_operations to validate',
+                         type=str, metavar='str,..')
         ap.add_argument ('--externalize-addr-taken-functions',
                          help='Externalize uses of address-taken functions',
                          dest='enable_ext_funcs', default=False,
@@ -486,6 +488,9 @@ class Seapp(sea.LimitedCmd):
 
             if args.platform_driver:
                 argv.append ('--platform-driver={0}'.format (args.platform_driver))
+
+            if args.file_operations:
+                argv.append ('--file-operations={0}'.format (args.file_operations))
 
             if args.kill_vaarg:
                 argv.append('--kill-vaarg=true')

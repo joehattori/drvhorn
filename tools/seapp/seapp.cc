@@ -285,10 +285,9 @@ static llvm::cl::opt<bool> PrintStats("seapp-stats",
                                       llvm::cl::desc("Print statistics"),
                                       llvm::cl::init(false));
 
-static llvm::cl::opt<bool>
-    Kernel("kernel",
-               llvm::cl::desc("Target the Linux kernel"),
-               llvm::cl::init(false));
+static llvm::cl::opt<bool> Kernel("kernel",
+                                  llvm::cl::desc("Target the Linux kernel"),
+                                  llvm::cl::init(false));
 
 static llvm::cl::opt<std::string>
     AcpiDriver("acpi-driver", llvm::cl::desc("Target ACPI drivers"),
@@ -297,6 +296,10 @@ static llvm::cl::opt<std::string>
 static llvm::cl::opt<std::string>
     PlatformDriver("platform-driver", llvm::cl::desc("Target Platform drivers"),
                    llvm::cl::init(""));
+
+static llvm::cl::opt<std::string>
+    FileOperation("file-operations", llvm::cl::desc("Target File Operations"),
+                  llvm::cl::init(""));
 
 static llvm::cl::opt<std::string>
     EntryPoint("entry-point",
@@ -426,10 +429,14 @@ int main(int argc, char **argv) {
 
   if (Kernel) {
     pm_wrapper.add(seahorn::createKernelSetupPass());
-  }
-
-  if (!AcpiDriver.empty()) {
-    pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
+    if (!AcpiDriver.empty()) {
+      pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
+    } else if (!FileOperation.empty()) {
+      pm_wrapper.add(seahorn::createFileOperationsSetupPass(FileOperation));
+    }
+    pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
+    pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(seahorn::createKernelDebugPass());
   }
 
   if (RenameNondet)
@@ -516,14 +523,8 @@ int main(int argc, char **argv) {
   else {
     // -- Externalize some user-selected functions
     pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
-    if (!Kernel) {
-      // -- Create a main function if we do not have one.
-      pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
-    }
-
-    if (Kernel) {
-      pm_wrapper.add(seahorn::createKernelDebugPass());
-    }
+    // -- Create a main function if we do not have one.
+    pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
 
     // -- promote verifier specific functions to special names
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
@@ -615,7 +616,7 @@ int main(int argc, char **argv) {
 
     pm_wrapper.add(llvm::createDeadCodeEliminationPass());
     // Superseded by DCE in LLVM12
-    //pm_wrapper.add(llvm::createDeadInstEliminationPass());
+    // pm_wrapper.add(llvm::createDeadInstEliminationPass());
     pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
 
     if (!KeepArithOverflow)
@@ -650,7 +651,7 @@ int main(int argc, char **argv) {
       // -- instructions
       pm_wrapper.add(llvm::createDeadCodeEliminationPass());
       // Superseded by DCE in LLVM12
-      //pm_wrapper.add(llvm::createDeadInstEliminationPass());
+      // pm_wrapper.add(llvm::createDeadInstEliminationPass());
     }
 
     // AG: Used for inconsistency analysis
@@ -659,8 +660,8 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createLowerAssertPass());
       // LowerAssert might generate some dead code
       pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-      // Superseded by DCE in LLVM12      
-      //pm_wrapper.add(llvm::createDeadInstEliminationPass());
+      // Superseded by DCE in LLVM12
+      // pm_wrapper.add(llvm::createDeadInstEliminationPass());
     }
     pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
 
@@ -695,7 +696,7 @@ int main(int argc, char **argv) {
     // -- BEFORE SCHEDULING PASSES HERE, THINK WHETHER THEY BELONG BEFORE
     // INLINE!
     pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-    // Superseded by DCE in LLVM12      
+    // Superseded by DCE in LLVM12
     // pm_wrapper.add(llvm::createDeadInstEliminationPass());
     pm_wrapper.add(llvm::createGlobalDCEPass()); // kill unused internal global
     pm_wrapper.add(llvm::createUnifyFunctionExitNodesPass());

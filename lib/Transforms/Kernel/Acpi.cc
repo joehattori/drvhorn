@@ -27,8 +27,8 @@ public:
 
   bool runOnModule(Module &M) override {
     fillPlaceholder(M);
-    GlobalVariable *acpiRoot = M.getNamedGlobal("acpi_gbl_root_table_list");
-    slimDown(M, acpiRoot);
+    // GlobalVariable *acpiRoot = M.getNamedGlobal("acpi_gbl_root_table_list");
+    // slimDown(M, acpiRoot);
     return true;
   }
 

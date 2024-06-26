@@ -1,0 +1,4 @@
+/seahorn/build/run/bin/seapp -o merged.pp.bc --simplifycfg-sink-common=false --kernel --horn-inline-all --strip-extern=false --promote-assumptions=false --file-operations=tpm_bios_measurements_open_unsat --kill-vaarg=true --ignore-def-verifier-fn=false --horn-keep-arith-overflow=false ../merged.bc &> /dev/null
+/seahorn/build/run/bin/seapp --simplifycfg-sink-common=false -o merged.pp.ms.bc --horn-mixed-sem --ms-reduce-main merged.pp.bc
+/seahorn/build/run/bin/seaopt -f --simplifycfg-sink-common=false -o merged.pp.ms.o.bc -O3 --seaopt-enable-indvar=false --seaopt-enable-loop-idiom=false --unroll-threshold=150 --unroll-allow-partial=false --unroll-partial-threshold=0 --vectorize-slp=false merged.pp.ms.bc
+/seahorn/build/run/bin/seahorn --keep-shadows=true --sea-dsa=ci --horn-solve -horn-inter-proc -horn-sem-lvl=mem --horn-step=large merged.pp.ms.o.bc -o tmp2.smt2

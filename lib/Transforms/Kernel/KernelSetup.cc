@@ -11,6 +11,7 @@
 #include "boost/algorithm/string.hpp"
 #include "boost/range.hpp"
 #include "seahorn/Support/SeaDebug.h"
+#include "seahorn/Transforms/Kernel/Util.hh"
 
 #include <algorithm>
 #include <optional>
@@ -53,10 +54,12 @@ using namespace llvm;
 #define ANDB_1_0 "andb ${1:b},$0"
 #define ANDB_2_1_PREFIX "andb $2,$1"
 #define ANDL "andl $1,$0"
+#define ANDQ "andq $1,$0"
 #define MULL "mull $3"
 #define DIVL "divl $2"
 #define ORB "orb ${1:b},$0"
 #define ORL "orl $1,$0"
+#define ORQ "orq $1,$0"
 #define CMPXCHGL21 "cmpxchgl $2,$1"
 #define CMPXCHGL21_CONSTRAINTS                                                 \
   "={ax},=*m,r,0,*m,~{memory},~{dirflag},~{fpsr},~{flags}"
@@ -252,23 +255,18 @@ public:
     stubAllocPages(M);
     handleFree(M);
     handleKmemCache(M);
-    
+    ignoreKernelFunctions(M);
+
     handleCallRcu(M);
 
     handleMemset(M);
     handleMemCpy(M);
     handleMemMove(M);
-    // handleStrCopy(M);
-    // handleStrNCopy(M);
     // handleStrCat(M);
-    // handleStrCmp(M);
     // handleStrNCmp(M);
     handleStrChr(M);
-    handleStrLen(M);
-    // handleStrNLen(M);
 
     handleInlineAssembly(M);
-    insertMain(M);
     return true;
   }
 
@@ -278,11 +276,22 @@ private:
   DenseMap<const Type *, FunctionCallee> ndfn;
 
   void stubKernelFunctions(Module &M) {
-    std::string mallocFns[] = {
-        "__kmalloc",     "__kmalloc_node",     "__kmalloc_node_track_caller",
-        "kmalloc_large", "kmalloc_large_node", "__vmalloc_node_range",
-        "pcpu_alloc",    "__ioremap_caller",   "__early_ioremap",
-    };
+    std::string mallocFns[] = {"__kmalloc",
+                               "__kmalloc_node",
+                               "__kmalloc_node_track_caller",
+                               "kmalloc_large",
+                               "kmalloc_large_node",
+                               "__vmalloc_node_range",
+                               "slob_alloc",
+                               "pcpu_alloc",
+                               "__ioremap_caller",
+                               "__early_ioremap",
+                               "strcpy",
+                               "strncpy",
+                               "strlen",
+                               "strnlen",
+                               "strcmp",
+                               "strncmp"};
     for (const std::string &name : mallocFns) {
       Function *orig = M.getFunction(name);
       if (!orig)
@@ -358,34 +367,102 @@ private:
     }
   }
 
+  GlobalVariable *gVarOfKmemCacheAllocCall(Module &M, CallInst *call) {
+    Value *cache = call->getArgOperand(0);
+    if (LoadInst *load = dyn_cast<LoadInst>(cache)) {
+      if (GlobalVariable *gv =
+              dyn_cast<GlobalVariable>(load->getPointerOperand())) {
+        return gv;
+      }
+    }
+    return nullptr;
+  }
+
+  Optional<size_t> getKmemCacheSize(GlobalVariable *gv) {
+    for (User *user : gv->users()) {
+      if (StoreInst *store = dyn_cast<StoreInst>(user)) {
+        if (store->getPointerOperand() == gv) {
+          Value *src = store->getValueOperand();
+          if (CallInst *call = dyn_cast<CallInst>(src)) {
+            Function *f = call->getCalledFunction();
+            if (f && (f->getName() == "kmem_cache_create" ||
+                      f->getName() == "kmem_cache_create_usercopy")) {
+              ConstantInt *ci = cast<ConstantInt>(call->getArgOperand(1));
+              return ci->getZExtValue();
+            } else {
+              errs() << "TODO: getKmemCacheSize: unhandled function\n";
+            }
+          } else if (isa<ConstantPointerNull>(src)) {
+            return 0;
+          } else {
+            errs() << "else " << *src << '\n';
+          }
+        }
+      }
+    }
+    return None;
+  }
+
   void handleKmemCache(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    std::string kmemCacheFuncNames[] = {
-        "kmem_cache_create",     "kmem_cache_alloc", "kmem_cache_alloc_lru",
-        "kmem_cache_alloc_node", "kmem_cache_free",  "kmem_cache_destroy",
+    StringRef kmemCacheFuncNames[] = {
+        "kmem_cache_alloc",
+        "kmem_cache_alloc_lru",
+        "kmem_cache_alloc_node",
     };
-    for (const std::string &name : kmemCacheFuncNames) {
+    LLVMContext &ctx = M.getContext();
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Function *malloc = M.getFunction("__DRVHORN_malloc");
+    for (StringRef name : kmemCacheFuncNames) {
       Function *orig = M.getFunction(name);
       if (!orig)
         continue;
-      Type *retType = orig->getReturnType();
-      FunctionCallee nd = getNondetFn(retType, M);
-      std::string wrapperName = name + "_wrapper";
-      Function *wrapper = Function::Create(
-          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &M);
-      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-      CallInst *call = CallInst::Create(nd, "", block);
-      if (retType->isVoidTy()) {
-        ReturnInst::Create(ctx, nullptr, block);
-      } else {
-        ReturnInst::Create(ctx, call, block);
+      for (User *user : orig->users()) {
+        if (CallInst *call = dyn_cast<CallInst>(user)) {
+          GlobalVariable *gv = gVarOfKmemCacheAllocCall(M, call);
+          if (!gv) {
+            errs() << "TODO: kmem_cache_alloc: global variable not found\n";
+            continue;
+          }
+          Optional<size_t> size = getKmemCacheSize(gv);
+          if (size == None) {
+            continue;
+          }
+          ConstantInt *sizeArg = ConstantInt::get(i64Ty, size.getValue());
+          ConstantInt *flagArg = ConstantInt::get(i32Ty, 0);
+          CallInst *newMalloc =
+              CallInst::Create(malloc, {sizeArg, flagArg}, "kmemcache", call);
+          call->replaceAllUsesWith(newMalloc);
+        }
       }
-      orig->replaceAllUsesWith(wrapper);
-      orig->eraseFromParent();
     }
   }
-  
+
+  void ignoreKernelFunctions(Module &m) {
+    StringRef names[] = {
+        "slob_free",
+        "refcount_warn_saturate",
+        "__kobject_del",
+    };
+    for (StringRef name : names) {
+      Function *f = m.getFunction(name);
+      if (!f)
+        return;
+      std::string stubName = "drvhorn.stub." + name.str();
+      FunctionType *ft = f->getFunctionType();
+      if (!ft->getReturnType()->isVoidTy()) {
+        errs() << "ignoreKernelFunctions: non-void return type\n";
+        std::exit(1);
+      }
+      Function *stub = Function::Create(
+          ft, GlobalValue::LinkageTypes::InternalLinkage, stubName, &m);
+      BasicBlock *block = BasicBlock::Create(m.getContext(), "", stub);
+      ReturnInst::Create(m.getContext(), block);
+      f->replaceAllUsesWith(stub);
+      f->eraseFromParent();
+    }
+  }
+
   void handleCallRcu(Module &M) {
     LLVMContext &ctx = M.getContext();
     std::string name = "call_rcu";
@@ -400,7 +477,8 @@ private:
     Value *arg = wrapper->getArg(0);
     Value *fn = wrapper->getArg(1);
     // rcu_callback_t
-    FunctionType *fnType = FunctionType::get(Type::getVoidTy(ctx), {arg->getType()}, false);
+    FunctionType *fnType =
+        FunctionType::get(Type::getVoidTy(ctx), {arg->getType()}, false);
     FunctionCallee callee = FunctionCallee(fnType, fn);
     CallInst::Create(callee, {arg}, "", block);
     ReturnInst::Create(ctx, nullptr, block);
@@ -487,96 +565,6 @@ private:
     Value *size = wrapper->getArg(2);
     IRBuilder<> B(block);
     B.CreateMemMove(dst, MaybeAlign(), src, MaybeAlign(), size);
-    B.CreateRet(dst);
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrCopy(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    Function *f = M.getFunction("strcpy");
-    if (!f)
-      return;
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i64Type = Type::getInt64Ty(ctx);
-    std::string wrapperName = "strcpy_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
-    Value *dst = wrapper->getArg(0);
-    Value *src = wrapper->getArg(1);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopCond = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopBody = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i64Type);
-    B.CreateStore(B.getInt64(0), it);
-    B.CreateBr(loopCond);
-
-    B.SetInsertPoint(loopCond);
-    Value *srcPtr = B.CreateGEP(i8Type, src, B.CreateLoad(i64Type, it));
-    Value *srcChar = B.CreateLoad(i8Type, srcPtr);
-    Value *isEnd = B.CreateICmpEQ(srcChar, B.getInt8(0));
-    B.CreateCondBr(isEnd, end, loopBody);
-
-    B.SetInsertPoint(loopBody);
-    Value *loadedIt = B.CreateLoad(i64Type, it);
-    Value *dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
-    B.CreateStore(srcChar, dstPtr);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt64(1)), it);
-    B.CreateBr(loopCond);
-
-    B.SetInsertPoint(end);
-    B.CreateRet(dst);
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrNCopy(Module &M) {
-    Function *f = M.getFunction("strncpy");
-    if (!f)
-      return;
-    LLVMContext &ctx = M.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strncpy_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
-    Value *dst = wrapper->getArg(0);
-    Value *src = wrapper->getArg(1);
-    Value *size = wrapper->getArg(2);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopCond = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopBody = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
-    B.CreateBr(loopCond);
-
-    B.SetInsertPoint(loopCond);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
-    Value *srcPtr = B.CreateGEP(i8Type, src, loadedIt);
-    Value *srcChar = B.CreateLoad(i8Type, srcPtr);
-    Value *isNull = B.CreateICmpEQ(srcChar, B.getInt8(0));
-    Value *isOver = B.CreateICmpUGE(loadedIt, size);
-    Value *isEnd = B.CreateOr(isNull, isOver);
-    B.CreateCondBr(isEnd, end, loopBody);
-
-    B.SetInsertPoint(loopBody);
-    loadedIt = B.CreateLoad(i32Type, it);
-    Value *dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
-    B.CreateStore(srcChar, dstPtr);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateBr(loopCond);
-
-    B.SetInsertPoint(end);
     B.CreateRet(dst);
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
@@ -790,91 +778,6 @@ private:
     f->eraseFromParent();
   }
 
-  void handleStrLen(Module &M) {
-    Function *f = M.getFunction("strlen");
-    if (!f)
-      return;
-    LLVMContext &ctx = M.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i64Type = Type::getInt64Ty(ctx);
-    std::string wrapperName = "strlen_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
-    Value *str = wrapper->getArg(0);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i64Type);
-    B.CreateStore(B.getInt64(0), it);
-    B.CreateBr(loop);
-
-    B.SetInsertPoint(loop);
-    Value *loadedIt = B.CreateLoad(i64Type, it);
-    Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
-    Value *curChar = B.CreateLoad(i8Type, strPtr);
-    Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
-    B.CreateCondBr(isNull, ret, loopEnd);
-
-    B.SetInsertPoint(ret);
-    B.CreateRet(loadedIt);
-
-    B.SetInsertPoint(loopEnd);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt64(1)), it);
-    B.CreateBr(loop);
-
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrNLen(Module &M) {
-    Function *f = M.getFunction("strnlen");
-    if (!f)
-      return;
-    LLVMContext &ctx = M.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strnlen_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
-    Value *str = wrapper->getArg(0);
-    Value *size = wrapper->getArg(1);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
-    B.CreateBr(loop);
-
-    B.SetInsertPoint(loop);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
-    Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
-    Value *curChar = B.CreateLoad(i8Type, strPtr);
-    Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
-    Value *isOver = B.CreateICmpUGE(loadedIt, size);
-    Value *isEnd = B.CreateOr(isNull, isOver);
-    B.CreateCondBr(isEnd, ret, loopEnd);
-
-    B.SetInsertPoint(ret);
-    B.CreateRet(loadedIt);
-
-    B.SetInsertPoint(loopEnd);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateBr(loop);
-
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
   void handleInlineAssembly(Module &M) {
     handleBitTest(M);
     handleBitTestAndSet(M);
@@ -894,7 +797,7 @@ private:
     // handleMull(M);
     // handleDivl(M);
     handleAnd(M);
-    // handleOr(M);
+    handleOr(M);
     // handleCpuid(M);
     handleIn(M);
     // handleOut(M);
@@ -911,8 +814,8 @@ private:
     // handleCmpxchg8b(M);
 
     // handleNativeSaveFL(M);
-    // handleCLI(M);
-    // handleSTI(M);
+    handleCLI(M);
+    handleSTI(M);
     // handleRDPMC(M);
 
     // handleNativeReadMSRSafe(M);
@@ -923,7 +826,7 @@ private:
     // handleArrayIndexMaskNoSpec(M);
 
     handleCurrentTask(M);
-    // handleBarrier(M);
+    handleBarrier(M);
     // removeFunctions(M);
     // handleSerialize(M);
     // handleIretToSelf(M);
@@ -1434,6 +1337,7 @@ private:
     replace(ANDB_1_0, false);
     replace(ANDB_2_1_PREFIX, true);
     replace(ANDL, false);
+    replace(ANDQ, false);
   }
 
   void handleOr(Module &M) {
@@ -1468,6 +1372,7 @@ private:
 
     replace(ORB);
     replace(ORL);
+    replace(ORQ);
   }
 
   void handleCpuid(Module &M) {
@@ -2076,11 +1981,15 @@ private:
                               const std::string &utilSuffix) {
       std::vector<CallBrInst *> calls =
           getTargetAsmCallBrs(M, targetAsm, false);
+      Type *i8PtrType = Type::getInt8Ty(M.getContext())->getPointerTo();
       for (CallBrInst *callbr : calls) {
         IRBuilder<> B(callbr);
         Value *largeStruct = callbr->getArgOperand(0);
         Value *bytes =
             B.CreateGEP(largeStruct->getType(), largeStruct, B.getInt32(0));
+        if (bytes->getType() != i8PtrType) {
+          bytes = B.CreateBitCast(bytes, i8PtrType);
+        }
         Function *f = M.getFunction("__DRVHORN_util_read_" + utilSuffix);
         CallInst *val = B.CreateCall(f, bytes);
         // TODO: Randomizing the destination should be better.
@@ -2150,17 +2059,6 @@ private:
     };
     replace(RDSEED_PREFIX);
     replace(RDRAND_PREFIX);
-  }
-
-  void insertMain(Module &M) {
-    if (M.getFunction("main")) {
-      return;
-    }
-
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    ArrayRef<Type *> params;
-    Function::Create(FunctionType::get(i32Ty, params, false),
-                     GlobalValue::LinkageTypes::ExternalLinkage, "main", &M);
   }
 
   FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,

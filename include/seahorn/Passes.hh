@@ -114,14 +114,15 @@ llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
 
 llvm::Pass *createAcpiSetupPass(llvm::StringRef acpiDrivers);
+llvm::Pass *createFileOperationsSetupPass(const std::string &name);
 llvm::Pass *createKernelSetupPass();
 llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();
+llvm::Pass *createSlimDownPass();
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN
-llvm::FunctionPass *
-createSeaInstructionCombiningPass();
+llvm::FunctionPass *createSeaInstructionCombiningPass();
 
 namespace seahorn {
 inline llvm::FunctionPass *createInstCombine() {
@@ -147,7 +148,7 @@ inline llvm::Pass *createStripShadowMemPass() {
 }
 
 llvm::ImmutablePass *createSeaBuiltinsWrapperPass();
-llvm::Pass* createLoopPeelerPass(unsigned Num = 1);
-llvm::Pass* createBackEdgeCutterPass();
-llvm::Pass* createLowerIsDerefPass();
+llvm::Pass *createLoopPeelerPass(unsigned Num = 1);
+llvm::Pass *createBackEdgeCutterPass();
+llvm::Pass *createLowerIsDerefPass();
 } // namespace seahorn

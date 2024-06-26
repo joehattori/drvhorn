@@ -19,6 +19,7 @@ wllvm \
   -I${KERNEL_DIR}/include/generated/uapi \
   -I${KERNEL_DIR}/drivers/acpi \
   -I${KERNEL_DIR}/drivers/char \
+  -I${KERNEL_DIR}/drivers/net \
   -include ${KERNEL_DIR}/include/linux/compiler-version.h \
   -include ${KERNEL_DIR}/include/linux/kconfig.h \
   -include ${KERNEL_DIR}/include/linux/compiler_types.h \
@@ -27,9 +28,9 @@ wllvm \
   -std=gnu11 \
   -DCC_USING_FENTRY \
   -DMODULE \
-  -DKBUILD_BASENAME=seahorn \
-  -DKBUILD_MODNAME=seahorn \
-  -D__KBUILD_MODNAME=seahorn \
+  -DKBUILD_BASENAME=\"seahorn\" \
+  -DKBUILD_MODNAME=\"seahorn\" \
+  -D__KBUILD_MODNAME=\"seahorn\" \
   -fshort-wchar \
   -c ${INPUT} \
   -o ${OBJNAME}
