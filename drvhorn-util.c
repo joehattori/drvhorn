@@ -1,22 +1,24 @@
 #include <asm/pgtable_types.h>
-#include <linux/mm_types.h>
-#include <linux/types.h>
-#include <linux/nodemask.h>
-#include <linux/kobject.h>
 #include <linux/device.h>
+#include <linux/kobject.h>
+#include <linux/mm_types.h>
+#include <linux/nodemask.h>
+#include <linux/types.h>
 
 extern _Bool nd();
 extern void __VERIFIER_error(void);
 extern void __VERIFIER_assume(int);
 #define sassert(X) (void)((X) || (__VERIFIER_error(), 0))
 
-void __DRVHORN_memset(void *s, char c, unsigned long long n, _Bool is_volatile) {
+void __DRVHORN_memset(void *s, char c, unsigned long long n,
+                      _Bool is_volatile) {
   unsigned long long i;
   for (i = 0; i < n; i++)
-    ((char*)s)[i] = c;
+    ((char *)s)[i] = c;
 }
 
-void __DRVHORN_memcpy(char *dst, char *src, unsigned long long n, _Bool is_volatile) {
+void __DRVHORN_memcpy(char *dst, char *src, unsigned long long n,
+                      _Bool is_volatile) {
   unsigned long long i;
   for (i = 0; i < n; i++)
     dst[i] = src[i];
@@ -41,46 +43,59 @@ void *__DRVHORN_malloc(unsigned long size, unsigned flags) {
       __DRVHORN_memset(ret, 0, size, 0);
     }
     return ret;
-   } else {
+  } else {
     return 0;
   }
 }
 
-void *__attribute__((always_inline)) __DRVHORN___kmalloc(unsigned long size, unsigned flags) {
+void *__attribute__((always_inline))
+__DRVHORN___kmalloc(unsigned long size, unsigned flags) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__attribute__((always_inline)) __DRVHORN___kmalloc_node(unsigned long size, unsigned flags, int node) {
+void *__attribute__((always_inline))
+__DRVHORN___kmalloc_node(unsigned long size, unsigned flags, int node) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__attribute__((always_inline)) __DRVHORN___kmalloc_node_track_caller(unsigned long size, unsigned flags, int node, unsigned long caller) {
+void *__attribute__((always_inline))
+__DRVHORN___kmalloc_node_track_caller(unsigned long size, unsigned flags,
+                                      int node, unsigned long caller) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__attribute__((always_inline)) __DRVHORN_kmalloc_large(unsigned long size, unsigned flags) {
+void *__attribute__((always_inline))
+__DRVHORN_kmalloc_large(unsigned long size, unsigned flags) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__attribute__((always_inline)) __DRVHORN_kmalloc_large_node(unsigned long size, unsigned flags, int node) {
+void *__attribute__((always_inline))
+__DRVHORN_kmalloc_large_node(unsigned long size, unsigned flags, int node) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__attribute__((always_inline)) __DRVHORN___vmalloc_node_range(unsigned long size, unsigned long align, unsigned long start, unsigned long end, unsigned int gfp_mask,
-  pgprot_t prot, unsigned long vm_flags, int node,
-  const void *caller) {
+void *__attribute__((always_inline))
+__DRVHORN___vmalloc_node_range(unsigned long size, unsigned long align,
+                               unsigned long start, unsigned long end,
+                               unsigned int gfp_mask, pgprot_t prot,
+                               unsigned long vm_flags, int node,
+                               const void *caller) {
   return __DRVHORN_malloc(size, 0);
 }
 
-void *__attribute__((always_inline)) __DRVHORN_pcpu_alloc(unsigned long size, unsigned long align, _Bool reserved, unsigned flags) {
+void *__attribute__((always_inline))
+__DRVHORN_pcpu_alloc(unsigned long size, unsigned long align, _Bool reserved,
+                     unsigned flags) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__attribute__((always_inline)) __DRVHORN_slob_alloc(unsigned long size, unsigned flags, int align, int node) {
+void *__attribute__((always_inline))
+__DRVHORN_slob_alloc(unsigned long size, unsigned flags, int align, int node) {
   return __DRVHORN_malloc(size, flags);
 }
 
-void *__DRVHORN___ioremap_caller(unsigned long long addr, unsigned long size, int prot, void *caller, _Bool d) {
+void *__DRVHORN___ioremap_caller(unsigned long long addr, unsigned long size,
+                                 int prot, void *caller, _Bool d) {
   return __DRVHORN_malloc(size, 0);
 }
 
@@ -165,9 +180,9 @@ int __DRVHORN_util_get_device_counter(const struct device *dev) {
   return __DRVHORN_util_get_kobject_count(&dev->kobj);
 }
 
-static void __DRVHORN_kobject_release(struct kobject *kobj) { }
+static void __DRVHORN_kobject_release(struct kobject *kobj) {}
 static struct kobj_type __DRVHORN_ktype = {
-  .release = __DRVHORN_kobject_release,
+    .release = __DRVHORN_kobject_release,
 };
 
 void __DRVHORN_setup_device(struct device *dev) {

@@ -666,7 +666,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
 
     // -- request seaopt to inline all functions
-    if (InlineAll) {
+    if (InlineAll || Kernel) {
       pm_wrapper.add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
       pm_wrapper.add(seahorn::createMarkInternalInlinePass());
     } else {
