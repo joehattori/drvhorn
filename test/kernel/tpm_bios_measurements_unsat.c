@@ -1,7 +1,7 @@
 // RUN: set -e
 // RUN: %merge %drvhorn-util %kernel-dir/vmlinux.bc %t-kernel.bc %kernel-dir
 // RUN: %merge %s %t-kernel.bc %t-merged.bc %kernel-dir
-// RUN: %sea kernel --file-operations=tpm_bios_measurements_open_unsat %t-merged.bc | OutputCheck %s
+// RUN: %sea kernel --file-operations=tpm_bios_measurements_ops_unsat %t-merged.bc | OutputCheck %s
 // CHECK: ^unsat$
 
 #include <linux/seq_file.h>
@@ -49,3 +49,7 @@ int tpm_bios_measurements_open_unsat(struct inode *inode,
   seq->private = chip;
   return 0;
 }
+
+const struct file_operations tpm_bios_measurements_ops_unsat = {
+	.open = tpm_bios_measurements_open_unsat,
+};

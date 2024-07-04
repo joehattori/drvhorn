@@ -114,7 +114,7 @@ llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
 
 llvm::Pass *createAcpiSetupPass(llvm::StringRef acpiDrivers);
-llvm::Pass *createFileOperationsSetupPass(const std::string &name);
+llvm::Pass *createFileOperationsSetupPass(llvm::StringRef fileOpName);
 llvm::Pass *createKernelSetupPass();
 llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();

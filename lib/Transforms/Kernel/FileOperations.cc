@@ -16,18 +16,20 @@ using namespace llvm;
 namespace seahorn {
 
 static unsigned iPrivateGEPIndex = 41;
+static unsigned fileOpOpenIndex = 14;
 
 class FileOperations : public ModulePass {
 public:
   static char ID;
 
-  FileOperations(const std::string &name) : ModulePass(ID) { funcName = name; }
+  FileOperations(StringRef name) : ModulePass(ID) { fileOpName = name; }
 
-  bool runOnModule(Module &M) override {
+  bool runOnModule(Module &m) override {
     seahorn::SeaBuiltinsInfo &sbi =
         getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
-    Function *verifierError = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, M);
-    constructMain(M, verifierError);
+    Function *verifierError = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
+    Function *open = getOpenFunc(m);
+    constructMain(m, open, verifierError);
     return true;
   }
 
@@ -37,56 +39,62 @@ public:
   }
 
 private:
-  StringRef funcName;
+  StringRef fileOpName;
   DenseMap<const Type *, Function *> ndfn;
 
-  void constructMain(Module &M, Function *verifierError) {
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
+  Function *getOpenFunc(Module &m) {
+    GlobalVariable *fileOp = m.getNamedGlobal(fileOpName);
+    Constant *open =
+        fileOp->getInitializer()->getAggregateElement(fileOpOpenIndex);
+    return dyn_cast_or_null<Function>(open);
+  }
+
+  void constructMain(Module &m, Function *open, Function *verifierError) {
+    Type *i32Ty = Type::getInt32Ty(m.getContext());
     Function *main = Function::Create(
         FunctionType::get(i32Ty, {}, false),
-        GlobalValue::LinkageTypes::ExternalLinkage, "main", &M);
-    BasicBlock *entry = BasicBlock::Create(M.getContext(), "entry", main);
-    BasicBlock *fail = BasicBlock::Create(M.getContext(), "fail", main);
-    BasicBlock *err = BasicBlock::Create(M.getContext(), "error", main);
-    BasicBlock *ret = BasicBlock::Create(M.getContext(), "ret", main);
+        GlobalValue::LinkageTypes::ExternalLinkage, "main", &m);
+    BasicBlock *entry = BasicBlock::Create(m.getContext(), "entry", main);
+    BasicBlock *fail = BasicBlock::Create(m.getContext(), "fail", main);
+    BasicBlock *err = BasicBlock::Create(m.getContext(), "error", main);
+    BasicBlock *ret = BasicBlock::Create(m.getContext(), "ret", main);
 
-    Value *devicePtr = buildEntryBlock(M, entry, fail, ret);
-    buildFailBlock(M, fail, err, ret, devicePtr);
-    buildErrBlock(M, err, ret, verifierError);
-    buildRetBlock(M, ret, entry, fail, err);
+    Value *devicePtr = buildEntryBlock(m, open, entry, fail, ret);
+    buildFailBlock(m, fail, err, ret, devicePtr);
+    buildErrBlock(err, ret, verifierError);
+    buildRetBlock(m, ret);
   }
 
-  void callSetupDevice(Module &M, IRBuilder<> &B, Value *devicePtr) {
-    Function *setupDevice = M.getFunction("__DRVHORN_setup_device");
+  void callSetupDevice(Module &m, IRBuilder<> &b, Value *devicePtr) {
+    Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
     if (setupDevice->getArg(0)->getType() != devicePtr->getType())
-      devicePtr = B.CreateBitCast(devicePtr, setupDevice->getArg(0)->getType());
-    B.CreateCall(setupDevice, {devicePtr});
+      devicePtr = b.CreateBitCast(devicePtr, setupDevice->getArg(0)->getType());
+    b.CreateCall(setupDevice, {devicePtr});
   }
 
-  void callDeviceSassert(Module &M, IRBuilder<> &B, Value *devicePtr) {
-    Function *deviceSassert = M.getFunction("__DRVHORN_device_sassert");
+  void callDeviceSassert(Module &m, IRBuilder<> &b, Value *devicePtr) {
+    Function *deviceSassert = m.getFunction("__DRVHORN_device_sassert");
     if (deviceSassert->getArg(0)->getType() != devicePtr->getType())
       devicePtr =
-          B.CreateBitCast(devicePtr, deviceSassert->getArg(0)->getType());
-    B.CreateCall(deviceSassert, {devicePtr});
+          b.CreateBitCast(devicePtr, deviceSassert->getArg(0)->getType());
+    b.CreateCall(deviceSassert, {devicePtr});
   }
 
-  Value *buildEntryBlock(Module &M, BasicBlock *entry, BasicBlock *fail,
-                         BasicBlock *ret) {
-    IRBuilder<> B(entry);
-    Function *open = M.getFunction(funcName);
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
+  Value *buildEntryBlock(Module &m, Function *open, BasicBlock *entry,
+                         BasicBlock *fail, BasicBlock *ret) {
+    IRBuilder<> b(entry);
+    Type *i32Ty = Type::getInt32Ty(m.getContext());
 
     Type *inodePtrType = open->getArg(0)->getType();
     Type *inodeType = inodePtrType->getPointerElementType();
     const std::map<uint64_t, Type *> &fields =
         iPrivateFields(open, inodePtrType);
-    Value *inode = allocType(M, B, inodeType);
-    size_t byteSize = getIPrivateSize(M, fields);
-    Value *iPrivate = buildIPrivate(M, B, inodeType, inode, byteSize);
-    populateFields(M, B, iPrivate, fields);
+    Value *inode = allocType(m, b, inodeType);
+    size_t byteSize = getIPrivateSize(m, fields);
+    Value *iPrivate = buildIPrivate(m, b, inodeType, inode, byteSize);
+    populateFields(m, b, iPrivate, fields);
     SmallVector<Value *, 8> devicePtrs =
-        embeddedStructDevicePtrs(M, B, iPrivate, fields);
+        embeddedStructDevicePtrs(m, b, iPrivate, fields);
     switch (devicePtrs.size()) {
     case 0:
       errs() << "No struct device found\n";
@@ -98,43 +106,42 @@ private:
       return {};
     }
     Value *devicePtr = devicePtrs[0];
-    callSetupDevice(M, B, devicePtr);
+    callSetupDevice(m, b, devicePtr);
 
     Type *filePtrType = open->getArg(1)->getType();
-    Value *file = allocType(M, B, filePtrType->getPointerElementType());
-    CallInst *call = B.CreateCall(open->getFunctionType(), open, {inode, file});
-    Value *notZero = B.CreateICmpNE(call, ConstantInt::get(i32Ty, 0));
-    B.CreateCondBr(notZero, fail, ret);
+    Value *file = allocType(m, b, filePtrType->getPointerElementType());
+    CallInst *call = b.CreateCall(open->getFunctionType(), open, {inode, file});
+    Value *notZero = b.CreateICmpNE(call, ConstantInt::get(i32Ty, 0));
+    b.CreateCondBr(notZero, fail, ret);
     return devicePtr;
   }
 
-  void buildFailBlock(Module &M, BasicBlock *fail, BasicBlock *err,
+  void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *err,
                       BasicBlock *ret, Value *devicePtr) {
-    Function *counterFn = M.getFunction("__DRVHORN_util_get_device_counter");
-    Type *i32Ty = Type::getInt32Ty(M.getContext());
-    IRBuilder<> B(fail);
+    Function *counterFn = m.getFunction("__DRVHORN_util_get_device_counter");
+    Type *i32Ty = Type::getInt32Ty(m.getContext());
+    IRBuilder<> b(fail);
     if (counterFn->getArg(0)->getType() != devicePtr->getType())
-      devicePtr = B.CreateBitCast(devicePtr, counterFn->getArg(0)->getType());
-    CallInst *counter = B.CreateCall(counterFn, {devicePtr});
-    Value *isOne = B.CreateICmpEQ(counter, ConstantInt::get(i32Ty, 1));
-    B.CreateCondBr(isOne, ret, err);
+      devicePtr = b.CreateBitCast(devicePtr, counterFn->getArg(0)->getType());
+    CallInst *counter = b.CreateCall(counterFn, {devicePtr});
+    Value *isOne = b.CreateICmpEQ(counter, ConstantInt::get(i32Ty, 1));
+    b.CreateCondBr(isOne, ret, err);
   }
 
-  void buildErrBlock(Module &M, BasicBlock *err, BasicBlock *ret,
+  void buildErrBlock(BasicBlock *err, BasicBlock *ret,
                      Function *verifierError) {
-    IRBuilder<> B(err);
-    B.CreateCall(verifierError);
-    B.CreateBr(ret);
+    IRBuilder<> b(err);
+    b.CreateCall(verifierError);
+    b.CreateBr(ret);
   }
 
-  void buildRetBlock(Module &M, BasicBlock *ret, BasicBlock *entry,
-                     BasicBlock *fail, BasicBlock *err) {
-    LLVMContext &ctx = M.getContext();
+  void buildRetBlock(Module &m, BasicBlock *ret) {
+    LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
     ReturnInst::Create(ctx, ConstantInt::get(i32Ty, 0), ret);
   }
 
-  std::map<uint64_t, Type *> iPrivateFields(Function *fn,
+  std::map<uint64_t, Type *> iPrivateFields(const Function *fn,
                                             const Type *inodePtrType) {
     const Instruction *iPrivate = iPrivatePtr(fn, inodePtrType);
     std::map<uint64_t, Type *> fields;
@@ -196,12 +203,12 @@ private:
            idx->getZExtValue() == iPrivateGEPIndex;
   }
 
-  Value *allocType(Module &M, IRBuilder<> &B, Type *type) {
-    AllocaInst *alloc = B.CreateAlloca(type);
-    Function *nondet = getNondetFn(type, M);
-    CallInst *val = B.CreateCall(nondet);
+  Value *allocType(Module &m, IRBuilder<> &b, Type *type) {
+    AllocaInst *alloc = b.CreateAlloca(type);
+    Function *nondet = getNondetFn(type, m);
+    CallInst *val = b.CreateCall(nondet);
     // Fill the allocated memory with a nondet value.
-    B.CreateStore(val, alloc);
+    b.CreateStore(val, alloc);
     return alloc;
   }
 
@@ -226,42 +233,42 @@ private:
     return res;
   }
 
-  size_t getIPrivateSize(const Module &M,
+  size_t getIPrivateSize(const Module &m,
                          const std::map<uint64_t, Type *> &fields) {
     size_t byteSize = 0;
-    const DataLayout &dl = M.getDataLayout();
+    const DataLayout &dl = m.getDataLayout();
     for (const auto &field : fields) {
       byteSize += dl.getTypeAllocSize(field.second);
     }
     return byteSize;
   }
 
-  Value *buildIPrivate(Module &M, IRBuilder<> &B, Type *inodeType,
+  Value *buildIPrivate(Module &m, IRBuilder<> &b, Type *inodeType,
                        Value *inodePtr, uint64_t byteSize) {
-    Type *i8Type = Type::getInt8Ty(M.getContext());
-    Type *i32Type = Type::getInt32Ty(M.getContext());
-    Type *i64Type = Type::getInt64Ty(M.getContext());
+    Type *i8Type = Type::getInt8Ty(m.getContext());
+    Type *i32Type = Type::getInt32Ty(m.getContext());
+    Type *i64Type = Type::getInt64Ty(m.getContext());
     Constant *zero = ConstantInt::get(i64Type, 0);
     Constant *iPrivateOffset = ConstantInt::get(i32Type, iPrivateGEPIndex);
     Value *iPrivateGEP =
-        B.CreateGEP(inodeType, inodePtr, {zero, iPrivateOffset});
+        b.CreateGEP(inodeType, inodePtr, {zero, iPrivateOffset});
     Value *iPrivatePtr =
-        B.CreateAlloca(i8Type, ConstantInt::get(i64Type, byteSize));
-    B.CreateStore(iPrivatePtr, iPrivateGEP);
+        b.CreateAlloca(i8Type, ConstantInt::get(i64Type, byteSize));
+    b.CreateStore(iPrivatePtr, iPrivateGEP);
     return iPrivatePtr;
   }
 
   SmallVector<Value *, 8>
-  embeddedStructDevicePtrs(Module &M, IRBuilder<> &B, Value *iPrivate,
+  embeddedStructDevicePtrs(Module &m, IRBuilder<> &b, Value *iPrivate,
                            const std::map<uint64_t, Type *> &fields) {
     SmallVector<Value *, 8> devicePtrs;
     StructType *deviceType =
-        StructType::getTypeByName(M.getContext(), "struct.device");
+        StructType::getTypeByName(m.getContext(), "struct.device");
     if (!deviceType) {
       errs() << "`struct device` type not found?\n";
       return {};
     }
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
     Type *i64Type = Type::getInt64Ty(ctx);
@@ -271,10 +278,10 @@ private:
       if (StructType *structType =
               dyn_cast<StructType>(fieldType->getPointerElementType())) {
         Value *fieldPtrAddr =
-            B.CreateGEP(i8Type, iPrivate, ConstantInt::get(i64Type, idx));
+            b.CreateGEP(i8Type, iPrivate, ConstantInt::get(i64Type, idx));
         Value *fieldPtr =
-            B.CreateBitCast(fieldPtrAddr, fieldType->getPointerTo());
-        Value *fieldValue = B.CreateLoad(fieldType, fieldPtr);
+            b.CreateBitCast(fieldPtrAddr, fieldType->getPointerTo());
+        Value *fieldValue = b.CreateLoad(fieldType, fieldPtr);
 
         SmallVector<uint64_t, 8> indices =
             indicesToDeviceType(structType, deviceType);
@@ -286,7 +293,7 @@ private:
           gepIndices.push_back(ConstantInt::get(i32Type, indices[i]));
         }
 
-        Value *gep = B.CreateGEP(structType, fieldValue, gepIndices);
+        Value *gep = b.CreateGEP(structType, fieldValue, gepIndices);
         devicePtrs.push_back(gep);
       }
     }
@@ -313,25 +320,25 @@ private:
     return {};
   }
 
-  void populateFields(Module &M, IRBuilder<> &B, Value *instanceAddr,
+  void populateFields(Module &m, IRBuilder<> &b, Value *instanceAddr,
                       const std::map<uint64_t, Type *> &fields) {
-    Type *i8Type = Type::getInt8Ty(M.getContext());
-    Type *i64Type = Type::getInt64Ty(M.getContext());
+    Type *i8Type = Type::getInt8Ty(m.getContext());
+    Type *i64Type = Type::getInt64Ty(m.getContext());
     for (const auto &field : fields) {
       Value *idx = ConstantInt::get(i64Type, field.first);
-      Value *fieldAddr = B.CreateGEP(i8Type, instanceAddr, idx);
+      Value *fieldAddr = b.CreateGEP(i8Type, instanceAddr, idx);
       Value *fieldPtrDest =
-          B.CreateBitCast(fieldAddr, i8Type->getPointerTo()->getPointerTo());
-      Value *fieldPtr = allocType(M, B, field.second->getPointerElementType());
-      Value *casted = B.CreateBitCast(fieldPtr, i8Type->getPointerTo());
-      B.CreateStore(casted, fieldPtrDest);
+          b.CreateBitCast(fieldAddr, i8Type->getPointerTo()->getPointerTo());
+      Value *fieldPtr = allocType(m, b, field.second->getPointerElementType());
+      Value *casted = b.CreateBitCast(fieldPtr, i8Type->getPointerTo());
+      b.CreateStore(casted, fieldPtrDest);
     }
   }
 };
 
 char FileOperations::ID = 0;
 
-Pass *createFileOperationsSetupPass(const std::string &func) {
-  return new FileOperations(func);
+Pass *createFileOperationsSetupPass(StringRef name) {
+  return new FileOperations(name);
 }
 } // namespace seahorn
