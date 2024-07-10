@@ -31,6 +31,8 @@ public:
     return true;
   }
 
+  virtual StringRef getPassName() const override { return "HandleDeviceTree"; }
+
 private:
   void handleFindDeviceNode(Module &m) {
     LLVMContext &ctx = m.getContext();
@@ -163,6 +165,12 @@ private:
         surroundingDevType, call,
         {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, *idx)});
 
+    Function *ndBool = m.getFunction("nd_bool");
+    CallInst *ndVal = b.CreateCall(ndBool->getFunctionType(), ndBool);
+    devPtr = b.CreateSelect(
+        ndVal, devPtr,
+        ConstantPointerNull::get(cast<PointerType>(devPtr->getType())));
+
     Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
     Value *setupDevArg = devPtr;
     if (setupDevArg->getType() != setupDevice->getArg(0)->getType())
@@ -184,9 +192,8 @@ private:
           b.CreateBitCast(getDeviceArg, getDevice->getArg(0)->getType());
     b.CreateCall(getDevice, {getDeviceArg});
 
-    if (devPtr->getType() != origCall->getType()) {
+    if (devPtr->getType() != origCall->getType())
       devPtr = b.CreateBitCast(devPtr, origCall->getType());
-    }
     return devPtr;
   }
 
