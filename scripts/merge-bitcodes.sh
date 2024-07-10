@@ -17,6 +17,7 @@ wllvm \
   -I${KERNEL_DIR}/include \
   -I${KERNEL_DIR}/include/uapi \
   -I${KERNEL_DIR}/include/generated/uapi \
+  -I${KERNEL_DIR}/drivers \
   -I${KERNEL_DIR}/drivers/acpi \
   -I${KERNEL_DIR}/drivers/char \
   -I${KERNEL_DIR}/drivers/net \

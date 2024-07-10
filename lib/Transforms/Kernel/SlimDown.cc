@@ -29,11 +29,9 @@ static uint64_t kobjIndices[] = {6, 0, 0, 0};
 // Track from llvm::Argument. If an llvm::Instruction is not reachable from
 // llvm::Argument, remove it or replace it with a nondet value.
 struct Graph {
-  Graph(Module &m) {
+  Graph(Module &m, const Function *verifierError) {
     kobjectType = StructType::getTypeByName(m.getContext(), "struct.kobject");
-  }
-
-  void build(const Function *main, const Function *verifierError) {
+    Function *main = m.getFunction("main");
     for (const Instruction &inst : instructions(*main)) {
       if (const CallInst *call = dyn_cast<CallInst>(&inst)) {
         DenseMap<const Instruction *, bool> visited;
@@ -45,6 +43,11 @@ struct Graph {
       }
       coreTargets.insert(&inst);
     }
+    if (const GlobalVariable *gv = m.getNamedGlobal("of_root")) {
+      visitGlobalVariable(gv);
+    }
+    Function *malloc = m.getFunction("malloc");
+    visitFuncAndCaller(malloc);
   }
 
   bool isTarget(const Value *value) {
@@ -57,13 +60,11 @@ struct Graph {
       return false;
     if (!visited.insert(value).second)
       return false;
-    if (coreTargets.count(dyn_cast<Instruction>(value))) {
+    if (coreTargets.count(dyn_cast<Instruction>(value)))
       return true;
-    }
     for (const Value *v : edges[value]) {
-      if (isTarget(v, visited)) {
+      if (isTarget(v, visited))
         return true;
-      }
     }
     return false;
   }
@@ -73,6 +74,34 @@ private:
   DenseMap<const Value *, DenseSet<const Value *>> edges;
   DenseSet<const Instruction *> coreTargets;
   std::set<std::tuple<const User *, const Value *, Optional<size_t>>> visited;
+
+  void visitGlobalVariable(const GlobalVariable *gv) {
+    for (const User *user : gv->users()) {
+      visitUser(user, gv, None);
+      const Function *func = funcOfUser(user);
+      visitFuncAndCaller(func);
+    }
+  }
+
+  void visitFuncAndCaller(const Function *f) {
+    if (!visited.insert({f, nullptr, None}).second)
+      return;
+    SmallVector<const CallInst *, 16> callers = getCallers(f);
+    for (const CallInst *call : callers) {
+      visitCall(call, nullptr, None);
+      visitFuncAndCaller(call->getFunction());
+    }
+  }
+
+  const Function *funcOfUser(const User *user) {
+    if (const Instruction *inst = dyn_cast<Instruction>(user))
+      return inst->getFunction();
+    for (const User *u : user->users()) {
+      if (const Function *f = funcOfUser(u))
+        return f;
+    }
+    return nullptr;
+  }
 
   void visitArg(const Argument *arg, Optional<size_t> currentGEPIndex) {
     for (const User *user : arg->users()) {
@@ -106,6 +135,8 @@ private:
       visitGEP(gep, orig, currentGEPIndex);
     } else if (const StoreInst *store = dyn_cast<StoreInst>(inst)) {
       visitStore(store, currentGEPIndex);
+    } else if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
+      visitPhi(phi, currentGEPIndex);
     } else {
       for (const User *user : inst->users()) {
         visitUser(user, inst, None);
@@ -141,6 +172,7 @@ private:
     for (const BasicBlock &block : f) {
       const Instruction *inst = block.getTerminator();
       if (isa<ReturnInst>(inst)) {
+        edges[inst->getParent()].insert(inst);
         edges[inst].insert(call);
       }
     }
@@ -149,6 +181,11 @@ private:
   void visitBranch(const BranchInst *br, Optional<size_t> currentGEPIndex) {
     for (const BasicBlock *succ : br->successors()) {
       edges[br].insert(succ);
+      for (const Instruction &inst : *succ) {
+        if (!visited.insert({&inst, br, currentGEPIndex}).second)
+          return;
+        visitInst(&inst, br, None);
+      }
     }
   }
 
@@ -158,13 +195,17 @@ private:
     }
   }
 
+  void visitPhi(const PHINode *phi, Optional<size_t> currentGEPIndex) {
+    for (const BasicBlock *b : phi->blocks())
+      edges[b].insert(phi);
+    for (const User *user : phi->users()) {
+      visitUser(user, phi, currentGEPIndex);
+    }
+  }
+
   void visitGEP(const GetElementPtrInst *gep, const Value *orig,
                 Optional<size_t> currentGEPIndex) {
     Optional<size_t> nextIndex = nextKobjectIndex(gep, currentGEPIndex);
-    if (gep->getFunction()->getName().equals("kobject_uevent_net_broadcast")) {
-      errs() << "visiting GEP " << currentGEPIndex << ' ' << nextIndex << ' '
-             << *gep << '\n';
-    }
     for (const User *user : gep->users()) {
       visitUser(user, gep, nextIndex);
     }
@@ -243,8 +284,7 @@ public:
     SeaBuiltinsInfo &sbi =
         getAnalysis<seahorn::SeaBuiltinsInfoWrapperPass>().getSBI();
     Function *verifierError = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
-    Graph g(m);
-    g.build(m.getFunction("main"), verifierError);
+    Graph g(m, verifierError);
     slimDownOnlyReachables(m, g);
     runDCEPasses(m, true);
     return true;

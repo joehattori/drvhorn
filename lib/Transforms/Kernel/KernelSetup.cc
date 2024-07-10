@@ -250,23 +250,23 @@ public:
 
   KernelSetup() : ModulePass(ID) {}
 
-  bool runOnModule(Module &M) override {
-    stubKernelFunctions(M);
-    stubAllocPages(M);
-    handleFree(M);
-    handleKmemCache(M);
-    ignoreKernelFunctions(M);
+  bool runOnModule(Module &m) override {
+    stubKernelFunctions(m);
+    stubAllocPages(m);
+    handleFree(m);
+    handleKmemCache(m);
+    ignoreKernelFunctions(m);
 
-    handleCallRcu(M);
+    handleCallRcu(m);
 
-    handleMemset(M);
-    handleMemCpy(M);
-    handleMemMove(M);
+    handleMemset(m);
+    handleMemCpy(m);
+    handleMemMove(m);
     // handleStrCat(M);
     // handleStrNCmp(M);
-    handleStrChr(M);
+    handleStrChr(m);
 
-    handleInlineAssembly(M);
+    handleInlineAssembly(m);
     return true;
   }
 

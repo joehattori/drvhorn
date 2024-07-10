@@ -115,7 +115,9 @@ llvm::Pass *createCrabLowerIsDerefPass();
 
 llvm::Pass *createAcpiSetupPass(llvm::StringRef acpiDrivers);
 llvm::Pass *createFileOperationsSetupPass(llvm::StringRef fileOpName);
+llvm::Pass *createPlatformDriverPass(llvm::StringRef fileOpName);
 llvm::Pass *createKernelSetupPass();
+llvm::Pass *createHandleDeviceTreePass();
 llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();
 llvm::Pass *createSlimDownPass();

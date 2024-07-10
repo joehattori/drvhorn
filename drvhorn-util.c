@@ -4,8 +4,13 @@
 #include <linux/mm_types.h>
 #include <linux/nodemask.h>
 #include <linux/types.h>
+#include <linux/of.h>
+#include <linux/device/class.h>
+#include <base/base.h>
 
-extern _Bool nd();
+extern _Bool nd_bool();
+extern char nd_char();
+extern int nd_int();
 extern void __VERIFIER_error(void);
 extern void __VERIFIER_assume(int);
 #define sassert(X) (void)((X) || (__VERIFIER_error(), 0))
@@ -24,19 +29,9 @@ void __DRVHORN_memcpy(char *dst, char *src, unsigned long long n,
     dst[i] = src[i];
 }
 
-char __DRVHORN_memory_region[0x1000000];
-
 extern void *malloc(unsigned long size);
 void *__DRVHORN_malloc(unsigned long size, unsigned flags) {
-  // static unsigned long long base = 0;
-  // if (nd()) {
-  //   char *ret = __DRVHORN_memory_region + base;
-  //   base += size;
-  //   return (void *)ret;
-  // } else {
-  //   return 0;
-  // }
-  if (nd()) {
+  if (nd_bool()) {
     // malloc() will be replaced by alloca in the PromoteMalloc pass.
     void *ret = malloc(size);
     if (flags & 0x100u) {
@@ -152,24 +147,13 @@ unsigned long __DRVHORN_strnlen(const char *s, unsigned long count) {
   return i;
 }
 
-struct page __DRVHORN_pages[0x100000];
 struct page *__DRVHORN___alloc_pages() {
-  // static unsigned long long base = 0;
-  if (nd()) {
-    // struct page *ret = __DRVHORN_pages + base;
-    // base++;
-    return malloc(sizeof(struct page));
-  } else {
-    return 0;
-  }
+  return nd_bool() ? malloc(sizeof(struct page)) : 0;
 }
 
 u64 __DRVHORN_util_read_u64(u8 *addr) { return *(u64 *)addr; }
-
 u32 __DRVHORN_util_read_u32(u8 *addr) { return *(u32 *)addr; }
-
 u16 __DRVHORN_util_read_u16(u8 *addr) { return *(u16 *)addr; }
-
 u8 __DRVHORN_util_read_u8(u8 *addr) { return *addr; }
 
 int __DRVHORN_util_get_kobject_count(const struct kobject *kobj) {
@@ -186,5 +170,57 @@ static struct kobj_type __DRVHORN_ktype = {
 };
 
 void __DRVHORN_setup_device(struct device *dev) {
+  if (!dev)
+    return;
   kobject_init(&dev->kobj, &__DRVHORN_ktype);
+}
+
+extern struct device_node *of_root;
+void __DRVHORN_setup_of_root() {
+  of_root = malloc(sizeof(struct device_node));
+  of_root->child = NULL;
+  kobject_init(&of_root->kobj, &__DRVHORN_ktype);
+}
+
+static void __DRVHORN_record_device_node(struct device_node *dn) {
+  if (!dn)
+    return;
+  struct device_node *child = of_root->child;
+  of_root->child = dn;
+  dn->sibling = child;
+}
+
+struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
+  struct device_node *dn = NULL;
+  if (nd_bool()) {
+    dn = malloc(sizeof(struct device_node));
+    kobject_init(&dn->kobj, &__DRVHORN_ktype);
+    __DRVHORN_record_device_node(dn);
+  }
+  of_node_get(dn);
+  of_node_put(from);
+  return dn;
+}
+
+void __DRVHORN_check_device_node_refcounts() {
+  struct device_node *dn = of_root->child;
+  while (dn) {
+    sassert(dn->kobj.kref.refcount.refs.counter == 1);
+    dn = dn->sibling;
+  }
+}
+
+static struct device *__DRVHORN_devices[0x100];
+static size_t __DRVHORN_device_count = 0;
+struct device *__DRVHORN_record_device(struct device *dev) {
+  if (__DRVHORN_device_count < 0x100)
+    __DRVHORN_devices[__DRVHORN_device_count++] = dev;
+  return dev;
+}
+
+void __DRVHORN_check_device_refcounts() {
+  for (size_t i = 0; i < __DRVHORN_device_count; i++) {
+    int counter = __DRVHORN_util_get_device_counter(__DRVHORN_devices[i]);
+    sassert(counter == 1);
+  }
 }

@@ -433,7 +433,10 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
     } else if (!FileOperation.empty()) {
       pm_wrapper.add(seahorn::createFileOperationsSetupPass(FileOperation));
+    } else if (!PlatformDriver.empty()) {
+      pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
     }
+    pm_wrapper.add(seahorn::createHandleDeviceTreePass());
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
     pm_wrapper.add(seahorn::createKernelDebugPass());

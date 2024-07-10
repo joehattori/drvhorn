@@ -36,4 +36,42 @@ llvm::Function *extractCalledFunction(llvm::CallInst *call) {
   return llvm::dyn_cast<llvm::Function>(
       call->getCalledOperand()->stripPointerCasts());
 }
+
+static void collectCallUser(llvm::User *user,
+                            llvm::SmallVector<llvm::CallInst *, 16> &res) {
+  if (llvm::isa<llvm::Instruction>(user)) {
+    if (llvm::CallInst *call = llvm::dyn_cast<llvm::CallInst>(user))
+      res.push_back(call);
+  } else {
+    for (llvm::User *user : user->users()) {
+      collectCallUser(user, res);
+    }
+  }
+}
+
+static void
+collectCallUser(const llvm::User *user,
+                llvm::SmallVector<const llvm::CallInst *, 16> &res) {
+  if (llvm::isa<llvm::Instruction>(user)) {
+    if (const llvm::CallInst *call = llvm::dyn_cast<llvm::CallInst>(user))
+      res.push_back(call);
+  } else {
+    for (const llvm::User *user : user->users()) {
+      collectCallUser(user, res);
+    }
+  }
+}
+
+llvm::SmallVector<llvm::CallInst *, 16> getCallers(llvm::Function *fn) {
+  llvm::SmallVector<llvm::CallInst *, 16> res;
+  collectCallUser(fn, res);
+  return res;
+}
+
+llvm::SmallVector<const llvm::CallInst *, 16>
+getCallers(const llvm::Function *fn) {
+  llvm::SmallVector<const llvm::CallInst *, 16> res;
+  collectCallUser(fn, res);
+  return res;
+}
 } // namespace
