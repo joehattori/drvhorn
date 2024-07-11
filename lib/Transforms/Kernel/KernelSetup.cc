@@ -259,7 +259,7 @@ public:
 
     handleCallRcu(m);
 
-    handleMemset(m);
+    // handleMemset(m);
     handleMemCpy(m);
     handleMemMove(m);
     // handleStrCat(M);

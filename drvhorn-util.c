@@ -15,13 +15,6 @@ extern void __VERIFIER_error(void);
 extern void __VERIFIER_assume(int);
 #define sassert(X) (void)((X) || (__VERIFIER_error(), 0))
 
-void __DRVHORN_memset(void *s, char c, unsigned long long n,
-                      _Bool is_volatile) {
-  unsigned long long i;
-  for (i = 0; i < n; i++)
-    ((char *)s)[i] = c;
-}
-
 void __DRVHORN_memcpy(char *dst, char *src, unsigned long long n,
                       _Bool is_volatile) {
   unsigned long long i;
@@ -30,17 +23,15 @@ void __DRVHORN_memcpy(char *dst, char *src, unsigned long long n,
 }
 
 extern void *malloc(unsigned long size);
+extern void *zalloc(unsigned long size);
 void *__DRVHORN_malloc(unsigned long size, unsigned flags) {
-  if (nd_bool()) {
-    // malloc() will be replaced by alloca in the PromoteMalloc pass.
-    void *ret = malloc(size);
-    if (flags & 0x100u) {
-      __DRVHORN_memset(ret, 0, size, 0);
-    }
-    return ret;
-  } else {
+  if (nd_bool())
     return 0;
-  }
+  // malloc() will be replaced by alloca in the PromoteMalloc pass.
+  if (flags & 0x100u)
+    return zalloc(size);
+  else
+    return malloc(size);
 }
 
 void *__attribute__((always_inline))

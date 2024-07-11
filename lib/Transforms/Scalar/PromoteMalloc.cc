@@ -1,6 +1,6 @@
-#include "llvm/Pass.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "boost/range.hpp"
@@ -36,11 +36,13 @@ public:
 
       const Function *fn = CI.getCalledFunction();
       if (!fn && CI.getCalledOperand())
-        fn = dyn_cast<const Function>(CI.getCalledOperand()->stripPointerCasts());
+        fn = dyn_cast<const Function>(
+            CI.getCalledOperand()->stripPointerCasts());
 
-      if (fn && (fn->getName().equals("malloc") ||
-                 fn->getName().equals("_Znwj" /* new */) ||
-                 fn->getName().equals("_Znaj" /* new[] */))) {
+      if (fn &&
+          (fn->getName().equals("malloc") || fn->getName().equals("zalloc") ||
+           fn->getName().equals("_Znwj" /* new */) ||
+           fn->getName().equals("_Znaj" /* new[] */))) {
 
         unsigned addrSpace = 0;
         Value *nv = nullptr;
@@ -57,6 +59,12 @@ public:
           // -- set alignment based on stack, not alignment of the type
           ai->setAlignment(F.getParent()->getDataLayout().getStackAlignment());
           nv = ai;
+          if (fn->getName().equals("zalloc")) {
+            // -- zero out memory
+            auto *zero = Constant::getNullValue(ai->getAllocatedType());
+            auto *zeroed = new StoreInst(zero, ai, &I);
+            zeroed->setAlignment(ai->getAlign());
+          }
         }
         v->replaceAllUsesWith(nv);
 
