@@ -1740,18 +1740,17 @@ private:
     }
   }
 
-  void handleRDTSC(Module &M) {
-    LLVMContext &ctx = M.getContext();
+  void handleRDTSC(Module &m) {
+    LLVMContext &ctx = m.getContext();
     Type *i64Ty = Type::getInt64Ty(ctx);
 
-    auto replace = [this, &M, i64Ty](const std::string &targetAsm) {
-      std::vector<CallInst *> calls = getTargetAsmCalls(M, targetAsm, false);
-      FunctionCallee ndf = getNondetFn(i64Ty, M);
+    auto replace = [this, &m, i64Ty](const std::string &targetAsm) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(m, targetAsm, false);
+      FunctionCallee ndf = getNondetFn(i64Ty, m);
       for (CallInst *call : calls) {
-        IRBuilder<> B(call);
         // return a nondet unsigned long long for now.
-        Value *ret = B.CreateCall(ndf);
-        call->replaceAllUsesWith(ret);
+        CallInst *r = CallInst::Create(ndf, "", call);
+        call->replaceAllUsesWith(r);
         call->eraseFromParent();
       }
     };
@@ -1964,36 +1963,47 @@ private:
     }
   }
 
-  void handleStaticCpuHas(Module &M) {
+  void handleStaticCpuHas(Module &m) {
     std::vector<CallBrInst *> calls =
-        getTargetAsmCallBrs(M, STATIC_CPU_HAS_BRANCH, false);
+        getTargetAsmCallBrs(m, STATIC_CPU_HAS_BRANCH, false);
     for (CallBrInst *callbr : calls) {
-      IRBuilder<> B(callbr);
       // TODO: Randomizing the destination should be better.
-      BranchInst *branch = B.CreateBr(callbr->getIndirectDest(1));
+      BasicBlock *noBlk = callbr->getIndirectDest(1);
+      BranchInst *branch = BranchInst::Create(noBlk, callbr);
       callbr->replaceAllUsesWith(branch);
+      for (unsigned i = 0; i < callbr->getNumSuccessors(); i++) {
+        BasicBlock *succ = callbr->getSuccessor(i);
+        if (succ != noBlk)
+          succ->removePredecessor(callbr->getParent());
+      }
+      callbr->dropAllReferences();
       callbr->eraseFromParent();
     }
   }
 
-  void handleGetUserAsm(Module &M) {
-    auto replace = [this, &M](const std::string &targetAsm,
+  void handleGetUserAsm(Module &m) {
+    auto replace = [this, &m](const std::string &targetAsm,
                               const std::string &utilSuffix) {
       std::vector<CallBrInst *> calls =
-          getTargetAsmCallBrs(M, targetAsm, false);
-      Type *i8PtrType = Type::getInt8Ty(M.getContext())->getPointerTo();
+          getTargetAsmCallBrs(m, targetAsm, false);
+      Type *i8PtrType = Type::getInt8Ty(m.getContext())->getPointerTo();
       for (CallBrInst *callbr : calls) {
-        IRBuilder<> B(callbr);
+        IRBuilder<> b(callbr);
         Value *largeStruct = callbr->getArgOperand(0);
         Value *bytes =
-            B.CreateGEP(largeStruct->getType(), largeStruct, B.getInt32(0));
+            b.CreateGEP(largeStruct->getType(), largeStruct, b.getInt32(0));
         if (bytes->getType() != i8PtrType) {
-          bytes = B.CreateBitCast(bytes, i8PtrType);
+          bytes = b.CreateBitCast(bytes, i8PtrType);
         }
-        Function *f = M.getFunction("__DRVHORN_util_read_" + utilSuffix);
-        CallInst *val = B.CreateCall(f, bytes);
+        Function *f = m.getFunction("__DRVHORN_util_read_" + utilSuffix);
+        CallInst *val = b.CreateCall(f, bytes);
         // TODO: Randomizing the destination should be better.
-        B.CreateBr(callbr->getDefaultDest());
+        b.CreateBr(callbr->getDefaultDest());
+        for (unsigned i = 0; i < callbr->getNumSuccessors(); i++) {
+          BasicBlock *succ = callbr->getSuccessor(i);
+          if (succ != callbr->getDefaultDest())
+            succ->removePredecessor(callbr->getParent());
+        }
         callbr->replaceAllUsesWith(val);
         callbr->eraseFromParent();
       }
