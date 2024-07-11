@@ -86,8 +86,7 @@ private:
   void visitFuncAndCaller(const Function *f) {
     if (!visited.insert({f, nullptr, None}).second)
       return;
-    SmallVector<const CallInst *, 16> callers = getCallers(f);
-    for (const CallInst *call : callers) {
+    for (const CallInst *call : getCalls(f)) {
       visitCall(call, nullptr, None);
       visitFuncAndCaller(call->getFunction());
     }
@@ -309,32 +308,6 @@ private:
     }
   }
 
-  Instruction *getInstruction(User *user) {
-    if (Instruction *inst = dyn_cast<Instruction>(user)) {
-      return inst;
-    } else if (Operator *op = dyn_cast<Operator>(user)) {
-      for (User *user : op->users()) {
-        if (Instruction *inst = getInstruction(user)) {
-          return inst;
-        }
-      }
-    }
-    return nullptr;
-  }
-
-  const Instruction *getInstruction(const User *user) {
-    if (const Instruction *inst = dyn_cast<Instruction>(user)) {
-      return inst;
-    } else if (const Operator *op = dyn_cast<Operator>(user)) {
-      for (const User *user : op->users()) {
-        if (const Instruction *inst = getInstruction(user)) {
-          return inst;
-        }
-      }
-    }
-    return nullptr;
-  }
-
   void updateLinkage(Module &M) {
     for (Function &f : M) {
       if (f.isDeclaration())
@@ -394,15 +367,29 @@ private:
       }
     } else if (isa<UnreachableInst>(inst)) {
     } else if (isa<CallBrInst>(inst)) {
-      errs() << "unhandled CallBr " << *inst << '\n';
+      errs() << "unhandled CallBr in " << inst->getFunction()->getName()
+             << *inst << '\n';
       std::exit(1);
     } else {
       if (!inst->user_empty()) {
-        Value *replace = nondetValue(inst->getType(), inst, ndvalfn);
+        Instruction *insertPoint = getRepalcementInsertPoint(inst);
+        Value *replace = nondetValue(inst->getType(), insertPoint, ndvalfn);
         inst->replaceAllUsesWith(replace);
       }
       toRemoveInstructions.insert(inst);
     }
+  }
+
+  Instruction *getRepalcementInsertPoint(Instruction *inst) {
+    PHINode *phi = dyn_cast<PHINode>(inst);
+    if (!phi)
+      return inst;
+    for (Instruction &inst : *phi->getParent()) {
+      if (!isa<PHINode>(&inst))
+        return &inst;
+    }
+    errs() << "All instructions are PHINode.\n";
+    return nullptr;
   }
 
   Value *nondetValue(Type *type, Instruction *before,
@@ -445,34 +432,23 @@ private:
       inst->eraseFromParent();
     }
     for (Function *f : toRemoveFns) {
-      std::vector<CallInst *> calls;
-      for (User *user : f->users()) {
-        if (CallInst *call = dyn_cast<CallInst>(getInstruction(user))) {
-          calls.push_back(call);
-        }
-      }
-      for (CallInst *call : calls) {
+      for (CallInst *call : getCalls(f)) {
         Value *replace = nondetValue(call->getType(), call, ndvalfn);
         call->replaceAllUsesWith(replace);
         call->dropAllReferences();
         call->eraseFromParent();
       }
-      f->dropAllReferences();
-      f->eraseFromParent();
     }
   }
 
   void runDCEPasses(Module &m, bool removeArg = false) {
     legacy::PassManager pm;
+    pm.add(createVerifierPass(false));
     pm.add(createAggressiveDCEPass());
     pm.add(createGlobalDCEPass());
-    pm.add(createCFGSimplificationPass());
     if (removeArg)
       pm.add(createDeadArgEliminationPass());
-    int c = 0;
-    while (pm.run(m) && c++ < 10) {
-    }
-
+    pm.run(m);
     // nondet function calls are not removed by DCE passes.
     std::vector<Instruction *> toRemove;
     for (Function &f : m) {

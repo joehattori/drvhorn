@@ -75,8 +75,7 @@ private:
   void handleClassFindDevice(Module &m) {
     std::map<CallInst *, Value *> toReplace;
     Function *clsFindDev = m.getFunction("class_find_device");
-    SmallVector<CallInst *, 16> callers = getCallers(clsFindDev);
-    for (CallInst *call : callers) {
+    for (CallInst *call : getCalls(clsFindDev)) {
       Value *clsArg = call->getArgOperand(0);
       StructType *surroundingDevType = nullptr;
       if (GlobalVariable *cls = dyn_cast<GlobalVariable>(clsArg)) {

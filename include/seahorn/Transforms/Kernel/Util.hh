@@ -13,7 +13,7 @@ static void collectCallUser(llvm::User *user,
 static void collectCallUser(const llvm::User *user,
                             llvm::SmallVector<const llvm::CallInst *, 16> &res,
                             llvm::DenseSet<const llvm::User *> &visited);
-llvm::SmallVector<llvm::CallInst *, 16> getCallers(llvm::Function *fn);
+llvm::SmallVector<llvm::CallInst *, 16> getCalls(llvm::Function *fn);
 llvm::SmallVector<const llvm::CallInst *, 16>
-getCallers(const llvm::Function *fn);
+getCalls(const llvm::Function *fn);
 } // namespace seahorn
