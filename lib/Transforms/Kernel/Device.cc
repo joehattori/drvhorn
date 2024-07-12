@@ -11,30 +11,24 @@
 using namespace llvm;
 
 namespace seahorn {
-struct DevClassRel {
-  StructType *surroundingDevType; // struct that embeds a `struct device`.
-  SmallVector<Value *, 8> devIdx;
-  GlobalVariable *cls;
-
-  bool isValid() const { return surroundingDevType && cls; }
-};
-
-class HandleDeviceTree : public ModulePass {
+class HandleDevices : public ModulePass {
 public:
   static char ID;
 
-  HandleDeviceTree() : ModulePass(ID) {}
+  HandleDevices() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    handleFindDeviceNode(m);
-    handleClassFindDevice(m);
+    handleDeviceNodeFinders(m);
+    handleDeviceFinders(m);
+    handleDeviceNodeIsCompatible(m);
+    killDeviceDel(m);
     return true;
   }
 
   virtual StringRef getPassName() const override { return "HandleDeviceTree"; }
 
 private:
-  void handleFindDeviceNode(Module &m) {
+  void handleDeviceNodeFinders(Module &m) {
     LLVMContext &ctx = m.getContext();
     std::pair<StringRef, Optional<size_t>> namesAndDeviceNodeIndices[] = {
         {"of_find_node_opts_by_path", None}, {"of_find_node_by_name", 0},
@@ -72,35 +66,15 @@ private:
     }
   }
 
-  void handleClassFindDevice(Module &m) {
+  void handleDeviceFinders(Module &m) {
     std::map<CallInst *, Value *> toReplace;
-    Function *clsFindDev = m.getFunction("class_find_device");
-    for (CallInst *call : getCalls(clsFindDev)) {
-      Value *clsArg = call->getArgOperand(0);
-      StructType *surroundingDevType = nullptr;
-      if (GlobalVariable *cls = dyn_cast<GlobalVariable>(clsArg)) {
-        if (StructType *t = getSurroundingDeviceType(cls))
-          surroundingDevType = t;
-      } else if (LoadInst *load = dyn_cast<LoadInst>(clsArg)) {
-        GlobalVariable *cls =
-            dyn_cast<GlobalVariable>(load->getPointerOperand());
-        for (User *u : cls->users()) {
-          if (isa<LoadInst>(u)) {
-            if (StructType *t = getSurroundingDeviceType(u))
-              surroundingDevType = t;
-          }
-        }
-      } else if (Argument *arg = dyn_cast<Argument>(clsArg)) {
-        if (arg->getParent()->getName().equals("device_destroy"))
-          continue;
-        errs() << "TODO: handleClassFindDevice\n";
-        std::exit(1);
-      } else {
-        errs() << "TODO: handleClassFindDevice\n";
-        std::exit(1);
+    StringRef deviceFinderNames[] = {"class_find_device", "bus_find_device"};
+    for (StringRef name : deviceFinderNames) {
+      Function *finder = m.getFunction(name);
+      for (CallInst *call : getCalls(finder)) {
+        if (Value *replacement = buildDeviceFindCallReplacer(m, call))
+          toReplace[call] = replacement;
       }
-      Value *devPtr = buildNewClassFindDevice(m, surroundingDevType, call);
-      toReplace[call] = devPtr;
     }
     for (std::pair<CallInst *, Value *> p : toReplace) {
       p.first->replaceAllUsesWith(p.second);
@@ -109,39 +83,81 @@ private:
     }
   }
 
-  // @cls: a `struct.class**` variable.
-  StructType *getSurroundingDeviceType(Value *cls) {
-    Value *devicePtr = nullptr;
-    for (User *user : cls->users()) {
-      if (StoreInst *store = dyn_cast<StoreInst>(user)) {
-        devicePtr = store->getPointerOperand();
-        break;
+  Value *buildDeviceFindCallReplacer(Module &m, CallInst *call) {
+    Value *arg = call->getArgOperand(0);
+    for (Value *clsOrBusPtr : getClassOrBusPtrs(arg->stripPointerCasts())) {
+      if (StructType *t = getSurroundingDeviceType(clsOrBusPtr)) {
+        return buildNewEmbeddedDevice(m, t, call);
       }
     }
-    if (!devicePtr)
-      return nullptr;
-    if (GEPOperator *gep = dyn_cast<GEPOperator>(devicePtr)) {
-      return dyn_cast<StructType>(gep->getSourceElementType());
-    } else if (BitCastOperator *bitcast =
-                   dyn_cast<BitCastOperator>(devicePtr)) {
-      Value *src = bitcast->getOperand(0);
-      if (GEPOperator *gep = dyn_cast<GEPOperator>(src)) {
-        src = gep->getPointerOperand();
-        if (src->getType() == Type::getInt8PtrTy(cls->getContext())) {
-          for (User *user : src->users()) {
-            if (BitCastOperator *bc = dyn_cast<BitCastOperator>(user))
-              return dyn_cast<StructType>(
-                  bc->getType()->getPointerElementType());
-          }
-        }
-      }
-    }
-    errs() << "TODO: getSurroundingDeviceType\n";
-    std::exit(1);
+    return nullptr;
   }
 
-  Value *buildNewClassFindDevice(Module &m, StructType *surroundingDevType,
-                                 CallInst *origCall) {
+  // get struct.class* or struct.bus_type*.
+  SmallVector<Value *, 16> getClassOrBusPtrs(Value *v) {
+    if (GlobalVariable *gv = dyn_cast<GlobalVariable>(v)) {
+      return {gv};
+    } else if (LoadInst *load = dyn_cast<LoadInst>(v)) {
+      SmallVector<Value *, 16> clsOrBusPtrs;
+      Value *gv = load->getPointerOperand();
+      for (User *u : gv->users()) {
+        if (isa<LoadInst>(u))
+          clsOrBusPtrs.push_back(u);
+      }
+      return clsOrBusPtrs;
+    }
+    return {};
+  }
+
+  // @cls: a `struct.class*` variable.
+  StructType *getSurroundingDeviceType(Value *clsOrBusPtr) {
+    auto findSurroundingDeviceType = [this](Value *dest) -> StructType * {
+      GEPOperator *gep = dyn_cast<GEPOperator>(dest);
+      if (!gep)
+        return nullptr;
+      Type *i8Type = Type::getInt8Ty(dest->getContext());
+      if (gep->getSourceElementType() != i8Type) {
+        StructType *t = dyn_cast<StructType>(gep->getSourceElementType());
+        return t && getEmbeddedDeviceIndex(t) != None ? t : nullptr;
+      }
+      // kmalloc'ed type
+      CallInst *call = dyn_cast<CallInst>(gep->getPointerOperand());
+      if (!call ||
+          !call->getCalledFunction()->getName().equals("__DRVHORN___kmalloc"))
+        return nullptr;
+      for (User *user : call->users()) {
+        if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(user)) {
+          StructType *casted = dyn_cast<StructType>(
+              bitcast->getDestTy()->getPointerElementType());
+          if (casted && getEmbeddedDeviceIndex(casted) != None)
+            return casted;
+        }
+      }
+      return nullptr;
+    };
+
+    // struct.class is stored in the class field of struct.device.
+    for (StoreInst *store : getStores(clsOrBusPtr)) {
+      Value *dest = store->getPointerOperand()->stripPointerCasts();
+      if (StructType *ret = findSurroundingDeviceType(dest))
+        return ret;
+    }
+    return nullptr;
+  }
+
+  SmallVector<StoreInst *> getStores(Value *ptr) {
+    SmallVector<StoreInst *, 8> stores;
+    for (User *user : ptr->users()) {
+      if (isa<BitCastOperator>(user))
+        stores.append(getStores(user));
+      if (StoreInst *store = dyn_cast<StoreInst>(user))
+        stores.push_back(store);
+    }
+    return stores;
+  }
+
+  Value *buildNewEmbeddedDevice(Module &m, StructType *surroundingDevType,
+                                CallInst *origCall) {
     Function *malloc = m.getFunction("malloc");
     FunctionType *mallocType =
         FunctionType::get(surroundingDevType->getPointerTo(),
@@ -196,10 +212,11 @@ private:
     return devPtr;
   }
 
-  Optional<size_t> getEmbeddedDeviceIndex(StructType *surroundingDevType) {
-    for (size_t i = 0; i < surroundingDevType->getNumElements(); i++) {
-      if (surroundingDevType->getElementType(i)->getStructName().startswith(
-              "struct.device"))
+  Optional<size_t> getEmbeddedDeviceIndex(StructType *s) {
+    StructType *deviceType =
+        StructType::getTypeByName(s->getContext(), "struct.device");
+    for (size_t i = 0; i < s->getNumElements(); i++) {
+      if (equivTypes(s->getElementType(i), deviceType))
         return i;
     }
     return None;
@@ -216,9 +233,29 @@ private:
       return nullptr;
     }
   }
+
+  void handleDeviceNodeIsCompatible(Module &m) {
+    Function *ndBool = m.getFunction("nd_bool");
+    Type *i32Type = Type::getInt32Ty(m.getContext());
+    for (CallInst *call :
+         getCalls(m.getFunction("__of_device_is_compatible"))) {
+      CallInst *ndVal = CallInst::Create(ndBool, "", call);
+      ZExtInst *replace = new ZExtInst(ndVal, i32Type, "", call);
+      call->replaceAllUsesWith(replace);
+      call->dropAllReferences();
+      call->eraseFromParent();
+    }
+  }
+
+  void killDeviceDel(Module &m) {
+    for (CallInst *call : getCalls(m.getFunction("device_del"))) {
+      call->dropAllReferences();
+      call->eraseFromParent();
+    }
+  }
 };
 
-char HandleDeviceTree::ID = 0;
+char HandleDevices::ID = 0;
 
-Pass *createHandleDeviceTreePass() { return new HandleDeviceTree(); }
+Pass *createHandleDevicesPass() { return new HandleDevices(); }
 }; // namespace seahorn

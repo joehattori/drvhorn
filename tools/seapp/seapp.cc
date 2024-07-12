@@ -437,9 +437,10 @@ int main(int argc, char **argv) {
     } else if (!PlatformDriver.empty()) {
       pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
     }
-    pm_wrapper.add(seahorn::createHandleDeviceTreePass());
+    pm_wrapper.add(seahorn::createHandleDevicesPass());
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(llvm::createCFGSimplificationPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createKernelDebugPass());
   }

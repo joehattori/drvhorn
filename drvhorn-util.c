@@ -164,6 +164,7 @@ void __DRVHORN_setup_device(struct device *dev) {
   if (!dev)
     return;
   kobject_init(&dev->kobj, &__DRVHORN_ktype);
+  dev->parent = NULL;
 }
 
 extern struct device_node *of_root;
