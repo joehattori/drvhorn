@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/of.h>
 #include <linux/device/class.h>
+#include <linux/slab.h>
 #include <base/base.h>
 
 extern _Bool nd_bool();
@@ -194,10 +195,55 @@ struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
   return dn;
 }
 
+static void klist_children_get(struct klist_node *n)
+{
+  struct device_private *p = to_device_private_parent(n);
+  struct device *dev = p->device;
+
+  get_device(dev);
+}
+
+static void klist_children_put(struct klist_node *n)
+{
+  struct device_private *p = to_device_private_parent(n);
+  struct device *dev = p->device;
+
+  put_device(dev);
+}
+
+static int __DRVHORN_device_private_init(struct device *dev)
+{
+  dev->p = kzalloc(sizeof(*dev->p), GFP_KERNEL);
+  if (!dev->p)
+    return -ENOMEM;
+  dev->p->device = dev;
+  klist_init(&dev->p->klist_children, klist_children_get,
+       klist_children_put);
+  INIT_LIST_HEAD(&dev->p->deferred_probe);
+  return 0;
+}
+
+int __DRVHORN_device_add(struct device *dev) {
+  int error = -EINVAL;
+  dev = get_device(dev);
+  if (!dev)
+    goto done;
+  if (!dev->p) {
+    error = __DRVHORN_device_private_init(dev);
+    if (error)
+      goto done;
+  }
+  return 0;
+done:
+  put_device(dev);
+  return error;
+}
+
 void __DRVHORN_check_device_node_refcounts() {
   struct device_node *dn = of_root->child;
   while (dn) {
-    sassert(dn->kobj.kref.refcount.refs.counter == 1);
+    int counter = __DRVHORN_util_get_kobject_count(&dn->kobj);
+    sassert(counter == 1);
     dn = dn->sibling;
   }
 }
@@ -205,6 +251,8 @@ void __DRVHORN_check_device_node_refcounts() {
 static struct device *__DRVHORN_devices[0x100];
 static size_t __DRVHORN_device_count = 0;
 struct device *__DRVHORN_record_device(struct device *dev) {
+  if (!dev)
+    return NULL;
   if (__DRVHORN_device_count < 0x100)
     __DRVHORN_devices[__DRVHORN_device_count++] = dev;
   return dev;

@@ -346,6 +346,7 @@ private:
     std::string freeFuncNames[] = {
         "kfree",
         "vfree",
+        "free_percpu",
     };
     for (const std::string &name : freeFuncNames) {
       std::string wrapperName = name + "_wrapper";
@@ -425,7 +426,7 @@ private:
             continue;
           }
           Optional<size_t> size = getKmemCacheSize(gv);
-          if (size == None) {
+          if (!size.hasValue()) {
             continue;
           }
           ConstantInt *sizeArg = ConstantInt::get(i64Ty, size.getValue());
@@ -443,6 +444,7 @@ private:
         "slob_free",
         "refcount_warn_saturate",
         "__kobject_del",
+        "kobject_uevent_env",
     };
     for (StringRef name : names) {
       Function *f = m.getFunction(name);
@@ -450,14 +452,8 @@ private:
         return;
       std::string stubName = "drvhorn.stub." + name.str();
       FunctionType *ft = f->getFunctionType();
-      if (!ft->getReturnType()->isVoidTy()) {
-        errs() << "ignoreKernelFunctions: non-void return type\n";
-        std::exit(1);
-      }
       Function *stub = Function::Create(
-          ft, GlobalValue::LinkageTypes::InternalLinkage, stubName, &m);
-      BasicBlock *block = BasicBlock::Create(m.getContext(), "", stub);
-      ReturnInst::Create(m.getContext(), block);
+          ft, GlobalValue::LinkageTypes::ExternalLinkage, stubName, &m);
       f->replaceAllUsesWith(stub);
       f->eraseFromParent();
     }

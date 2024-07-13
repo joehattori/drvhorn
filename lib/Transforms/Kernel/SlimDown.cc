@@ -15,10 +15,6 @@
 #include "seahorn/Analysis/SeaBuiltinsInfo.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
-#include <map>
-#include <optional>
-#include <queue>
-
 #define COMPILER_USED_NAME "llvm.compiler.used"
 
 using namespace llvm;
@@ -42,9 +38,6 @@ struct Graph {
         connectRetToCall(*f, call);
       }
       coreTargets.insert(&inst);
-    }
-    if (const GlobalVariable *gv = m.getNamedGlobal("of_root")) {
-      visitGlobalVariable(gv);
     }
     Function *malloc = m.getFunction("malloc");
     visitFuncAndCaller(malloc);

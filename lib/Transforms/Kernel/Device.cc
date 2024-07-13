@@ -21,6 +21,8 @@ public:
     handleDeviceNodeFinders(m);
     handleDeviceFinders(m);
     handleDeviceNodeIsCompatible(m);
+    handleDeviceAdd(m);
+    killDeviceNodeNotify(m);
     killDeviceDel(m);
     return true;
   }
@@ -41,7 +43,7 @@ private:
       Function *f = m.getFunction(nameAndIndex.first);
       if (!f)
         continue;
-      std::string wrapperName = nameAndIndex.first.str() + "_wrapper";
+      std::string wrapperName = "__DRVHORN_" + nameAndIndex.first.str();
       Function *wrapper = Function::Create(
           f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
           wrapperName, &m);
@@ -50,12 +52,12 @@ private:
       Value *from;
       PointerType *devNodeArgType =
           cast<PointerType>(getter->getArg(0)->getType());
-      if (nameAndIndex.second == None) {
-        from = ConstantPointerNull::get(devNodeArgType);
-      } else {
-        from = wrapper->getArg(0);
+      if (nameAndIndex.second.hasValue()) {
+        from = wrapper->getArg(*nameAndIndex.second);
         if (from->getType() != devNodeArgType)
           from = b.CreateBitCast(from, devNodeArgType);
+      } else {
+        from = ConstantPointerNull::get(devNodeArgType);
       }
       Value *call = b.CreateCall(getter, from);
       if (call->getType() != f->getReturnType())
@@ -78,7 +80,6 @@ private:
     }
     for (std::pair<CallInst *, Value *> p : toReplace) {
       p.first->replaceAllUsesWith(p.second);
-      p.first->dropAllReferences();
       p.first->eraseFromParent();
     }
   }
@@ -118,7 +119,7 @@ private:
       Type *i8Type = Type::getInt8Ty(dest->getContext());
       if (gep->getSourceElementType() != i8Type) {
         StructType *t = dyn_cast<StructType>(gep->getSourceElementType());
-        return t && getEmbeddedDeviceIndex(t) != None ? t : nullptr;
+        return t && getEmbeddedDeviceIndex(t).hasValue() ? t : nullptr;
       }
       // kmalloc'ed type
       CallInst *call = dyn_cast<CallInst>(gep->getPointerOperand());
@@ -129,7 +130,7 @@ private:
         if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(user)) {
           StructType *casted = dyn_cast<StructType>(
               bitcast->getDestTy()->getPointerElementType());
-          if (casted && getEmbeddedDeviceIndex(casted) != None)
+          if (casted && getEmbeddedDeviceIndex(casted).hasValue())
             return casted;
         }
       }
@@ -171,7 +172,7 @@ private:
     CallInst *call = b.CreateCall(mallocType, castedMalloc,
                                   {ConstantInt::get(i64Type, size)});
     Optional<size_t> idx = getEmbeddedDeviceIndex(surroundingDevType);
-    if (idx == None) {
+    if (!idx.hasValue()) {
       errs() << "surroundingDevType " << *surroundingDevType
              << " does not embed a device\n";
       std::exit(1);
@@ -243,6 +244,29 @@ private:
       ZExtInst *replace = new ZExtInst(ndVal, i32Type, "", call);
       call->replaceAllUsesWith(replace);
       call->dropAllReferences();
+      call->eraseFromParent();
+    }
+  }
+
+  void handleDeviceAdd(Module &m) {
+    Function *orig = m.getFunction("device_add");
+    Function *replace = m.getFunction("__DRVHORN_device_add");
+    for (CallInst *call : getCalls(orig)) {
+      Value *devPtr = call->getArgOperand(0);
+      if (devPtr->getType() != replace->getArg(0)->getType())
+        devPtr =
+            new BitCastInst(devPtr, replace->getArg(0)->getType(), "", call);
+      CallInst *newCall = CallInst::Create(replace, devPtr, "", call);
+      call->replaceAllUsesWith(newCall);
+      call->dropAllReferences();
+      call->eraseFromParent();
+    }
+  }
+
+  void killDeviceNodeNotify(Module &m) {
+    for (CallInst *call : getCalls(m.getFunction("of_property_notify"))) {
+      Value *zero = ConstantInt::get(call->getType(), 0);
+      call->replaceAllUsesWith(zero);
       call->eraseFromParent();
     }
   }
