@@ -440,6 +440,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createHandleDevicesPass());
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(seahorn::createHandleNondetMallocPass());
     pm_wrapper.add(llvm::createCFGSimplificationPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createKernelDebugPass());

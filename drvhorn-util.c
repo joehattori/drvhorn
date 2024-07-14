@@ -161,38 +161,37 @@ static struct kobj_type __DRVHORN_ktype = {
     .release = __DRVHORN_kobject_release,
 };
 
+extern struct device_node *__DRVHORN_of_root;
+void __DRVHORN_setup_of_root() {
+  __DRVHORN_of_root = malloc(sizeof(struct device_node));
+  __DRVHORN_of_root->child = NULL;
+  kobject_init(&__DRVHORN_of_root->kobj, &__DRVHORN_ktype);
+}
+
+static struct device_node *__DRVHORN_create_device_node(void) {
+  struct device_node *dn = __DRVHORN_malloc(sizeof(struct device_node), 0);
+  if (!dn)
+    return NULL;
+  kobject_init(&dn->kobj, &__DRVHORN_ktype);
+  dn->sibling = __DRVHORN_of_root->child;
+  __DRVHORN_of_root->child = dn;
+  return dn;
+}
+
+struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
+  struct device_node *dn = __DRVHORN_create_device_node();
+  if (dn)
+    of_node_get(dn);
+  of_node_put(from);
+  return dn;
+}
+
 void __DRVHORN_setup_device(struct device *dev) {
   if (!dev)
     return;
   kobject_init(&dev->kobj, &__DRVHORN_ktype);
   dev->parent = NULL;
-}
-
-extern struct device_node *of_root;
-void __DRVHORN_setup_of_root() {
-  of_root = malloc(sizeof(struct device_node));
-  of_root->child = NULL;
-  kobject_init(&of_root->kobj, &__DRVHORN_ktype);
-}
-
-static void __DRVHORN_record_device_node(struct device_node *dn) {
-  if (!dn)
-    return;
-  struct device_node *child = of_root->child;
-  of_root->child = dn;
-  dn->sibling = child;
-}
-
-struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
-  struct device_node *dn = NULL;
-  if (nd_bool()) {
-    dn = malloc(sizeof(struct device_node));
-    kobject_init(&dn->kobj, &__DRVHORN_ktype);
-    __DRVHORN_record_device_node(dn);
-  }
-  of_node_get(dn);
-  of_node_put(from);
-  return dn;
+  // dev->of_node = __DRVHORN_create_device_node();
 }
 
 static void klist_children_get(struct klist_node *n)
@@ -240,7 +239,7 @@ done:
 }
 
 void __DRVHORN_check_device_node_refcounts() {
-  struct device_node *dn = of_root->child;
+  struct device_node *dn = __DRVHORN_of_root->child;
   while (dn) {
     int counter = __DRVHORN_util_get_kobject_count(&dn->kobj);
     sassert(counter == 1);

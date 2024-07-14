@@ -33,8 +33,12 @@ private:
   void handleDeviceNodeFinders(Module &m) {
     LLVMContext &ctx = m.getContext();
     std::pair<StringRef, Optional<size_t>> namesAndDeviceNodeIndices[] = {
-        {"of_find_node_opts_by_path", None}, {"of_find_node_by_name", 0},
-        {"of_find_node_by_type", 0},         {"of_find_compatible_node", 0},
+        {"of_find_node_opts_by_path", None},
+        {"of_find_node_by_name", 0},
+        {"of_find_node_by_type", 0},
+        {"of_find_compatible_node", 0},
+        {"of_find_node_by_phandle", None},
+        {"of_find_matching_node_and_match", 0},
         {"of_find_node_with_property", 0},
     };
     Function *getter = m.getFunction("__DRVHORN_get_device_node");
@@ -43,17 +47,17 @@ private:
       Function *f = m.getFunction(nameAndIndex.first);
       if (!f)
         continue;
-      std::string wrapperName = "__DRVHORN_" + nameAndIndex.first.str();
-      Function *wrapper = Function::Create(
+      std::string stubName = "__DRVHORN_" + nameAndIndex.first.str();
+      Function *stub = Function::Create(
           f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &m);
-      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
+          stubName, &m);
+      BasicBlock *block = BasicBlock::Create(ctx, "", stub);
       IRBuilder<> b(block);
       Value *from;
       PointerType *devNodeArgType =
           cast<PointerType>(getter->getArg(0)->getType());
       if (nameAndIndex.second.hasValue()) {
-        from = wrapper->getArg(*nameAndIndex.second);
+        from = stub->getArg(*nameAndIndex.second);
         if (from->getType() != devNodeArgType)
           from = b.CreateBitCast(from, devNodeArgType);
       } else {
@@ -63,7 +67,7 @@ private:
       if (call->getType() != f->getReturnType())
         call = b.CreateBitCast(call, f->getReturnType());
       b.CreateRet(call);
-      f->replaceAllUsesWith(wrapper);
+      f->replaceAllUsesWith(stub);
       f->eraseFromParent();
     }
   }
@@ -159,7 +163,7 @@ private:
 
   Value *buildNewEmbeddedDevice(Module &m, StructType *surroundingDevType,
                                 CallInst *origCall) {
-    Function *malloc = m.getFunction("malloc");
+    Function *malloc = m.getFunction("__DRVHORN_malloc");
     FunctionType *mallocType =
         FunctionType::get(surroundingDevType->getPointerTo(),
                           malloc->getArg(0)->getType(), false);
@@ -169,8 +173,9 @@ private:
     Type *i64Type = Type::getInt64Ty(m.getContext());
     Type *i32Type = Type::getInt32Ty(m.getContext());
     IRBuilder<> b(origCall);
-    CallInst *call = b.CreateCall(mallocType, castedMalloc,
-                                  {ConstantInt::get(i64Type, size)});
+    CallInst *call =
+        b.CreateCall(mallocType, castedMalloc,
+                     {ConstantInt::get(i64Type, size)}, "surrounding.dev");
     Optional<size_t> idx = getEmbeddedDeviceIndex(surroundingDevType);
     if (!idx.hasValue()) {
       errs() << "surroundingDevType " << *surroundingDevType
@@ -181,10 +186,10 @@ private:
         surroundingDevType, call,
         {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, *idx)});
 
-    Function *ndBool = m.getFunction("nd_bool");
-    CallInst *ndVal = b.CreateCall(ndBool->getFunctionType(), ndBool);
+    Value *cond = b.CreateICmpNE(
+        call, ConstantPointerNull::get(cast<PointerType>(call->getType())));
     devPtr = b.CreateSelect(
-        ndVal, devPtr,
+        cond, devPtr,
         ConstantPointerNull::get(cast<PointerType>(devPtr->getType())));
 
     Function *setupDevice = m.getFunction("__DRVHORN_setup_device");

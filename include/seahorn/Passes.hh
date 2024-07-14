@@ -121,6 +121,7 @@ llvm::Pass *createHandleDevicesPass();
 llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();
 llvm::Pass *createSlimDownPass();
+llvm::Pass *createHandleNondetMallocPass();
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

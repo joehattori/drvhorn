@@ -15,249 +15,201 @@
 #include "seahorn/Analysis/SeaBuiltinsInfo.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
+#include <queue>
+
 #define COMPILER_USED_NAME "llvm.compiler.used"
 
 using namespace llvm;
 
 namespace seahorn {
-static uint64_t kobjIndices[] = {6, 0, 0, 0};
-
 // Track from llvm::Argument. If an llvm::Instruction is not reachable from
 // llvm::Argument, remove it or replace it with a nondet value.
 struct Graph {
   Graph(Module &m, const Function *verifierError) {
-    kobjectType = StructType::getTypeByName(m.getContext(), "struct.kobject");
-    Function *main = m.getFunction("main");
-    for (const Instruction &inst : instructions(*main)) {
-      if (const CallInst *call = dyn_cast<CallInst>(&inst)) {
-        DenseMap<const Instruction *, bool> visited;
-        const Function *f = extractCalledFunction(call);
-        for (const Argument &arg : f->args()) {
-          visitArg(&arg, None);
-        }
-        connectRetToCall(*f, call);
+    for (const Function &f : m) {
+      for (const Argument &arg : f.args()) {
+        visitArg(&arg);
       }
-      coreTargets.insert(&inst);
     }
-    Function *malloc = m.getFunction("malloc");
-    visitFuncAndCaller(malloc);
+    buildNonArgStartingPoint(m);
+    errs() << "core target num " << coreTargets.size() << '\n';
+    collectCallPath(m);
+    errs() << "target num " << targets.size() << '\n';
+    collectReturnPath(m);
+    errs() << "target num " << targets.size() << '\n';
   }
 
-  bool isTarget(const Value *value) {
-    DenseSet<const Value *> visited;
-    return isTarget(value, visited);
+  bool isTarget(const Instruction *inst) const { return targets.count(inst); }
+
+  void collectCallPath(const Module &m) {
+    DenseMap<const Value *, bool> visiting;
+    for (const Function &f : m) {
+      for (const Argument &arg : f.args()) {
+        collectCallPath(&arg, visiting);
+      }
+    }
+    for (const Instruction *st : startingPoints) {
+      collectCallPath(st, visiting);
+    }
   }
 
-  bool isTarget(const Value *value, DenseSet<const Value *> &visited) {
-    if (!value)
-      return false;
-    if (!visited.insert(value).second)
-      return false;
-    if (coreTargets.count(dyn_cast<Instruction>(value)))
-      return true;
-    for (const Value *v : edges[value]) {
-      if (isTarget(v, visited))
-        return true;
+  bool collectCallPath(const Value *v,
+                       DenseMap<const Value *, bool> &visiting) {
+    if (visiting.count(v))
+      return visiting[v];
+    visiting[v] = false;
+    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
+      if (coreTargets.count(inst)) {
+        targets.insert(inst);
+        visiting[v] = true;
+      }
     }
-    return false;
+    if (const CallInst *call = dyn_cast<CallInst>(v)) {
+      if (const Function *f = extractCalledFunction(call)) {
+        for (const Argument &arg : f->args()) {
+          if (collectCallPath(&arg, visiting)) {
+            targets.insert(call);
+            visiting[v] = true;
+            break;
+          }
+        }
+      }
+    }
+    for (const Instruction *d : edges[v]) {
+      if (collectCallPath(d, visiting)) {
+        if (isa<Instruction>(v) && !isa<CallInst>(v))
+          targets.insert(cast<Instruction>(v));
+        visiting[v] = true;
+      }
+    }
+    return visiting[v];
   }
+
+  void collectReturnPath(const Module &m) {
+    DenseMap<const Value *, bool> visiting;
+    for (const Function &f : m) {
+      for (const Argument &arg : f.args()) {
+        collectRetPath(&arg, visiting);
+      }
+    }
+    for (const Instruction *st : startingPoints) {
+      collectRetPath(st, visiting);
+    }
+  }
+
+  bool collectRetPath(const Value *v, DenseMap<const Value *, bool> &visiting) {
+    if (visiting.count(v))
+      return visiting[v];
+    visiting[v] = false;
+    if (isa<ReturnInst>(v)) {
+      targets.insert(cast<Instruction>(v));
+      visiting[v] = true;
+    }
+    for (const Instruction *inst : edges[v]) {
+      if (collectRetPath(inst, visiting)) {
+        if (isa<Instruction>(v) && !isa<CallInst>(v))
+          targets.insert(cast<Instruction>(v));
+        visiting[v] = true;
+      }
+    }
+    return visiting[v];
+  }
+  bool debug{false};
 
 private:
-  const StructType *kobjectType;
-  DenseMap<const Value *, DenseSet<const Value *>> edges;
+  DenseMap<const Value *, DenseSet<const Instruction *>> edges;
   DenseSet<const Instruction *> coreTargets;
-  std::set<std::tuple<const User *, const Value *, Optional<size_t>>> visited;
+  DenseSet<const Instruction *> targets;
+  DenseSet<const Instruction *> startingPoints;
+  std::set<std::tuple<const User *, const Value *>> visited;
+  DenseMap<const Instruction *, bool> isTargetMemo;
 
-  void visitGlobalVariable(const GlobalVariable *gv) {
-    for (const User *user : gv->users()) {
-      visitUser(user, gv, None);
-      const Function *func = funcOfUser(user);
-      visitFuncAndCaller(func);
-    }
-  }
-
-  void visitFuncAndCaller(const Function *f) {
-    if (!visited.insert({f, nullptr, None}).second)
+  void buildNonArgStartingPoint(const Module &m) {
+    DenseSet<const Function *> visited;
+    std::queue<const Function *> worklist;
+    const Function *getDevNode = m.getFunction("__DRVHORN_get_device_node");
+    if (!getDevNode)
       return;
-    for (const CallInst *call : getCalls(f)) {
-      visitCall(call, nullptr, None);
-      visitFuncAndCaller(call->getFunction());
+    worklist.push(getDevNode);
+    while (!worklist.empty()) {
+      const Function *f = worklist.front();
+      worklist.pop();
+      if (!visited.insert(f).second)
+        continue;
+      for (const CallInst *call : getCalls(f)) {
+        startingPoints.insert(call);
+        worklist.push(call->getFunction());
+      }
     }
   }
 
-  const Function *funcOfUser(const User *user) {
-    if (const Instruction *inst = dyn_cast<Instruction>(user))
-      return inst->getFunction();
-    for (const User *u : user->users()) {
-      if (const Function *f = funcOfUser(u))
-        return f;
-    }
-    return nullptr;
-  }
-
-  void visitArg(const Argument *arg, Optional<size_t> currentGEPIndex) {
+  void visitArg(const Argument *arg) {
     for (const User *user : arg->users()) {
-      visitUser(user, arg, currentGEPIndex);
+      visitUser(user, arg);
     }
   }
 
-  void visitUser(const User *user, const Value *orig,
-                 Optional<size_t> currentGEPIndex) {
-    edges[orig].insert(user);
-    if (!visited.insert({user, orig, currentGEPIndex}).second)
+  void visitUser(const User *user, const Value *orig) {
+    if (!visited.insert({user, orig}).second)
       return;
     if (const Instruction *inst = dyn_cast<Instruction>(user)) {
-      visitInst(inst, orig, currentGEPIndex);
+      visitInst(inst, orig);
     } else {
       for (const User *u : user->users()) {
-        visitUser(u, user, None);
+        visitUser(u, user);
       }
     }
   }
 
-  void visitInst(const Instruction *inst, const Value *orig,
-                 Optional<size_t> currentGEPIndex) {
-    edges[inst->getParent()].insert(inst);
+  void visitInst(const Instruction *inst, const Value *orig) {
+    edges[orig].insert(inst);
     if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-      visitCall(call, orig, currentGEPIndex);
+      visitCall(call, orig);
     } else if (const BranchInst *br = dyn_cast<BranchInst>(inst)) {
-      visitBranch(br, currentGEPIndex);
-    } else if (const GetElementPtrInst *gep =
-                   dyn_cast<GetElementPtrInst>(inst)) {
-      visitGEP(gep, orig, currentGEPIndex);
+      visitBranch(br);
     } else if (const StoreInst *store = dyn_cast<StoreInst>(inst)) {
-      visitStore(store, currentGEPIndex);
-    } else if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
-      visitPhi(phi, currentGEPIndex);
+      visitStore(store);
     } else {
       for (const User *user : inst->users()) {
-        visitUser(user, inst, None);
+        visitUser(user, inst);
       }
     }
   }
 
-  bool isTargetFunc(const Instruction *inst, StringRef name) {
-    return inst->getFunction()->getName().equals(name);
-  }
-
-  void visitCall(const CallInst *call, const Value *orig,
-                 Optional<size_t> currentGEPIndex) {
-    for (const User *u : call->users()) {
-      visitUser(u, call, None);
-    }
+  void visitCall(const CallInst *call, const Value *orig) {
     const Function *f = extractCalledFunction(call);
     if (!f || f->isVarArg())
       return;
-    for (size_t i = 0; i < call->arg_size(); i++) {
-      Optional<size_t> nextIndex =
-          call->getArgOperand(i) == orig ? currentGEPIndex : None;
-      const Argument *arg = f->getArg(i);
-      edges[call].insert(arg);
-      visitArg(arg, nextIndex);
+    if (f->getName().equals("kobject_get") ||
+        f->getName().equals("kobject_put") ||
+        f->getName().equals("kobject_init")) {
+      coreTargets.insert(call);
     }
-    connectRetToCall(*f, call);
-  }
-
-  void connectRetToCall(const Function &f, const CallInst *call) {
-    if (call->user_empty())
-      return;
-    for (const BasicBlock &block : f) {
-      const Instruction *inst = block.getTerminator();
-      if (isa<ReturnInst>(inst)) {
-        edges[inst->getParent()].insert(inst);
-        edges[inst].insert(call);
-      }
+    for (const User *user : call->users()) {
+      visitUser(user, call);
     }
   }
 
-  void visitBranch(const BranchInst *br, Optional<size_t> currentGEPIndex) {
+  void visitBranch(const BranchInst *br) {
     for (const BasicBlock *succ : br->successors()) {
-      edges[br].insert(succ);
-      for (const Instruction &inst : *succ) {
-        if (!visited.insert({&inst, br, currentGEPIndex}).second)
-          return;
-        visitInst(&inst, br, None);
+      SmallVector<const Instruction *, 8> children;
+      for (const PHINode &phi : succ->phis()) {
+        children.push_back(&phi);
+      }
+      children.push_back(succ->getFirstNonPHI());
+      for (const Instruction *child : children) {
+        edges[br].insert(child);
+        for (const User *user : child->users()) {
+          visitUser(user, child);
+        }
       }
     }
   }
 
-  void visitStore(const StoreInst *store, Optional<size_t> currentGEPIndex) {
-    if (currentGEPIndex.hasValue()) {
-      coreTargets.insert(store);
+  void visitStore(const StoreInst *store) {
+    for (const User *user : store->getPointerOperand()->users()) {
+      visitUser(user, store);
     }
-  }
-
-  void visitPhi(const PHINode *phi, Optional<size_t> currentGEPIndex) {
-    for (const BasicBlock *b : phi->blocks())
-      edges[b].insert(phi);
-    for (const User *user : phi->users()) {
-      visitUser(user, phi, currentGEPIndex);
-    }
-  }
-
-  void visitGEP(const GetElementPtrInst *gep, const Value *orig,
-                Optional<size_t> currentGEPIndex) {
-    Optional<size_t> nextIndex = nextKobjectIndex(gep, currentGEPIndex);
-    for (const User *user : gep->users()) {
-      visitUser(user, gep, nextIndex);
-    }
-  }
-
-  Optional<size_t> nextKobjectIndex(const GetElementPtrInst *gep,
-                                    Optional<size_t> currentIndex) {
-    if (currentIndex.hasValue()) {
-      // already in kobject.
-      size_t cur = currentIndex.getValue();
-      // skip the first index.
-      for (size_t i = 1; i < gep->getNumIndices(); i++) {
-        const Value *index = gep->getOperand(i + 1);
-        if (getValueInteger(index) != kobjIndices[cur + i - 1])
-          return None;
-      }
-      return cur + gep->getNumIndices() - 1;
-    } else {
-      // find the GEP index that points to `struct kobject`.
-      const Optional<size_t> kobjIndex = lookForKobjectGEPIndex(gep);
-      if (!kobjIndex.hasValue())
-        return None;
-      size_t nextGEPIndex = kobjIndex.getValue() + 1;
-      size_t remainingGEPIndices = gep->getNumIndices() - nextGEPIndex;
-      for (size_t i = 0; i < remainingGEPIndices; i++) {
-        const Value *index = gep->getOperand(i + 1 + nextGEPIndex);
-        const Optional<uint64_t> indexInt = getValueInteger(index);
-        if (!indexInt.hasValue())
-          return None;
-        if (indexInt.getValue() != kobjIndices[i])
-          return None;
-      }
-      return remainingGEPIndices;
-    }
-  }
-
-  Optional<size_t> lookForKobjectGEPIndex(const GetElementPtrInst *gep) {
-    const StructType *indexedStructType =
-        dyn_cast<StructType>(gep->getSourceElementType());
-    if (!indexedStructType)
-      return None;
-    if (equivTypes(indexedStructType, kobjectType))
-      return 0;
-    // skip the first index.
-    for (size_t i = 1; i < gep->getNumIndices(); i++) {
-      const Value *index = gep->getOperand(i + 1);
-      indexedStructType =
-          dyn_cast<StructType>(indexedStructType->getTypeAtIndex(index));
-      if (!indexedStructType)
-        return None;
-      if (equivTypes(indexedStructType, kobjectType))
-        return i;
-    }
-    return None;
-  }
-
-  Optional<uint64_t> getValueInteger(const Value *v) {
-    if (const ConstantInt *ci = dyn_cast<ConstantInt>(v))
-      return ci->getZExtValue();
-    return None;
   }
 };
 
@@ -305,7 +257,8 @@ private:
     for (Function &f : M) {
       if (f.isDeclaration())
         continue;
-      if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_"))
+      if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_") ||
+          f.getName().equals("__DRVHORN_malloc"))
         continue;
       f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
@@ -328,7 +281,7 @@ private:
       return false;
     if (isa<Constant>(v))
       return false;
-    return !graph.isTarget(v);
+    return !graph.isTarget(cast<Instruction>(v));
   }
 
   void handleNonRetainedInst(Graph &graph, Instruction *inst,
@@ -352,8 +305,8 @@ private:
       Value *retVal = ret->getReturnValue();
       if (retVal) {
         if (isNondet(retVal, graph)) {
-          Value *def = Constant::getNullValue(retVal->getType());
-          ReturnInst *newRet = ReturnInst::Create(inst->getContext(), def, ret);
+          Value *v = nondetValue(retVal->getType(), ret, ndvalfn);
+          ReturnInst *newRet = ReturnInst::Create(inst->getContext(), v, ret);
           ret->replaceAllUsesWith(newRet);
           toRemoveInstructions.insert(inst);
         }
@@ -387,50 +340,61 @@ private:
 
   Value *nondetValue(Type *type, Instruction *before,
                      DenseMap<const Type *, Function *> &ndvalfn) {
-    if (type->isPointerTy()) {
-      Type *elemType = type->getPointerElementType();
-      if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
-        return makeNewValFn(before->getModule(), ft, ndvalfn.size());
-      } else {
-        return new AllocaInst(elemType, 0, "", before);
-      }
-    } else {
+    if (!type->isPointerTy()) {
       Function *nondetFn = getNondetValueFn(type, before->getModule(), ndvalfn);
       return CallInst::Create(nondetFn, "", before);
     }
+
+    Module *m = before->getModule();
+    IRBuilder<> builder(before);
+    return populateType(cast<PointerType>(type), m, builder, ndvalfn);
+  }
+
+  Value *populateType(PointerType *type, Module *m, IRBuilder<> &b,
+                      DenseMap<const Type *, Function *> &ndvalfn) {
+    Type *elemType = type->getPointerElementType();
+    if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
+      return makeNewValFn(m, ft, ndvalfn.size());
+    }
+    Function *malloc = nondetMalloc(m);
+    FunctionType *ft =
+        FunctionType::get(type, malloc->getArg(0)->getType(), false);
+    Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());
+    size_t size = m->getDataLayout().getTypeAllocSize(elemType);
+    Type *i64Type = Type::getInt64Ty(m->getContext());
+    return b.CreateCall(ft, casted, ConstantInt::get(i64Type, size));
+  }
+
+  Function *nondetMalloc(Module *m) {
+    if (Function *f = m->getFunction("nondet.malloc"))
+      return f;
+    FunctionType *nondetMallocType =
+        FunctionType::get(Type::getInt8PtrTy(m->getContext()),
+                          Type::getInt64Ty(m->getContext()), false);
+    return Function::Create(nondetMallocType,
+                            GlobalValue::LinkageTypes::ExternalLinkage,
+                            "nondet.malloc", m);
   }
 
   void slimDownOnlyReachables(Module &m, Graph &g) {
     std::set<Instruction *> toRemoveInstructions;
-    std::vector<Function *> toRemoveFns;
     DenseMap<const Type *, Function *> ndvalfn;
     for (Function &f : m) {
-      if (f.getName().equals("main") || f.getName().startswith("__DRVHORN_") ||
-          f.isDeclaration())
+      // we keep these functions still.
+      if (f.getName().equals("main") || f.getName().equals("kobject_get") ||
+          f.getName().equals("kobject_put") ||
+          f.getName().equals("kobject_init") ||
+          f.getName().startswith("__DRVHORN_") || f.isDeclaration())
         continue;
-      bool removeFn = true;
       for (Instruction &inst : instructions(f)) {
-        if (g.isTarget(&inst)) {
-          removeFn = false;
-        } else {
+        if (!g.isTarget(&inst)) {
           handleNonRetainedInst(g, &inst, ndvalfn, toRemoveInstructions);
         }
-      }
-      if (removeFn) {
-        toRemoveFns.push_back(&f);
       }
     }
     for (Instruction *inst : toRemoveInstructions) {
       inst->dropAllReferences();
       inst->eraseFromParent();
-    }
-    for (Function *f : toRemoveFns) {
-      for (CallInst *call : getCalls(f)) {
-        Value *replace = nondetValue(call->getType(), call, ndvalfn);
-        call->replaceAllUsesWith(replace);
-        call->dropAllReferences();
-        call->eraseFromParent();
-      }
     }
   }
 
@@ -441,15 +405,26 @@ private:
     pm.add(createGlobalDCEPass());
     if (removeArg)
       pm.add(createDeadArgEliminationPass());
+    pm.add(createCFGSimplificationPass());
     pm.run(m);
+    removeUnusedNondetCalls(m);
+    pm.run(m);
+    removeUnusedNondetCalls(m);
+    pm.run(m);
+    removeUnusedNondetCalls(m);
+    pm.run(m);
+  }
+
+  void removeUnusedNondetCalls(Module &m) {
     // nondet function calls are not removed by DCE passes.
     std::vector<Instruction *> toRemove;
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
           if (Function *f = extractCalledFunction(call)) {
-            if (f->getName().startswith("verifier.nondet") &&
-                call->user_empty())
+            if (f->getName().equals("verifier.error"))
+              continue;
+            if (f->isDeclaration() && call->user_empty())
               toRemove.push_back(call);
           }
         }

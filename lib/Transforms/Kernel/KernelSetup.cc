@@ -818,7 +818,7 @@ private:
     // handleNativeWriteMSRSafe(M);
     // handleRDMSR(M);
     // handleWRMSR(M);
-    // handleRDTSC(M);
+    handleRDTSC(M);
     // handleArrayIndexMaskNoSpec(M);
 
     handleCurrentTask(M);
@@ -1737,13 +1737,10 @@ private:
   }
 
   void handleRDTSC(Module &m) {
-    LLVMContext &ctx = m.getContext();
-    Type *i64Ty = Type::getInt64Ty(ctx);
-
-    auto replace = [this, &m, i64Ty](const std::string &targetAsm) {
+    auto replace = [this, &m](const std::string &targetAsm) {
       std::vector<CallInst *> calls = getTargetAsmCalls(m, targetAsm, false);
-      FunctionCallee ndf = getNondetFn(i64Ty, m);
       for (CallInst *call : calls) {
+        FunctionCallee ndf = getNondetFn(call->getType(), m);
         // return a nondet unsigned long long for now.
         CallInst *r = CallInst::Create(ndf, "", call);
         call->replaceAllUsesWith(r);
