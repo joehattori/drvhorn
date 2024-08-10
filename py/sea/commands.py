@@ -310,7 +310,7 @@ class Seapp(sea.LimitedCmd):
                          help='Abstract memory instructions', dest='abs_mem_lvl',
                          choices=['none','only-load','only-store','load-and-store'],
                          default='none')
-        ap.add_argument ('--entry', dest='entry', help='Make entry point if main does not exist',
+        ap.add_argument ('--entry', dest='entry', help='Make given function the entry point, deleting main if it exists.',
                          default=None, metavar='str')
         ap.add_argument ('--acpi-driver', dest='acpi_driver', help='Specify a ACPI driver to validate',
                          type=str, metavar='str')
@@ -386,6 +386,10 @@ class Seapp(sea.LimitedCmd):
                           help='Allow arithmetic overflow intrinsics')
         add_bool_argument(ap, 'ignore-define-verifier-fns', dest='ignore_defined_verifier_fns',
                           help='Treat only undef functions as verifier calls')
+        add_bool_argument(ap, 'promote-nondet-undef', dest='promote_nondet_undef',
+                          default=True, help='Replace all undef values with non-determinism')
+        add_bool_argument(ap, 'replace-loops-with-nd-funcs', dest='replace_loops_with_nd_funcs',
+                          default=False, help='Replace all loops effects with a function that returns non-deterministic outputs')
 
         add_in_out_args (ap)
         _add_S_arg (ap)
@@ -502,7 +506,14 @@ class Seapp(sea.LimitedCmd):
                 argv.append('--horn-keep-arith-overflow=true')
             else:
                 argv.append('--horn-keep-arith-overflow=false')
-
+            if args.promote_nondet_undef is None or args.promote_nondet_undef:
+                argv.append('--promote-nondet-undef=true')
+            else:
+                argv.append('--promote-nondet-undef=false')                
+            if args.replace_loops_with_nd_funcs:
+                argv.append('--horn-replace-loops-with-nd-funcs=true')
+            else:
+                argv.append('--horn-replace-loops-with-nd-funcs=false')
 
         if args.log is not None:
             for l in args.log.split (':'): argv.extend (['-log', l])
@@ -530,8 +541,8 @@ class MixedSem(sea.LimitedCmd):
         ap = super (MixedSem, self).mk_arg_parser (ap)
         ap.add_argument ('--no-ms', dest='ms_skip', help='Skip mixed semantics',
                          default=False, action='store_true')
-        ap.add_argument ('--no-reduce-main', dest='reduce_main',
-                         help='Do not reduce main to return paths only',
+        ap.add_argument ('--reduce-main', dest='reduce_main',
+                         help='Reduce main to return paths only',
                          default=True, action='store_false')
         # some passes only after mixed semantics
         ap.add_argument ('--symbolize-constant-loop-bounds', dest='sym_bounds',
@@ -675,7 +686,7 @@ class NdcInst(sea.LimitedCmd):
 
 class SimpleMemoryChecks(sea.LimitedCmd):
     def __init__(self, quiet=False):
-        super(SimpleMemoryChecks, self).__init__('smc',
+        super(SimpleMemoryChecks, self).__init__('smc-checks',
                                                  'Simple Memory Safety Checks',
                                        allow_extra=True)
 
@@ -909,8 +920,8 @@ class Seaopt(sea.LimitedCmd):
                          help='Unrolling threshold (default = 150)',
                          dest='unroll_threshold',
                          default=150, metavar='NUM')
-        ap.add_argument ('--enable-vectorize', dest='enable_vectorize', default=False,
-                         action='store_true', help='Enable LLVM vectorization optimizations')
+        add_bool_argument(ap, 'enable-vectorize', dest='enable_vectorize', default=False,
+                          help='Enable LLVM vectorization passes')
         add_in_out_args (ap)
         _add_S_arg (ap)
         return ap
@@ -949,6 +960,15 @@ class Seaopt(sea.LimitedCmd):
         argv.extend(['--unroll-allow-partial=false',
                      '--unroll-partial-threshold=0'])
 
+        # new option to disable vectorization more globally
+        if args.enable_vectorize:
+            argv.append('--seaopt-enable-vectorize=true')
+        else:
+            # this is the default. For compatibility, do not add anything
+            # argv.append('--seaopt-enable-vectorize=false')
+            pass
+
+        # XXX See option above. Perhaps remove other vectorization related options
         # LLVM 12 onwards we need to disable slp vectorization (vec instr not handled by sea-dsa and opsem)
         # vectorization for loops is split into multiple options so not adding any here.
         # See https://sourcegraph.com/github.com/llvm/llvm-project@release/12.x/-/blob/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp

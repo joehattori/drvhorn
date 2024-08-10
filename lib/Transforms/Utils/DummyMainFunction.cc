@@ -1,5 +1,6 @@
 /** Insert dummy main function if one does not exist */
 
+#include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
@@ -14,14 +15,21 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "seahorn/Support/SeaDebug.h"
+#include "seahorn/Support/SeaLog.hh"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "sea-dummy-main"
+
+static llvm::cl::opt<std::string>
+    EntryPoint("entry-point",
+               llvm::cl::desc("Set Entry point to be other than main."),
+               llvm::cl::init(""));
 
 namespace seahorn {
 
 class DummyMainFunction : public ModulePass {
   DenseMap<const Type *, FunctionCallee> m_ndfn;
-  std::string entry_point;
 
   FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,
                                  std::string prefix) {
@@ -49,19 +57,27 @@ class DummyMainFunction : public ModulePass {
 public:
   static char ID;
 
-  DummyMainFunction(std::string entry) : ModulePass(ID), entry_point(entry) {}
+  DummyMainFunction() : ModulePass(ID) {}
 
   bool runOnModule(Module &M) override {
+    if (EntryPoint != "" && M.getFunction("main")) {
+      std::unique_ptr<OptimizationRemarkEmitter> OwnedORE =
+          std::make_unique<OptimizationRemarkEmitter>(M.getFunction("main"));
+      OptimizationRemarkEmitter *ORE = OwnedORE.get();
 
-    if (M.getFunction("main")) {
-      LOG("dummy-main", errs() << "DummyMainFunction: Main already exists.\n");
-
-      return false;
+      LOG("dummy-main",
+          WARN << "DummyMainFunction: Main already exists. Deleting it!\n");
+      // NOTE: assuming no uses of main
+      ORE->emit(
+          OptimizationRemark(DEBUG_TYPE, "ReplaceMain", M.getFunction("main"))
+          << " Will replace main function with entry to (in-order) "
+          << EntryPoint);
+      M.getFunction("main")->eraseFromParent();
     }
 
     Function *Entry = nullptr;
-    if (entry_point != "")
-      Entry = M.getFunction(entry_point);
+    if (EntryPoint != "")
+      Entry = M.getFunction(EntryPoint);
 
     // --- Create main
     LLVMContext &ctx = M.getContext();
@@ -107,6 +123,34 @@ public:
     // our favourite exit code
     B.CreateRet(ConstantInt::get(intTy, 42));
 
+    // GlobalVariable *LLVMUsed = M.getGlobalVariable("llvm.used");
+    // std::vector<Constant*> MergedVars;
+    // if (LLVMUsed) {
+    //   // Collect the existing members of llvm.used
+    //   ConstantArray *Inits = cast<ConstantArray>(LLVMUsed->getInitializer());
+    //   for (unsigned I = 0, E = Inits->getNumOperands(); I != E; ++I) {
+    //     Value* V = Inits->getOperand(I)->stripPointerCasts();
+    //     MergedVars.push_back(Inits->getOperand(I));
+    //   }
+    //   LLVMUsed->eraseFromParent();
+    // }
+
+    // Type *i8PTy = Type::getInt8PtrTy(ctx);
+    // // Add uses for our data
+    // //MergedVars.push_back (ConstantExpr::getBitCast(cast<llvm::Constant>(F),
+    // i8PTy));
+    // // XXX: this shouldn't be necessary but for some reason DCE
+    // //       does not like my main and deletes it
+    // MergedVars.push_back
+    // (ConstantExpr::getBitCast(cast<llvm::Constant>(main), i8PTy));
+
+    // // Recreate llvm.used.
+    // ArrayType *ATy = ArrayType::get(i8PTy, MergedVars.size());
+    // LLVMUsed = new llvm::GlobalVariable(
+    //     M, ATy, false, llvm::GlobalValue::AppendingLinkage,
+    //     llvm::ConstantArray::get(ATy, MergedVars), "llvm.used");
+    // LLVMUsed->setSection("llvm.metadata");
+
     return true;
   }
 
@@ -121,8 +165,6 @@ public:
 
 char DummyMainFunction::ID = 0;
 
-Pass *createDummyMainFunctionPass(std::string entry) {
-  return new DummyMainFunction(entry);
-}
+Pass *createDummyMainFunctionPass() { return new DummyMainFunction(); }
 
 } // namespace seahorn

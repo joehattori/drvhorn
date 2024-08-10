@@ -33,7 +33,7 @@ llvm::Pass *createMarkInternalConstructOrDestructInlinePass();
 llvm::Pass *createNondetInitPass();
 llvm::Pass *createDeadNondetElimPass();
 llvm::Pass *createDummyExitBlockPass();
-llvm::Pass *createDummyMainFunctionPass(std::string entry);
+llvm::Pass *createDummyMainFunctionPass();
 llvm::Pass *createOneAssumePerBlockPass();
 llvm::Pass *createExternalizeAddressTakenFunctionsPass();
 llvm::Pass *createExternalizeFunctionsPass();
@@ -122,6 +122,7 @@ llvm::Pass *createRemoveUnnecessaryFunctionsPass();
 llvm::Pass *createKernelDebugPass();
 llvm::Pass *createSlimDownPass();
 llvm::Pass *createHandleNondetMallocPass();
+llvm::Pass *createIntoBinaryPass();
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

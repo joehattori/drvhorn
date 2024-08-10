@@ -1,4 +1,6 @@
 /**==-- Type Checker Tests --==*/
+#include "seahorn/Expr/ExprErrBinder.hh"
+#include "seahorn/Expr/TypeCheckerErrors.hh"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "boost/lexical_cast.hpp"
@@ -51,16 +53,45 @@ Expr bvConst(const std::string &n, ExprFactory &efac, unsigned width) {
   return bv::bvConst(mkTerm<std::string>(n, efac), width);
 }
 
+void checkNotWellFormedSingle(TypeChecker &tc, Expr errorSort, Expr e,
+                              Expr error) {
+  llvm::errs() << "Expression: " << *e << "\n";
+  Expr ty = tc.typeOf(e);
+
+  CHECK(ty == errorSort);
+  CHECK(tc.getErrorExp() == error);
+  if (ty)
+    llvm::errs() << "Type is " << *ty << "\n\n";
+  else
+    llvm::errs() << "Not well-formed expression. Type inference failed\n";
+}
+
 void checkNotWellFormed(std::vector<Expr> e, std::vector<Expr> error) {
+  Expr errorSort = sort::errorTy(e[0]->efac());
+  TypeChecker tc;
+
+  for (unsigned i = 0; i < e.size(); i++) {
+    checkNotWellFormedSingle(tc, errorSort, e[i], error[i]);
+  }
+}
+
+void checkNotWellFormedWCode(std::vector<g_TyErrorCode> code,
+                             std::vector<Expr> e, std::vector<Expr> error) {
   Expr errorSort = sort::errorTy(e[0]->efac());
   TypeChecker tc;
 
   for (unsigned i = 0; i < e.size(); i++) {
     llvm::errs() << "Expression: " << *e[i] << "\n";
     Expr ty = tc.typeOf(e[i]);
-
-    CHECK(ty == errorSort);
-    CHECK(tc.getErrorExp() == error[i]);
+    bool isError = isOp<ERROR_TY>(ty) || isOp<ERRORBINDER>(ty);
+    CHECK(isError == true);
+    if (isOp<ERRORBINDER>(ty)) {
+      auto actual_code = getTerm<mpz_class>(ty->arg(0)).get_ui();
+      CHECK(actual_code == code[i]);
+      CHECK(tc.getErrorExp() == error[i]);
+    } else {
+      checkNotWellFormedSingle(tc, errorSort, e[i], error[i]);
+    }
     if (ty)
       llvm::errs() << "Type is " << *ty << "\n\n";
     else
@@ -521,13 +552,13 @@ TEST_CASE("bvWellFormed.test") {
   temp = mk<BADD>(mk<BNAND>(a10, b10), mk<BSHL>(c10, c10));
   e.push_back(temp);
 
-  temp = mk<BSHL>(bv::sext(a5, 5), a10);
+  temp = mk<BSHL>(bv::sext(a5, 10), a10);
   e.push_back(temp);
 
   temp = bv::extract(12, 3, mk<BCONCAT>(a10, b5));
   e.push_back(temp);
 
-  temp = bv::zext(bv::extract(5, 1, b10), 5);
+  temp = bv::zext(bv::extract(5, 1, b10), 10);
   e.push_back(temp);
 
   temp = mk<BROTATE_LEFT>(mkTerm<unsigned>(5, efac), a10);
@@ -722,12 +753,11 @@ TEST_CASE("bvDifReturnTypeWellFormed.test") {
   temp = mk<SSUB_NO_UNDERFLOW>(a10, mk<BASHR>(b10, c10));
   e.push_back(temp);
 
-  temp = mk<UMUL_NO_OVERFLOW>(bv::zext(a8, 2), mk<BSUB>(b10, c10));
+  temp = mk<UMUL_NO_OVERFLOW>(bv::zext(a8, 10), mk<BSUB>(b10, c10));
   e.push_back(temp);
 
   checkWellFormed(e, boolSort);
 
-  int size2 = 3;
   std::vector<Expr> e2;
 
   temp = mk<BV2INT>(a10);
@@ -1113,9 +1143,13 @@ TEST_CASE("quantifierWellFormed.test") {
   ExprFactory efac;
 
   Expr aBool = boolConst("aBool", efac);
+  Expr aBoolDecl = bind::fname(aBool);
   Expr bBool = boolConst("bBool", efac);
+  Expr bBoolDecl = bind::fname(bBool);
 
   Expr aInt = intConst("aInt", efac);
+  Expr aIntDecl = bind::fname(aInt);
+
   Expr bInt = intConst("bInt", efac);
 
   Expr t = mk<TRUE>(efac);
@@ -1129,32 +1163,32 @@ TEST_CASE("quantifierWellFormed.test") {
   std::vector<Expr> args;
 
   body = bind::bvar(0, boolSort);
-  e.push_back(mk<FORALL>(aBool, body));
+  e.push_back(mk<FORALL>(aBoolDecl, body));
 
-  args.push_back(aInt);
-  args.push_back(aInt);
+  args.push_back(aIntDecl);
+  args.push_back(aIntDecl);
   body = mk<EQ>(bind::bvar(0, intSort), bind::bvar(1, intSort));
   args.push_back(body);
   e.push_back(mknary<FORALL>(args.begin(), args.end()));
 
   args.clear();
-  args.push_back(aBool);
+  args.push_back(aBoolDecl);
   body = mk<IMPL>(bind::bvar(0, boolSort), bind::bvar(0, boolSort));
   args.push_back(body);
   e.push_back(mknary<EXISTS>(args.begin(), args.end()));
 
   body = mk<NEQ>(aInt, aInt);
-  e.push_back(mk<EXISTS>(aBool, body));
+  e.push_back(mk<EXISTS>(aBoolDecl, body));
 
   args.clear();
-  args.push_back(aBool);
-  args.push_back(bBool);
+  args.push_back(aBoolDecl);
+  args.push_back(bBoolDecl);
   body = mk<OR>(bind::bvar(0, boolSort), bind::bvar(1, boolSort));
   args.push_back(body);
   e.push_back(mknary<FORALL>(args.begin(), args.end()));
   body = mk<GT>(aInt, bind::bvar(0, intSort));
   body = mk<OR>(body, e.back());
-  e.push_back(mk<EXISTS>(aInt, body));
+  e.push_back(mk<EXISTS>(aIntDecl, body));
 
   checkWellFormed(e, boolSort);
 }
@@ -1207,14 +1241,20 @@ TEST_CASE("lambdaWellFormed.test") {
   ExprFactory efac;
 
   Expr aBool = boolConst("aBool", efac);
+  Expr aBoolDecl = bind::fname(aBool);
+
   Expr bBool = boolConst("bBool", efac);
+  Expr bBoolDecl = bind::fname(bBool);
 
   Expr aUnint = unintConst("aUnint", efac);
   Expr bUnint = unintConst("bUnint", efac);
-
+  Expr bUnintDecl = bind::fname(bUnint);
   Expr boolSort = sort::boolTy(efac);
+  Expr boolDeclSort = mk<FUNCTIONAL_TY>(boolSort);
   Expr unintSort = sort::unintTy(efac);
-  Expr functionalSort = mk<FUNCTIONAL_TY>(boolSort, unintSort, unintSort);
+  Expr unintDeclSort = mk<FUNCTIONAL_TY>(unintSort);
+  Expr functionalSort =
+      mk<FUNCTIONAL_TY>(boolDeclSort, unintDeclSort, unintSort);
 
   Expr boolBound0 = bind::bvar(0, boolSort);
   Expr boolBound1 = bind::bvar(1, boolSort);
@@ -1227,17 +1267,17 @@ TEST_CASE("lambdaWellFormed.test") {
   Expr body;
 
   body = mk<PLUS>(unintBound1, unintBound1);
-  temp = mk<LAMBDA>(aBool, bUnint, body);
+  temp = mk<LAMBDA>(aBoolDecl, bUnintDecl, body);
   e.push_back(temp);
 
   checkWellFormed(e, functionalSort);
   e.clear();
 
-  ExprVector sorts = {boolSort, unintSort, boolSort, boolSort};
+  ExprVector sorts = {boolDeclSort, unintDeclSort, boolDeclSort, boolSort};
   Expr functionalSort2 = mknary<FUNCTIONAL_TY>(sorts);
 
   body = mk<AND>(mk<GT>(aUnint, bUnint), boolBound0);
-  ExprVector args = {aBool, bUnint, aBool, body};
+  ExprVector args = {aBoolDecl, bUnintDecl, aBoolDecl, body};
   temp = mknary<LAMBDA>(args);
   e.push_back(temp);
 
@@ -1284,14 +1324,20 @@ TEST_CASE("fappWellFormed.test") {
   ExprFactory efac;
 
   Expr aBool = boolConst("aBool", efac);
+  Expr aBoolDecl = bind::fname(aBool);
   Expr bBool = boolConst("bBool", efac);
+  Expr bBoolDecl = bind::fname(bBool);
 
   Expr aInt = intConst("aInt", efac);
+  Expr aIntDecl = bind::fname(aInt);
+
   Expr bInt = intConst("bInt", efac);
 
   Expr boolSort = sort::boolTy(efac);
+  Expr boolDeclSort = mk<FUNCTIONAL_TY>(boolSort);
   Expr intSort = sort::intTy(efac);
-  Expr functionalSort = mk<FUNCTIONAL_TY>(boolSort, intSort, intSort);
+  Expr intDeclSort = mk<FUNCTIONAL_TY>(intSort);
+  Expr functionalSort = mk<FUNCTIONAL_TY>(boolDeclSort, intDeclSort, intSort);
 
   Expr boolBound0 = bind::bvar(0, boolSort);
   Expr boolBound1 = bind::bvar(1, boolSort);
@@ -1303,14 +1349,14 @@ TEST_CASE("fappWellFormed.test") {
   Expr temp;
 
   Expr name = mkTerm<std::string>("name", efac);
-  std::vector<Expr> args = {name, boolSort, intSort, intSort};
+  std::vector<Expr> args = {name, boolDeclSort, intDeclSort, intSort};
 
-  Expr fdecl = mknary<FDECL>(args.begin(), args.end()); // BOOL, INT -> INT
+  Expr fdecl = mknary<FDECL>(args.begin(), args.end()); // (BOOL, INT) -> INT
   e.push_back(fdecl);
 
   Expr lambda = mk<LAMBDA>(
-      aBool, aInt,
-      mk<MINUS>(intBound1, intBound1)); // boolBound0, intBound -> (aInt - bInt)
+      aBoolDecl, aIntDecl,
+      mk<MINUS>(intBound1, intBound0)); // boolBound0, intBound -> (aInt - bInt)
   e.push_back(lambda);
 
   checkWellFormed(e, functionalSort);
@@ -1332,8 +1378,8 @@ TEST_CASE("fappWellFormed.test") {
 
   args.clear();
   args.push_back(errorName);
-  args.push_back(boolSort);
-  args.push_back(intSort);
+  args.push_back(boolDeclSort);
+  args.push_back(intDeclSort);
   args.push_back(intSort);
 
   temp = mknary<FDECL>(args.begin(),
@@ -1348,14 +1394,22 @@ TEST_CASE("fappNotWellFormed.test") {
   ExprFactory efac;
 
   Expr aBool = boolConst("aBool", efac);
+  Expr aBoolDecl = bind::fname(aBool);
+
   Expr bBool = boolConst("bBool", efac);
 
   Expr aInt = intConst("aInt", efac);
+  Expr aIntDecl = bind::fname(aInt);
+
   Expr bInt = intConst("bInt", efac);
 
   Expr boolSort = sort::boolTy(efac);
+  Expr boolDeclSort = mk<FUNCTIONAL_TY>(boolSort);
+
   Expr intSort = sort::intTy(efac);
-  Expr functionalSort = mk<FUNCTIONAL_TY>(boolSort, intSort, intSort);
+  Expr intDeclSort = mk<FUNCTIONAL_TY>(intSort);
+
+  Expr functionalSort = mk<FUNCTIONAL_TY>(boolDeclSort, intDeclSort, intSort);
 
   Expr boolBound0 = bind::bvar(0, boolSort);
   Expr boolBound1 = bind::bvar(1, boolSort);
@@ -1364,51 +1418,57 @@ TEST_CASE("fappNotWellFormed.test") {
   Expr intBound1 = bind::bvar(1, intSort);
 
   std::vector<Expr> e;
+  std::vector<g_TyErrorCode> code;
+
   Expr temp;
   std::vector<Expr> error;
   Expr tempError;
   Expr body;
 
   Expr name = mkTerm<std::string>("name", efac);
-  std::vector<Expr> args = {name, boolSort, intSort, intSort};
+  std::vector<Expr> args = {name, boolDeclSort, intDeclSort, intSort};
 
-  Expr fdecl = mknary<FDECL>(args.begin(), args.end()); // BOOL, INT -> INT
+  Expr fdecl = mknary<FDECL>(args.begin(), args.end()); // (BOOL, INT) -> INT
   e.push_back(fdecl);
 
   Expr lambda = mk<LAMBDA>(
-      aBool, aInt,
+      aBoolDecl, aIntDecl,
       mk<MINUS>(intBound1, bInt)); // boolBound0, intBound -> (aInt - bInt)
   e.push_back(lambda);
-
   checkWellFormed(e, functionalSort);
   e.clear();
 
-  tempError = mk<FAPP>(fdecl, aBool); // number of argumetns doesn't match
+  tempError = mk<FAPP>(fdecl, aBool); // number of arguments doesn't match
   error.push_back(tempError);
   e.push_back(tempError);
+  code.push_back(TYERR2);
 
   tempError =
       mk<FAPP>(lambda, bInt,
                aInt); // type of arguments doesn't match (should be BOOL INT)
   error.push_back(tempError);
   e.push_back(tempError);
+  code.push_back(TYERR1);
 
   tempError = mk<FAPP>(bInt, aBool,
                        aInt); // first parameter should be a functional type
   error.push_back(tempError);
   e.push_back(tempError);
+  code.push_back(TYERR2);
 
   tempError = error.back();
   error.push_back(tempError);
   temp = mk<FAPP>(lambda, mk<AND>(aBool, aBool), tempError);
   e.push_back(temp);
+  code.push_back(TYERR1);
 
   tempError = mk<PLUS>(aInt); // not enough arguments
   error.push_back(tempError);
   temp = mk<FAPP>(lambda, mk<AND>(aBool, aBool), tempError);
   e.push_back(temp);
+  code.push_back(TYERR2);
 
-  checkNotWellFormed(e, error);
+  checkNotWellFormedWCode(code, e, error);
 }
 TEST_CASE(
     "generalNotWellFormed.test") { // make sure that the cache works correctly

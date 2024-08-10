@@ -179,6 +179,12 @@ static llvm::cl::opt<bool>
                        llvm::cl::desc("Promote verifier.assume to llvm.assume"),
                        llvm::cl::init(false));
 
+static llvm::cl::opt<bool> ReplaceLoopsWithNDFuncs(
+    "horn-replace-loops-with-nd-funcs",
+    llvm::cl::desc(
+        "Replace all loops with functions that return nondet values"),
+    llvm::cl::init(false));
+
 // static llvm::cl::opt<int>
 //     SROA_Threshold("sroa-threshold",
 //                    llvm::cl::desc("Threshold for ScalarReplAggregates pass"),
@@ -426,6 +432,9 @@ int main(int argc, char **argv) {
 
   pm_wrapper.add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
   pm_wrapper.add(seahorn::createSeaBuiltinsWrapperPass());
+  if (ReplaceLoopsWithNDFuncs) {
+    pm_wrapper.add(llvm_seahorn::createSeaLoopExtractorPass());
+  }
 
   if (Kernel) {
     pm_wrapper.add(seahorn::createKernelSetupPass());
@@ -530,8 +539,9 @@ int main(int argc, char **argv) {
   else {
     // -- Externalize some user-selected functions
     pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
-    // -- Create a main function if we do not have one.
-    pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
+
+    // -- Replace main function by entry point.
+    pm_wrapper.add(seahorn::createDummyMainFunctionPass());
 
     // -- promote verifier specific functions to special names
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
@@ -724,9 +734,6 @@ int main(int argc, char **argv) {
     // -- Enable function slicing
     // AG: NOT USED. Not part of std pipeline
     pm_wrapper.add(seahorn::createSliceFunctionsPass());
-
-    // -- Create a main function if we sliced it away
-    pm_wrapper.add(seahorn::createDummyMainFunctionPass(EntryPoint));
 
     // AG: Dangerous. Promotes verifier.assume() to llvm.assume()
     if (PromoteAssumptions)

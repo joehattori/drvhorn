@@ -1,5 +1,6 @@
 /*==-- Type Checker and Type Inference For Expressions --==*/
 #include "seahorn/Expr/TypeChecker.hh"
+#include "seahorn/Expr/ExprErrBinder.hh"
 #include "seahorn/Expr/ExprLlvm.hh"
 #include "seahorn/Expr/ExprVisitor.hh"
 #include "seahorn/Support/SeaDebug.h"
@@ -15,6 +16,7 @@ class TCVR {
   ExprMap m_cache;
 
   bool m_isWellFormed;
+  // records the last expression that caused an error.
   Expr m_errorExp;
 
   // keeps track of every error's first/bottom-most sub expression
@@ -35,6 +37,10 @@ class TCVR {
     m_cache.insert({exp, type});
 
     if (isOp<ERROR_TY>(type)) {
+      foundError(exp);
+      m_errorMap.insert({exp, m_errorExp});
+    } else if (isOp<ERRORBINDER>(type)) {
+      ERR << "Error detail: " << *type << "\n";
       foundError(exp);
       m_errorMap.insert({exp, m_errorExp});
     }
@@ -85,7 +91,7 @@ public:
     if (m_cache.count(exp)) {
       Expr type = m_cache.at(exp);
 
-      if (isOp<ERROR_TY>(type))
+      if (isOp<ERROR_TY>(type) || isOp<ERRORBINDER>(type))
         foundError(m_errorMap.at(exp));
 
       return false;

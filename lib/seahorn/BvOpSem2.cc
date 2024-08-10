@@ -124,6 +124,11 @@ static llvm::cl::opt<bool> SimplifyExpr(
     llvm::cl::desc("Simplify expressions as they are written to memory"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool>
+    SimplifyExprNonMem("horn-bv2-simplify-nonmem",
+                       llvm::cl::desc("Simplify non memory expressions"),
+                       llvm::cl::init(true));
+
 static llvm::cl::opt<enum seahorn::details::VacCheckOptions> VacuityCheckOpt(
     "horn-bv2-vacuity-check",
     llvm::cl::desc("A choice for levels of vacuity check"),
@@ -477,8 +482,12 @@ public:
       addr = m_ctx.mem().salloc(memSz);
     } else {
       Expr nElts = lookup(*I.getOperand(0));
-      LOG("opsem", errs() << "!4 Alloca of (" << *nElts << " * " << typeSz
-                          << ") bytes: " << I << "\n";);
+      if (dagSize(nElts) < 64) {
+        LOG("opsem", errs() << "!4 Alloca of (" << *nElts << " * " << typeSz
+                            << ") bytes: " << I << "\n";);
+      } else {
+        LOG("opsem", errs() << "!4 Alloca of ...\n";);
+      }
       addr = m_ctx.mem().salloc(nElts, typeSz);
     }
 
@@ -973,9 +982,6 @@ public:
   void reportDoAssert(const char *tag, const Instruction &I, boost::tribool res,
                       bool expected) {
 
-    llvm::SmallString<256> msg;
-    llvm::raw_svector_ostream out(msg);
-
     bool isGood = false;
 
     if (res) {
@@ -985,7 +991,8 @@ public:
     } else {
       isGood = false;
     }
-
+    llvm::SmallString<256> msg;
+    llvm::raw_svector_ostream out(msg);
     out << tag;
     out << (isGood ? " passed " : " failed ");
 
@@ -1674,6 +1681,46 @@ public:
         setValue(I, createArithmeticWithOverflowRecord(
                         mul_res, is_carry, ty->getScalarSizeInBits(),
                         getCarryBitPadWidth(I)));
+      }
+    } break;
+    case Intrinsic::smax:
+    case Intrinsic::smin:
+    case Intrinsic::umax:
+    case Intrinsic::umin: {
+      // llvm.<sign_type>max.<type>(<type> %a, <type> %b) Intrinsic can be
+      // converted into:
+      //  %a >_sign_type %b ? %a : %b
+      // similar for llvm.umin
+      //  %a <_sign_type %b ? %a : %b
+      Type *ty = I.getOperand(0)->getType();
+      Expr op0;
+      Expr op1;
+      GetOpExprs(I, op0, op1);
+
+      bool is_signed = I.getIntrinsicID() == Intrinsic::smax ||
+                       I.getIntrinsicID() == Intrinsic::smin;
+      bool is_max = I.getIntrinsicID() == Intrinsic::smax ||
+                    I.getIntrinsicID() == Intrinsic::umax;
+      Expr cond;
+      if (is_signed) {
+        if (is_max) {
+          cond = m_ctx.alu().doSgt(op0, op1, ty->getScalarSizeInBits());
+        } else {
+          cond = m_ctx.alu().doSlt(op0, op1, ty->getScalarSizeInBits());
+        }
+      } else {
+        if (is_max) {
+          cond = m_ctx.alu().doUgt(op0, op1, ty->getScalarSizeInBits());
+        } else {
+          cond = m_ctx.alu().doUlt(op0, op1, ty->getScalarSizeInBits());
+        }
+      }
+      if (!cond) {
+        LOG("opsem", WARN << "An operation returned null:" << I);
+        setValue(I, Expr());
+      } else {
+        Expr res = bind::lite(cond, op0, op1);
+        setValue(I, res);
       }
     } break;
     default:
@@ -2558,6 +2605,7 @@ Bv2OpSemContext::Bv2OpSemContext(Bv2OpSem &sem, SymStore &values,
   params.set("ctrl_c", true);
   params.set(":rewriter.flat", false);
   m_shouldSimplify = SimplifyExpr;
+  m_shouldSimplifyNonMem = SimplifyExprNonMem;
   m_alu = mkBvOpSemAlu(*this);
   OpSemMemManager *mem = nullptr;
 
@@ -3423,12 +3471,19 @@ void Bv2OpSem::unhandledValue(const Value &v,
 }
 void Bv2OpSem::unhandledInst(const Instruction &inst,
                              seahorn::details::Bv2OpSemContext &ctx) {
+  llvm::SmallString<1024> msg;
+  llvm::raw_svector_ostream out(msg);
   if (ctx.isIgnored(inst))
     return;
   ctx.ignore(inst);
-  LOG("opsem", WARN << "unhandled instruction: " << inst << " @ "
-                    << inst.getParent()->getName() << " in "
-                    << inst.getParent()->getParent()->getName());
+  out << "unhandled instruction: " << inst << " @ "
+      << inst.getParent()->getName() << " in "
+      << inst.getParent()->getParent()->getName() << " ";
+  auto dloc = inst.getDebugLoc();
+  if (dloc) {
+    out << dloc->getFilename() << ":" << dloc->getLine() << "]";
+  }
+  LOG("opsem", WARN << out.str());
 }
 
 /// \brief Returns a symbolic register corresponding to a value
@@ -3547,10 +3602,11 @@ void Bv2OpSem::initCrabAnalysis(const llvm::Module &M) {
   auto &tli = m_pass.getAnalysis<TargetLibraryInfoWrapperPass>();
 
   clam::SeaDsaHeapAbstractionParams params;
-  params.is_context_sensitive = (dsa.kind() == seadsa::GlobalAnalysisKind::CONTEXT_SENSITIVE);
+  params.is_context_sensitive =
+      (dsa.kind() == seadsa::GlobalAnalysisKind::CONTEXT_SENSITIVE);
   params.precision_level = clam::CrabBuilderPrecision::MEM;
   std::unique_ptr<clam::HeapAbstraction> heap_abs =
-    std::make_unique<clam::SeaDsaHeapAbstraction>(M, dsa, params);
+      std::make_unique<clam::SeaDsaHeapAbstraction>(M, dsa, params);
 
   // -- Set parameters for CFG
   clam::CrabBuilderParams cfg_builder_params;

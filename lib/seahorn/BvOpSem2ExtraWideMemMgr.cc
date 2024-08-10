@@ -62,6 +62,10 @@ Expr ExtraWideMemManager<T>::isMetadataSet(MetadataKind kind,
 template <class T>
 Expr ExtraWideMemManager<T>::ptrEq(ExtraWideMemManager::PtrTy p1,
                                    ExtraWideMemManager::PtrTy p2) const {
+  // NOTE: we consider two pointers to be same if their address (base and ofset)
+  //       is the same. Size is ignored. This is done to have parity with memset
+  //       like operations that zero out main memory but do not touch shadow
+  //       memory.
   return mk<AND>(m_main.ptrEq(p1.getBase(), p2.getBase()),
                  m_offset.ptrEq(p1.getOffset(), p2.getOffset()));
 }
@@ -118,7 +122,7 @@ Expr ExtraWideMemManager<T>::isDereferenceable(ExtraWideMemManager::PtrTy p,
   auto ptr_size = p.getSize();
   auto ptr_offset = p.getOffset();
 
-  if (m_ctx.shouldSimplify()) {
+  if (m_ctx.shouldSimplifyNonMem()) {
     ptr_size = m_ctx.simplify(p.getSize());
     ptr_offset = m_ctx.simplify(p.getOffset());
     byteSz = m_ctx.simplify(byteSz);
@@ -277,7 +281,7 @@ ExtraWideMemManager<T>::storeValueToMem(Expr _val,
     llvm_unreachable(nullptr);
     break;
   case Type::FixedVectorTyID:
-  case Type::ScalableVectorTyID:      
+  case Type::ScalableVectorTyID:
     errs() << "Error: store of vectors is not supported\n";
     llvm_unreachable(nullptr);
     break;
@@ -317,7 +321,7 @@ Expr ExtraWideMemManager<T>::loadValueFromMem(ExtraWideMemManager::PtrTy base,
     llvm_unreachable(nullptr);
     break;
   case Type::FixedVectorTyID:
-  case Type::ScalableVectorTyID:      
+  case Type::ScalableVectorTyID:
     errs() << "Error: load of vectors is not supported\n";
     llvm_unreachable(nullptr);
     break;
@@ -595,7 +599,8 @@ ExtraWideMemManager<T>::salloc(unsigned int bytes, uint32_t align) {
   assert(isa<AllocaInst>(m_ctx.getCurrentInst()));
   align = std::max(align, m_alignment);
   auto region = m_main.getMAllocator().salloc(bytes, align);
-  assert(region.second > region.first);
+  // allocated size >= 0
+  assert(region.second >= region.first);
   // The size is min(alloc_size, requested_size)
   return PtrTy(mkStackPtr(region.second).getBase(),
                m_ctx.alu().ui(0UL, ptrSizeInBits()),
