@@ -80,4 +80,14 @@ getCalls(const llvm::Function *fn) {
   collectCallUser(fn, res, visited);
   return res;
 }
+
+llvm::Optional<size_t> getEmbeddedDeviceIndex(const llvm::StructType *s) {
+  const llvm::StructType *deviceType =
+      llvm::StructType::getTypeByName(s->getContext(), "struct.device");
+  for (size_t i = 0; i < s->getNumElements(); i++) {
+    if (equivTypes(s->getElementType(i), deviceType))
+      return i;
+  }
+  return llvm::None;
+}
 } // namespace seahorn

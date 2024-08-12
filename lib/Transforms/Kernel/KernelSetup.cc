@@ -20,6 +20,7 @@
 using namespace llvm;
 
 #define BARRIER_CONSTRAINTS "~{memory},~{dirflag},~{fpsr},~{flags}"
+#define BARRIER_DATA_CONSTRAINTS "r,~{memory},~{dirflag},~{fpsr},~{flags}"
 #define BUILD_U64_CONSTRAINTS "=A,{ax},{dx},~{dirflag},~{fpsr},~{flags}"
 #define ARCH_ATOMIC64_XCHG_CONSTRAINTS                                         \
   "=&A,i,{si},{bx},{cx},~{memory},~{dirflag},~{fpsr},~{flags}"
@@ -73,10 +74,8 @@ using namespace llvm;
 #define CMPXCHGQ31_CONSTRAINTS                                                 \
   "={@ccz},=*m,={ax},r,*m,2,~{memory},~{dirflag},~{fpsr},~{flags}"
 #define CMPXCHG8B "cmpxchg8b $1"
-#define XCHGL "xchgl $0,$1;"
+#define XCHGL "xchgl $0,$1"
 #define XCHGQ "xchgq ${0:q},$1"
-#define XCHG_CONSTRAINTS                                                       \
-  "=r,=*m,0,*m,~{memory},~{cc},~{dirflag},~{fpsr},~{flags}"
 #define FFS "rep; bsf $1,$0"
 #define FLSL "bsrl $1,$0"
 #define FLSQ "bsrq $1,${0:q}"
@@ -98,6 +97,7 @@ using namespace llvm;
 #define OUT_AL_0xed "outb %al,$$0xed"
 
 #define UD2 ".byte 0x0f,0x0b"
+#define INT3 "int3"
 #define SERIALIZE ".byte 0xf,0x1,0xe8"
 #define IRET_TO_SELF "pushfl;pushl %cs;pushl $$1f;iret;1:"
 #define SET_DEBUG_REGISTER_PREFIX "mov $0,%db"
@@ -253,6 +253,7 @@ public:
   bool runOnModule(Module &m) override {
     stubKernelFunctions(m);
     stubAllocPages(m);
+    handleKobjAPIs(m);
     handleFree(m);
     handleKmemCache(m);
     ignoreKernelFunctions(m);
@@ -334,6 +335,102 @@ private:
       }
       orig->replaceAllUsesWith(wrapper);
       orig->eraseFromParent();
+    }
+  }
+
+  void handleKobjAPIs(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+
+    {
+      Function *kobjInit = m.getFunction("kobject_init");
+      kobjInit->setName("kobject_init.old");
+      Function *newKobjInit = Function::Create(
+          kobjInit->getFunctionType(),
+          GlobalValue::LinkageTypes::InternalLinkage, "kobject_init", &m);
+      BasicBlock *block = BasicBlock::Create(ctx, "", newKobjInit);
+      IRBuilder<> b(block);
+      Argument *kobj = newKobjInit->getArg(0);
+      PointerType *kobjPtrTy = cast<PointerType>(kobj->getType());
+      Value *gep =
+          b.CreateGEP(kobjPtrTy->getPointerElementType(), kobj,
+                      {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 6),
+                       ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0),
+                       ConstantInt::get(i32Ty, 0)});
+      b.CreateStore(ConstantInt::get(i32Ty, 1), gep);
+      b.CreateRetVoid();
+
+      kobjInit->replaceAllUsesWith(newKobjInit);
+      kobjInit->eraseFromParent();
+    }
+
+    {
+      Function *kobjGet = m.getFunction("kobject_get");
+      kobjGet->setName("koject_get.old");
+      Function *newKobjGet = Function::Create(
+          kobjGet->getFunctionType(),
+          GlobalValue::LinkageTypes::InternalLinkage, "kobject_get", &m);
+      BasicBlock *entry = BasicBlock::Create(ctx, "", newKobjGet);
+      BasicBlock *mid = BasicBlock::Create(ctx, "", newKobjGet);
+      BasicBlock *ret = BasicBlock::Create(ctx, "", newKobjGet);
+
+      Argument *kobj = newKobjGet->getArg(0);
+      PointerType *kobjPtrTy = cast<PointerType>(kobj->getType());
+      IRBuilder<> b(entry);
+      Value *cond = b.CreateICmpEQ(kobj, ConstantPointerNull::get(kobjPtrTy));
+      b.CreateCondBr(cond, ret, mid);
+
+      b.SetInsertPoint(mid);
+      Value *gep =
+          b.CreateGEP(kobjPtrTy->getPointerElementType(), kobj,
+                      {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 6),
+                       ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0),
+                       ConstantInt::get(i32Ty, 0)});
+      LoadInst *load = b.CreateLoad(i32Ty, gep);
+      Value *add = b.CreateAdd(load, ConstantInt::get(i32Ty, 1));
+      b.CreateStore(add, gep);
+      b.CreateBr(ret);
+
+      b.SetInsertPoint(ret);
+      b.CreateRet(kobj);
+
+      kobjGet->replaceAllUsesWith(newKobjGet);
+      kobjGet->eraseFromParent();
+    }
+
+    {
+      Function *kobjPut = m.getFunction("kobject_put");
+      kobjPut->setName("kobject_put.old");
+      Function *newKobjPut = Function::Create(
+          kobjPut->getFunctionType(),
+          GlobalValue::LinkageTypes::InternalLinkage, "kobject_put", &m);
+      BasicBlock *entry = BasicBlock::Create(ctx, "", newKobjPut);
+      BasicBlock *mid = BasicBlock::Create(ctx, "", newKobjPut);
+      BasicBlock *ret = BasicBlock::Create(ctx, "", newKobjPut);
+
+      Argument *kobj = newKobjPut->getArg(0);
+      PointerType *kobjPtrTy = cast<PointerType>(kobj->getType());
+      IRBuilder<> b(entry);
+      Value *cond = b.CreateICmpEQ(kobj, ConstantPointerNull::get(kobjPtrTy));
+      b.CreateCondBr(cond, ret, mid);
+
+      b.SetInsertPoint(mid);
+      Value *gep =
+          b.CreateGEP(kobjPtrTy->getPointerElementType(), kobj,
+                      {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 6),
+                       ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0),
+                       ConstantInt::get(i32Ty, 0)});
+      LoadInst *load = b.CreateLoad(i32Ty, gep);
+      Value *sub = b.CreateSub(load, ConstantInt::get(i32Ty, 1));
+      b.CreateStore(sub, gep);
+      b.CreateBr(ret);
+
+      b.SetInsertPoint(ret);
+      b.CreateRetVoid();
+
+      kobjPut->replaceAllUsesWith(newKobjPut);
+      kobjPut->eraseFromParent();
     }
   }
 
@@ -794,9 +891,9 @@ private:
     // handleDivl(M);
     handleAnd(M);
     handleOr(M);
-    // handleCpuid(M);
+    handleCpuid(M);
     handleIn(M);
-    // handleOut(M);
+    handleOut(M);
     handleMov(M);
 
     // handleAtomic64Read(M);
@@ -809,7 +906,7 @@ private:
     handleCmpxchgq(M);
     // handleCmpxchg8b(M);
 
-    // handleNativeSaveFL(M);
+    handleNativeSaveFL(M);
     handleCLI(M);
     handleSTI(M);
     // handleRDPMC(M);
@@ -823,7 +920,7 @@ private:
 
     handleCurrentTask(M);
     handleBarrier(M);
-    // removeFunctions(M);
+    removeFunctions(M);
     // handleSerialize(M);
     // handleIretToSelf(M);
     // handleDebugRegisters(M);
@@ -856,8 +953,6 @@ private:
     s = splitAndJoin(s, "\n", ";");
     s = splitAndJoin(s, " ", " ");
     s = splitAndJoin(s, ",", ",");
-    // std::regex spacesBeforeReg("\\s+\\$");
-    // s = std::regex_replace(s, spacesBeforeReg, " $");
     return s;
   }
 
@@ -935,7 +1030,6 @@ private:
           dyn_cast<InlineAsm>(call->getCalledOperand());
       if (!inlineAsm)
         return false;
-      // errs() << "before " << inlineAsm->getAsmString() << "\n";
       std::string formatted = formatInlineAsm(inlineAsm->getAsmString());
       return !!asmStr.count(formatted);
     };
@@ -987,10 +1081,11 @@ private:
     }
   }
 
-  void handleBarrier(Module &M) {
-    std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, "", false, BARRIER_CONSTRAINTS);
-    for (CallInst *call : calls)
+  void handleBarrier(Module &m) {
+    for (CallInst *call : getTargetAsmCalls(m, "", false, BARRIER_CONSTRAINTS))
+      call->eraseFromParent();
+    for (CallInst *call :
+         getTargetAsmCalls(m, "", false, BARRIER_DATA_CONSTRAINTS))
       call->eraseFromParent();
   }
 
@@ -1014,7 +1109,7 @@ private:
 
   void removeFunctions(Module &M) {
     std::vector<CallInst *> calls =
-        getTargetAsmCalls(M, {MB, RMB, WMB, UD2, SERIALIZE,
+        getTargetAsmCalls(M, {MB, RMB, WMB, UD2, INT3, SERIALIZE,
                               SET_DEBUG_REGISTER_PREFIX, NOP, LOAD_CR3, LIDT});
     for (CallInst *call : calls)
       call->eraseFromParent();
@@ -1483,19 +1578,18 @@ private:
     replaceMov(MOVQ_1_0, i64Ty, 1, 0);
   }
 
-  void handleXchg(Module &M) {
-    auto replace = [&M, this](const std::string &targetAsm) {
-      std::vector<CallInst *> calls =
-          getTargetAsmCalls(M, targetAsm, false, XCHG_CONSTRAINTS);
+  void handleXchg(Module &m) {
+    auto replace = [&m, this](const std::string &targetAsm) {
+      std::vector<CallInst *> calls = getTargetAsmCalls(m, targetAsm, false);
       for (CallInst *call : calls) {
-        IRBuilder<> B(call);
         Value *src = call->getArgOperand(0);
         Value *dst = call->getArgOperand(1);
         if (src->getType() != dst->getType()->getPointerTo()) {
           errs() << "TODO: handleXchgl\n";
         }
-        Value *loaded = B.CreateLoad(dst->getType(), src);
-        B.CreateStore(dst, src);
+        IRBuilder<> b(call);
+        Value *loaded = b.CreateLoad(dst->getType(), src);
+        b.CreateStore(dst, src);
         call->replaceAllUsesWith(loaded);
         call->eraseFromParent();
       }

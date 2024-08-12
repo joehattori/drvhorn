@@ -307,11 +307,6 @@ static llvm::cl::opt<std::string>
     FileOperation("file-operations", llvm::cl::desc("Target File Operations"),
                   llvm::cl::init(""));
 
-static llvm::cl::opt<std::string>
-    EntryPoint("entry-point",
-               llvm::cl::desc("Entry point if main does not exist"),
-               llvm::cl::init(""));
-
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
   std::string filename = str;
@@ -439,6 +434,7 @@ int main(int argc, char **argv) {
   if (Kernel) {
     pm_wrapper.add(seahorn::createKernelSetupPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
+    pm_wrapper.add(seahorn::createHandleDevicesPass());
     if (!AcpiDriver.empty()) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
     } else if (!FileOperation.empty()) {
@@ -446,9 +442,10 @@ int main(int argc, char **argv) {
     } else if (!PlatformDriver.empty()) {
       pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
     }
-    pm_wrapper.add(seahorn::createHandleDevicesPass());
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(seahorn::createAssumeNonNullPass());
+    pm_wrapper.add(seahorn::createIntoBinaryPass());
     pm_wrapper.add(seahorn::createHandleNondetMallocPass());
     pm_wrapper.add(llvm::createCFGSimplificationPass());
     pm_wrapper.add(llvm::createVerifierPass(true));

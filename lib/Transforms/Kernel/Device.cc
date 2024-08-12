@@ -6,8 +6,6 @@
 
 #include "seahorn/Transforms/Kernel/Util.hh"
 
-#include <map>
-
 using namespace llvm;
 
 namespace seahorn {
@@ -20,14 +18,14 @@ public:
   bool runOnModule(Module &m) override {
     handleDeviceNodeFinders(m);
     handleDeviceFinders(m);
-    handleDeviceNodeIsCompatible(m);
+    stubSomeOfFunctions(m);
     handleDeviceAdd(m);
     killDeviceNodeNotify(m);
     killDeviceDel(m);
     return true;
   }
 
-  virtual StringRef getPassName() const override { return "HandleDeviceTree"; }
+  virtual StringRef getPassName() const override { return "HandleDevices"; }
 
 private:
   void handleDeviceNodeFinders(Module &m) {
@@ -73,13 +71,18 @@ private:
   }
 
   void handleDeviceFinders(Module &m) {
-    std::map<CallInst *, Value *> toReplace;
+    DenseMap<CallInst *, Value *> toReplace;
     StringRef deviceFinderNames[] = {"class_find_device", "bus_find_device"};
+    DenseMap<StructType *, Function *> structTypeReplacer;
     for (StringRef name : deviceFinderNames) {
       Function *finder = m.getFunction(name);
       for (CallInst *call : getCalls(finder)) {
-        if (Value *replacement = buildDeviceFindCallReplacer(m, call))
-          toReplace[call] = replacement;
+        if (Function *getter = deviceGetter(m, call, structTypeReplacer)) {
+          Value *newCall = CallInst::Create(getter, "", call);
+          if (newCall->getType() != call->getType())
+            newCall = new BitCastInst(newCall, call->getType(), "", call);
+          toReplace[call] = newCall;
+        }
       }
     }
     for (std::pair<CallInst *, Value *> p : toReplace) {
@@ -88,11 +91,22 @@ private:
     }
   }
 
-  Value *buildDeviceFindCallReplacer(Module &m, CallInst *call) {
+  Function *
+  deviceGetter(Module &m, CallInst *call,
+               DenseMap<StructType *, Function *> &structTypeReplacer) {
     Value *arg = call->getArgOperand(0);
     for (Value *clsOrBusPtr : getClassOrBusPtrs(arg->stripPointerCasts())) {
       if (StructType *t = getSurroundingDeviceType(clsOrBusPtr)) {
-        return buildNewEmbeddedDevice(m, t, call);
+        if (structTypeReplacer.count(t))
+          return structTypeReplacer[t];
+        Optional<size_t> devIndex = getEmbeddedDeviceIndex(t);
+        if (!devIndex.hasValue()) {
+          errs() << "surroundingDevType " << *t << " does not embed a device\n";
+          std::exit(1);
+        }
+        Function *f = embeddedDeviceGetter(m, t, *devIndex);
+        structTypeReplacer[t] = f;
+        return f;
       }
     }
     return nullptr;
@@ -114,9 +128,8 @@ private:
     return {};
   }
 
-  // @cls: a `struct.class*` variable.
   StructType *getSurroundingDeviceType(Value *clsOrBusPtr) {
-    auto findSurroundingDeviceType = [this](Value *dest) -> StructType * {
+    auto findSurroundingDeviceType = [](Value *dest) -> StructType * {
       GEPOperator *gep = dyn_cast<GEPOperator>(dest);
       if (!gep)
         return nullptr;
@@ -161,71 +174,66 @@ private:
     return stores;
   }
 
-  Value *buildNewEmbeddedDevice(Module &m, StructType *surroundingDevType,
-                                CallInst *origCall) {
-    Function *malloc = m.getFunction("__DRVHORN_malloc");
-    FunctionType *mallocType =
-        FunctionType::get(surroundingDevType->getPointerTo(),
-                          malloc->getArg(0)->getType(), false);
-    Constant *castedMalloc =
-        ConstantExpr::getBitCast(malloc, mallocType->getPointerTo());
-    size_t size = m.getDataLayout().getTypeAllocSize(surroundingDevType);
-    Type *i64Type = Type::getInt64Ty(m.getContext());
-    Type *i32Type = Type::getInt32Ty(m.getContext());
-    IRBuilder<> b(origCall);
-    CallInst *call =
-        b.CreateCall(mallocType, castedMalloc,
-                     {ConstantInt::get(i64Type, size)}, "surrounding.dev");
-    Optional<size_t> idx = getEmbeddedDeviceIndex(surroundingDevType);
-    if (!idx.hasValue()) {
-      errs() << "surroundingDevType " << *surroundingDevType
-             << " does not embed a device\n";
-      std::exit(1);
-    }
+  Function *embeddedDeviceGetter(Module &m, StructType *surroundingDevType,
+                                 size_t devIndex) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i32Type = Type::getInt32Ty(ctx);
+    IntegerType *i64Type = Type::getInt64Ty(ctx);
+    PointerType *devPtrType =
+        surroundingDevType->getElementType(devIndex)->getPointerTo();
+
+    std::string funcName = "__DRVHORN_embedded_device.getter." +
+                           surroundingDevType->getName().str();
+    static uint64_t STORAGE_LIMIT = 0x10000;
+    ArrayType *storageType = ArrayType::get(surroundingDevType, STORAGE_LIMIT);
+    GlobalVariable *storage = new GlobalVariable(
+        m, storageType, false, GlobalValue::LinkageTypes::ExternalLinkage,
+        nullptr, funcName + ".storage");
+    GlobalVariable *counter = new GlobalVariable(
+        m, i64Type, false, GlobalValue::LinkageTypes::ExternalLinkage, nullptr,
+        funcName + ".counter");
+    Function *getter = Function::Create(
+        FunctionType::get(devPtrType, false),
+        GlobalValue::LinkageTypes::ExternalLinkage, funcName, &m);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", getter);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", getter);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", getter);
+
+    IRBuilder<> b(entry);
+    Value *ndCond = b.CreateCall(m.getFunction("nd_bool"));
+    Value *curCount = b.CreateLoad(i64Type, counter);
+    Value *limit =
+        b.CreateICmpSGE(curCount, ConstantInt::get(i64Type, STORAGE_LIMIT));
+    Value *cond = b.CreateOr(ndCond, limit);
+    b.CreateCondBr(cond, body, ret);
+
+    b.SetInsertPoint(body);
+    Value *newCount = b.CreateAdd(curCount, ConstantInt::get(i64Type, 1));
+    Value *surroundingDevPtr = b.CreateGEP(
+        storageType, storage, {ConstantInt::get(i64Type, 0), newCount});
+    b.CreateStore(newCount, counter);
     Value *devPtr = b.CreateGEP(
-        surroundingDevType, call,
-        {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, *idx)});
+        surroundingDevType, surroundingDevPtr,
+        {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, devIndex)});
+    callWithNecessaryBitCast(m.getFunction("__DRVHORN_setup_device"), devPtr,
+                             b);
+    callWithNecessaryBitCast(m.getFunction("get_device"), devPtr, b);
+    b.CreateBr(ret);
 
-    Value *cond = b.CreateICmpNE(
-        call, ConstantPointerNull::get(cast<PointerType>(call->getType())));
-    devPtr = b.CreateSelect(
-        cond, devPtr,
-        ConstantPointerNull::get(cast<PointerType>(devPtr->getType())));
+    b.SetInsertPoint(ret);
+    PHINode *phi = b.CreatePHI(devPtrType, 2);
+    phi->addIncoming(ConstantPointerNull::get(devPtrType), entry);
+    phi->addIncoming(devPtr, body);
+    b.CreateRet(phi);
 
-    Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
-    Value *setupDevArg = devPtr;
-    if (setupDevArg->getType() != setupDevice->getArg(0)->getType())
-      setupDevArg =
-          b.CreateBitCast(setupDevArg, setupDevice->getArg(0)->getType());
-    b.CreateCall(setupDevice, {setupDevArg});
-
-    Function *recordDevice = m.getFunction("__DRVHORN_record_device");
-    Value *recordDevArg = devPtr;
-    if (call->getType() != recordDevice->getArg(0)->getType())
-      recordDevArg =
-          b.CreateBitCast(recordDevArg, recordDevice->getArg(0)->getType());
-    devPtr = b.CreateCall(recordDevice, {recordDevArg});
-
-    Function *getDevice = m.getFunction("get_device");
-    Value *getDeviceArg = devPtr;
-    if (getDeviceArg->getType() != getDevice->getArg(0)->getType())
-      getDeviceArg =
-          b.CreateBitCast(getDeviceArg, getDevice->getArg(0)->getType());
-    b.CreateCall(getDevice, {getDeviceArg});
-
-    if (devPtr->getType() != origCall->getType())
-      devPtr = b.CreateBitCast(devPtr, origCall->getType());
-    return devPtr;
+    return getter;
   }
 
-  Optional<size_t> getEmbeddedDeviceIndex(StructType *s) {
-    StructType *deviceType =
-        StructType::getTypeByName(s->getContext(), "struct.device");
-    for (size_t i = 0; i < s->getNumElements(); i++) {
-      if (equivTypes(s->getElementType(i), deviceType))
-        return i;
+  Value *callWithNecessaryBitCast(Function *f, Value *arg, IRBuilder<> &b) {
+    if (arg->getType() != f->getArg(0)->getType()) {
+      arg = b.CreateBitCast(arg, f->getArg(0)->getType());
     }
-    return None;
+    return b.CreateCall(f, arg);
   }
 
   CallInst *getCallInst(User *user) {
@@ -240,16 +248,14 @@ private:
     }
   }
 
-  void handleDeviceNodeIsCompatible(Module &m) {
-    Function *ndBool = m.getFunction("nd_bool");
-    Type *i32Type = Type::getInt32Ty(m.getContext());
-    for (CallInst *call :
-         getCalls(m.getFunction("__of_device_is_compatible"))) {
-      CallInst *ndVal = CallInst::Create(ndBool, "", call);
-      ZExtInst *replace = new ZExtInst(ndVal, i32Type, "", call);
-      call->replaceAllUsesWith(replace);
-      call->dropAllReferences();
-      call->eraseFromParent();
+  void stubSomeOfFunctions(Module &m) {
+    StringRef names[] = {"of_irq_parse_one"};
+    for (StringRef name : names) {
+      for (CallInst *call : getCalls(m.getFunction(name))) {
+        Value *zero = Constant::getNullValue(call->getType());
+        call->replaceAllUsesWith(zero);
+        call->eraseFromParent();
+      }
     }
   }
 
@@ -257,11 +263,9 @@ private:
     Function *orig = m.getFunction("device_add");
     Function *replace = m.getFunction("__DRVHORN_device_add");
     for (CallInst *call : getCalls(orig)) {
+      IRBuilder<> b(call);
       Value *devPtr = call->getArgOperand(0);
-      if (devPtr->getType() != replace->getArg(0)->getType())
-        devPtr =
-            new BitCastInst(devPtr, replace->getArg(0)->getType(), "", call);
-      CallInst *newCall = CallInst::Create(replace, devPtr, "", call);
+      Value *newCall = callWithNecessaryBitCast(replace, devPtr, b);
       call->replaceAllUsesWith(newCall);
       call->dropAllReferences();
       call->eraseFromParent();

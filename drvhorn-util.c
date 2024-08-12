@@ -12,6 +12,7 @@
 extern _Bool nd_bool();
 extern char nd_char();
 extern int nd_int();
+extern size_t nd_size();
 extern void __VERIFIER_error(void);
 extern void __VERIFIER_assume(int);
 #define sassert(X) (void)((X) || (__VERIFIER_error(), 0))
@@ -148,50 +149,68 @@ u32 __DRVHORN_util_read_u32(u8 *addr) { return *(u32 *)addr; }
 u16 __DRVHORN_util_read_u16(u8 *addr) { return *(u16 *)addr; }
 u8 __DRVHORN_util_read_u8(u8 *addr) { return *addr; }
 
-int __DRVHORN_util_get_kobject_count(const struct kobject *kobj) {
+static int __DRVHORN_util_get_kobject_count(const struct kobject *kobj) {
   return kobj->kref.refcount.refs.counter;
 }
 
-int __DRVHORN_util_get_device_counter(const struct device *dev) {
-  return __DRVHORN_util_get_kobject_count(&dev->kobj);
-}
-
 static void __DRVHORN_kobject_release(struct kobject *kobj) {}
-static struct kobj_type __DRVHORN_ktype = {
+struct kobj_type __DRVHORN_ktype = {
     .release = __DRVHORN_kobject_release,
 };
 
-extern struct device_node *__DRVHORN_of_root;
-void __DRVHORN_setup_of_root() {
-  __DRVHORN_of_root = malloc(sizeof(struct device_node));
-  __DRVHORN_of_root->child = NULL;
-  kobject_init(&__DRVHORN_of_root->kobj, &__DRVHORN_ktype);
+static struct kobject *device_node_kobject;
+static void __DRVHORN_record_device_node_kobject(struct kobject *k) {
+  if (nd_bool()) {
+    device_node_kobject = k;
+  }
+}
+
+static struct kobject *dev_kobject;
+static void __DRVHORN_record_device_kobject(struct kobject *k) {
+  if (nd_bool()) {
+    dev_kobject = k;
+  }
 }
 
 static struct device_node *__DRVHORN_create_device_node(void) {
-  struct device_node *dn = __DRVHORN_malloc(sizeof(struct device_node), 0);
-  if (!dn)
+#define LIMIT 0x10000
+  static unsigned counter = 0;
+  static struct device_node storage[LIMIT];
+
+  if (nd_bool() || counter >= LIMIT)
     return NULL;
+  struct device_node *dn = &storage[counter++];
   kobject_init(&dn->kobj, &__DRVHORN_ktype);
-  dn->sibling = __DRVHORN_of_root->child;
-  __DRVHORN_of_root->child = dn;
+  __DRVHORN_record_device_node_kobject(&dn->kobj);
   return dn;
 }
 
 struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
   struct device_node *dn = __DRVHORN_create_device_node();
-  if (dn)
-    of_node_get(dn);
+  of_node_get(dn);
   of_node_put(from);
   return dn;
 }
 
 void __DRVHORN_setup_device(struct device *dev) {
-  if (!dev)
-    return;
   kobject_init(&dev->kobj, &__DRVHORN_ktype);
-  dev->parent = NULL;
+  __DRVHORN_record_device_kobject(&dev->kobj);
   // dev->of_node = __DRVHORN_create_device_node();
+}
+
+void __DRVHORN_assert(void) {
+  if (device_node_kobject) {
+    int counter = __DRVHORN_util_get_kobject_count(device_node_kobject);
+    /*sassert(counter == 1 || counter == 2);*/
+    /*sassert(counter == 1 || counter == 0);*/
+    sassert(counter == 1);
+  }
+  if (dev_kobject) {
+    int counter = __DRVHORN_util_get_kobject_count(dev_kobject);
+    /*sassert(counter == 1 || counter == 2);*/
+    /*sassert(counter == 1 || counter == 0);*/
+    sassert(counter == 1);
+  }
 }
 
 static void klist_children_get(struct klist_node *n)
@@ -236,30 +255,4 @@ int __DRVHORN_device_add(struct device *dev) {
 done:
   put_device(dev);
   return error;
-}
-
-void __DRVHORN_check_device_node_refcounts() {
-  struct device_node *dn = __DRVHORN_of_root->child;
-  while (dn) {
-    int counter = __DRVHORN_util_get_kobject_count(&dn->kobj);
-    sassert(counter == 1);
-    dn = dn->sibling;
-  }
-}
-
-static struct device *__DRVHORN_devices[0x100];
-static size_t __DRVHORN_device_count = 0;
-struct device *__DRVHORN_record_device(struct device *dev) {
-  if (!dev)
-    return NULL;
-  if (__DRVHORN_device_count < 0x100)
-    __DRVHORN_devices[__DRVHORN_device_count++] = dev;
-  return dev;
-}
-
-void __DRVHORN_check_device_refcounts() {
-  for (size_t i = 0; i < __DRVHORN_device_count; i++) {
-    int counter = __DRVHORN_util_get_device_counter(__DRVHORN_devices[i]);
-    sassert(counter == 1);
-  }
 }

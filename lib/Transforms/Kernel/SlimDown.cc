@@ -18,119 +18,36 @@
 #include <queue>
 
 #define COMPILER_USED_NAME "llvm.compiler.used"
+#define DEVICE_GETTER_PREFIX "__DRVHORN_embedded_device.getter."
 
 using namespace llvm;
 
 namespace seahorn {
-// Track from llvm::Argument. If an llvm::Instruction is not reachable from
-// llvm::Argument, remove it or replace it with a nondet value.
-struct Graph {
-  Graph(Module &m, const Function *verifierError) {
-    for (const Function &f : m) {
-      for (const Argument &arg : f.args()) {
-        visitArg(&arg);
-      }
-    }
+struct Filter {
+  Filter(const Module &m) {
     buildNonArgStartingPoint(m);
-    errs() << "core target num " << coreTargets.size() << '\n';
-    collectCallPath(m);
-    errs() << "target num " << targets.size() << '\n';
-    collectReturnPath(m);
-    errs() << "target num " << targets.size() << '\n';
+    buildCoreTargets(m);
+    DenseSet<const Value *> memo;
+    for (const CallInst *call : coreTargets) {
+      buildRelevantArgs(call, 0, memo);
+    }
+    buildTargets(m);
   }
 
   bool isTarget(const Instruction *inst) const { return targets.count(inst); }
 
-  void collectCallPath(const Module &m) {
-    DenseMap<const Value *, bool> visiting;
-    for (const Function &f : m) {
-      for (const Argument &arg : f.args()) {
-        collectCallPath(&arg, visiting);
-      }
-    }
-    for (const Instruction *st : startingPoints) {
-      collectCallPath(st, visiting);
-    }
-  }
-
-  bool collectCallPath(const Value *v,
-                       DenseMap<const Value *, bool> &visiting) {
-    if (visiting.count(v))
-      return visiting[v];
-    visiting[v] = false;
-    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
-      if (coreTargets.count(inst)) {
-        targets.insert(inst);
-        visiting[v] = true;
-      }
-    }
-    if (const CallInst *call = dyn_cast<CallInst>(v)) {
-      if (const Function *f = extractCalledFunction(call)) {
-        for (const Argument &arg : f->args()) {
-          if (collectCallPath(&arg, visiting)) {
-            targets.insert(call);
-            visiting[v] = true;
-            break;
-          }
-        }
-      }
-    }
-    for (const Instruction *d : edges[v]) {
-      if (collectCallPath(d, visiting)) {
-        if (isa<Instruction>(v) && !isa<CallInst>(v))
-          targets.insert(cast<Instruction>(v));
-        visiting[v] = true;
-      }
-    }
-    return visiting[v];
-  }
-
-  void collectReturnPath(const Module &m) {
-    DenseMap<const Value *, bool> visiting;
-    for (const Function &f : m) {
-      for (const Argument &arg : f.args()) {
-        collectRetPath(&arg, visiting);
-      }
-    }
-    for (const Instruction *st : startingPoints) {
-      collectRetPath(st, visiting);
-    }
-  }
-
-  bool collectRetPath(const Value *v, DenseMap<const Value *, bool> &visiting) {
-    if (visiting.count(v))
-      return visiting[v];
-    visiting[v] = false;
-    if (isa<ReturnInst>(v)) {
-      targets.insert(cast<Instruction>(v));
-      visiting[v] = true;
-    }
-    for (const Instruction *inst : edges[v]) {
-      if (collectRetPath(inst, visiting)) {
-        if (isa<Instruction>(v) && !isa<CallInst>(v))
-          targets.insert(cast<Instruction>(v));
-        visiting[v] = true;
-      }
-    }
-    return visiting[v];
-  }
-  bool debug{false};
-
 private:
-  DenseMap<const Value *, DenseSet<const Instruction *>> edges;
-  DenseSet<const Instruction *> coreTargets;
   DenseSet<const Instruction *> targets;
-  DenseSet<const Instruction *> startingPoints;
-  std::set<std::tuple<const User *, const Value *>> visited;
-  DenseMap<const Instruction *, bool> isTargetMemo;
+  DenseSet<const CallInst *> coreTargets;
+  DenseSet<const CallInst *> startingPoints;
+  DenseSet<const Argument *> relevantArgs;
 
-  void buildNonArgStartingPoint(const Module &m) {
+  void buildNonArgStartingPoint(const Module &m) { recordDeviceNodeGetter(m); }
+
+  void recordCallers(const Function *f) {
     DenseSet<const Function *> visited;
     std::queue<const Function *> worklist;
-    const Function *getDevNode = m.getFunction("__DRVHORN_get_device_node");
-    if (!getDevNode)
-      return;
-    worklist.push(getDevNode);
+    worklist.push(f);
     while (!worklist.empty()) {
       const Function *f = worklist.front();
       worklist.pop();
@@ -143,72 +60,233 @@ private:
     }
   }
 
-  void visitArg(const Argument *arg) {
-    for (const User *user : arg->users()) {
-      visitUser(user, arg);
+  void recordDeviceNodeGetter(const Module &m) {
+    StringRef names[] = {
+        "__DRVHORN_get_device_node",
+        "__DRVHORN_create_device_node",
+    };
+    for (StringRef name : names) {
+      if (const Function *getDevNode = m.getFunction(name)) {
+        recordCallers(getDevNode);
+      }
     }
-  }
-
-  void visitUser(const User *user, const Value *orig) {
-    if (!visited.insert({user, orig}).second)
-      return;
-    if (const Instruction *inst = dyn_cast<Instruction>(user)) {
-      visitInst(inst, orig);
-    } else {
-      for (const User *u : user->users()) {
-        visitUser(u, user);
+    for (const Function &f : m) {
+      if (f.getName().startswith(DEVICE_GETTER_PREFIX)) {
+        recordCallers(&f);
       }
     }
   }
 
-  void visitInst(const Instruction *inst, const Value *orig) {
-    edges[orig].insert(inst);
-    if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-      visitCall(call, orig);
-    } else if (const BranchInst *br = dyn_cast<BranchInst>(inst)) {
-      visitBranch(br);
-    } else if (const StoreInst *store = dyn_cast<StoreInst>(inst)) {
-      visitStore(store);
-    } else {
-      for (const User *user : inst->users()) {
-        visitUser(user, inst);
-      }
-    }
-  }
-
-  void visitCall(const CallInst *call, const Value *orig) {
-    const Function *f = extractCalledFunction(call);
-    if (!f || f->isVarArg())
-      return;
-    if (f->getName().equals("kobject_get") ||
-        f->getName().equals("kobject_put") ||
-        f->getName().equals("kobject_init")) {
-      coreTargets.insert(call);
-    }
-    for (const User *user : call->users()) {
-      visitUser(user, call);
-    }
-  }
-
-  void visitBranch(const BranchInst *br) {
-    for (const BasicBlock *succ : br->successors()) {
-      SmallVector<const Instruction *, 8> children;
-      for (const PHINode &phi : succ->phis()) {
-        children.push_back(&phi);
-      }
-      children.push_back(succ->getFirstNonPHI());
-      for (const Instruction *child : children) {
-        edges[br].insert(child);
-        for (const User *user : child->users()) {
-          visitUser(user, child);
+  void buildCoreTargets(const Module &m) {
+    StringRef fnNames[] = {
+        "kobject_init",
+        "kobject_get",
+        "kobject_put",
+    };
+    for (StringRef name : fnNames) {
+      if (const Function *f = m.getFunction(name)) {
+        for (const CallInst *call : getCalls(f)) {
+          coreTargets.insert(call);
         }
       }
     }
   }
 
-  void visitStore(const StoreInst *store) {
-    for (const User *user : store->getPointerOperand()->users()) {
-      visitUser(user, store);
+  void buildRelevantArgs(const CallInst *call, unsigned argIdx,
+                         DenseSet<const Value *> &memo) {
+    if (!memo.insert(call).second)
+      return;
+    const Value *v = call->getArgOperand(argIdx);
+    DenseMap<const Value *, const Value *> baseMemo;
+    if (const Value *base = baseOfValue(v, baseMemo)) {
+      if (const Argument *arg = dyn_cast<Argument>(base)) {
+        relevantArgs.insert(arg);
+        for (const CallInst *call : getCalls(arg->getParent())) {
+          buildRelevantArgs(call, arg->getArgNo(), memo);
+        }
+      }
+    }
+  }
+
+  // returns either an llvm::Argument*, an llvm::CallInst*, or nullptr.
+  const Value *baseOfValue(const Value *v,
+                           DenseMap<const Value *, const Value *> &memo) const {
+    if (const Argument *arg = dyn_cast<Argument>(v)) {
+      return arg;
+    }
+    if (isa<Constant, MetadataAsValue, InlineAsm>(v)) {
+      return nullptr;
+    }
+    if (memo.count(v))
+      return memo[v];
+    memo[v] = nullptr;
+    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
+      return memo[v] = baseOfInst(inst, memo);
+    }
+    if (const Operator *op = dyn_cast<Operator>(v)) {
+      for (const Value *v : op->operands()) {
+        if (const Value *base = baseOfValue(v, memo)) {
+          return memo[op] = base;
+        }
+      }
+      return nullptr;
+    }
+    errs() << "TODO: baseOfValue " << *v << '\n';
+    std::exit(1);
+  }
+
+  const Value *baseOfInst(const Instruction *inst,
+                          DenseMap<const Value *, const Value *> &memo) const {
+    if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
+      for (const Value *v : phi->incoming_values()) {
+        if (const Value *base = baseOfValue(v, memo)) {
+          return base;
+        }
+      }
+      return nullptr;
+    } else if (const CallInst *call = dyn_cast<CallInst>(inst)) {
+      if (startingPoints.count(call) || coreTargets.count(call)) {
+        return call;
+      }
+      return nullptr;
+    } else {
+      for (const Value *v : inst->operands()) {
+        if (const Value *base = baseOfValue(v, memo)) {
+          return base;
+        }
+      }
+      return nullptr;
+    }
+  }
+
+  void buildTargets(const Module &m) {
+    DenseMap<const Value *, bool> memo;
+    for (const Function &f : m) {
+      for (const Instruction &inst : instructions(f)) {
+        if (isa<BranchInst, SwitchInst, ReturnInst, PHINode, UnreachableInst>(
+                inst)) {
+          targets.insert(&inst);
+        } else {
+          isValueTarget(&inst, memo);
+        }
+      }
+    }
+    errs() << "target counts " << targets.size() << "\n";
+  }
+
+  bool isValueTarget(const Value *v, DenseMap<const Value *, bool> &memo) {
+    if (isa<Argument>(v))
+      return true;
+    if (isa<Constant, MetadataAsValue, InlineAsm>(v))
+      return false;
+    if (memo.count(v))
+      return memo[v];
+    memo[v] = false;
+    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
+      return memo[v] = isInstTarget(inst, memo);
+    } else if (const Operator *op = dyn_cast<Operator>(v)) {
+      for (const Value *v : op->operands()) {
+        if (isValueTarget(v, memo)) {
+          return memo[op] = true;
+        }
+      }
+      return false;
+    } else {
+      errs() << "TODO: isValueTarget " << *v << '\n';
+      std::exit(1);
+    }
+  }
+
+  bool isInstTarget(const Instruction *inst,
+                    DenseMap<const Value *, bool> &memo) {
+    if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
+      return isPHITarget(phi, memo);
+    } else if (const CallInst *call = dyn_cast<CallInst>(inst)) {
+      return isCallTarget(call, memo);
+    } else if (const LoadInst *load = dyn_cast<LoadInst>(inst)) {
+      return isLoadTarget(load, memo);
+    } else if (isa<StoreInst>(inst)) {
+      return false;
+    } else {
+      for (const Value *v : inst->operands()) {
+        if (isValueTarget(v, memo)) {
+          targets.insert(inst);
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  bool isPHITarget(const PHINode *phi, DenseMap<const Value *, bool> &memo) {
+    for (const Value *v : phi->incoming_values()) {
+      if (isValueTarget(v, memo)) {
+        targets.insert(phi);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool isCallTarget(const CallInst *call, DenseMap<const Value *, bool> &memo) {
+    if (startingPoints.count(call) || coreTargets.count(call)) {
+      targets.insert(call);
+      return true;
+    }
+    for (unsigned i = 0; i < call->arg_size(); i++) {
+      const Value *argVal = call->getArgOperand(i);
+      if (isValueTarget(argVal, memo)) {
+        if (const Function *f = extractCalledFunction(call)) {
+          if (relevantArgs.count(f->getArg(i))) {
+            targets.insert(call);
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  bool isLoadTarget(const LoadInst *load, DenseMap<const Value *, bool> &memo) {
+    for (const StoreInst *store : getStores(load)) {
+      if (isValueTarget(store->getValueOperand(), memo)) {
+        targets.insert(store);
+        targets.insert(load);
+        return true;
+      }
+    }
+    if (isValueTarget(load->getPointerOperand(), memo)) {
+      targets.insert(load);
+      return true;
+    }
+    return false;
+  }
+
+  SmallVector<const StoreInst *> getStores(const LoadInst *load) {
+    SmallVector<const StoreInst *> stores;
+    DenseSet<const Value *> visited;
+    for (const User *user : load->getPointerOperand()->users()) {
+      collectStores(user, stores, visited);
+    }
+    return stores;
+  }
+
+  void collectStores(const Value *val, SmallVector<const StoreInst *> &stores,
+                     DenseSet<const Value *> &visited) {
+    if (!visited.insert(val).second)
+      return;
+    if (const StoreInst *store = dyn_cast<StoreInst>(val)) {
+      stores.push_back(store);
+    } else if (const Operator *op = dyn_cast<Operator>(val)) {
+      for (const Value *v : op->operands())
+        collectStores(v, stores, visited);
+    } else if (const SelectInst *select = dyn_cast<SelectInst>(val)) {
+      collectStores(select->getTrueValue(), stores, visited);
+      collectStores(select->getFalseValue(), stores, visited);
+    } else if (const PHINode *phi = dyn_cast<PHINode>(val)) {
+      for (const Value *v : phi->incoming_values()) {
+        collectStores(v, stores, visited);
+      }
     }
   }
 };
@@ -225,11 +303,8 @@ public:
     removeCompilerUsed(m);
     runDCEPasses(m);
 
-    SeaBuiltinsInfo &sbi =
-        getAnalysis<seahorn::SeaBuiltinsInfoWrapperPass>().getSBI();
-    Function *verifierError = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
-    Graph g(m, verifierError);
-    slimDownOnlyReachables(m, g);
+    Filter filter(m);
+    slimDownOnlyReachables(m, filter);
     runDCEPasses(m, true);
     return true;
   }
@@ -253,8 +328,8 @@ private:
     }
   }
 
-  void updateLinkage(Module &M) {
-    for (Function &f : M) {
+  void updateLinkage(Module &m) {
+    for (Function &f : m) {
       if (f.isDeclaration())
         continue;
       if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_") ||
@@ -262,107 +337,80 @@ private:
         continue;
       f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
-    for (GlobalVariable &v : M.globals()) {
+    for (GlobalVariable &v : m.globals()) {
       if (v.isDeclaration())
         continue;
       v.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
-    for (GlobalAlias &alias : M.aliases()) {
+    for (GlobalAlias &alias : m.aliases()) {
       if (alias.isDeclaration())
         continue;
       alias.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
   }
 
-  bool isNondet(const Value *v, Graph &graph) {
-    if (isa<Argument>(v))
-      return false;
-    if (isa<BasicBlock>(v))
-      return false;
-    if (isa<Constant>(v))
-      return false;
-    return !graph.isTarget(cast<Instruction>(v));
-  }
-
-  void handleNonRetainedInst(Graph &graph, Instruction *inst,
-                             DenseMap<const Type *, Function *> &ndvalfn,
-                             std::set<Instruction *> &toRemoveInstructions) {
-    if (BranchInst *branch = dyn_cast<BranchInst>(inst)) {
-      if (branch->isConditional()) {
-        Value *cond = branch->getCondition();
-        if (isNondet(cond, graph)) {
-          Value *replace = nondetValue(cond->getType(), inst, ndvalfn);
-          branch->setCondition(replace);
+  void handleRetainedInst(Instruction *inst,
+                          DenseMap<const Type *, Function *> &ndvalfn,
+                          DenseSet<Instruction *> &toRemoveInstructions) {
+    if (StoreInst *store = dyn_cast<StoreInst>(inst)) {
+      if (Instruction *dst =
+              dyn_cast<Instruction>(store->getPointerOperand())) {
+        if (toRemoveInstructions.count(dst)) {
+          AllocaInst *alloc =
+              new AllocaInst(store->getValueOperand()->getType(), 0, "", dst);
+          dst->replaceAllUsesWith(alloc);
         }
       }
-    } else if (SwitchInst *switchInst = dyn_cast<SwitchInst>(inst)) {
-      Value *cond = switchInst->getCondition();
-      if (isNondet(cond, graph)) {
-        Value *replace = nondetValue(cond->getType(), inst, ndvalfn);
-        switchInst->setCondition(replace);
-      }
-    } else if (ReturnInst *ret = dyn_cast<ReturnInst>(inst)) {
-      Value *retVal = ret->getReturnValue();
-      if (retVal) {
-        if (isNondet(retVal, graph)) {
-          Value *v = nondetValue(retVal->getType(), ret, ndvalfn);
-          ReturnInst *newRet = ReturnInst::Create(inst->getContext(), v, ret);
-          ret->replaceAllUsesWith(newRet);
-          toRemoveInstructions.insert(inst);
+      return;
+    }
+    for (unsigned i = 0; i < inst->getNumOperands(); i++) {
+      if (Instruction *opInst = dyn_cast<Instruction>(inst->getOperand(i))) {
+        if (toRemoveInstructions.count(opInst)) {
+          Instruction *insertPoint = getRepalcementInsertPoint(opInst);
+          Value *replace = nondetValue(opInst->getType(), insertPoint, ndvalfn);
+          opInst->replaceAllUsesWith(replace);
         }
       }
-    } else if (isa<UnreachableInst>(inst)) {
-    } else if (isa<CallBrInst>(inst)) {
-      errs() << "unhandled CallBr in " << inst->getFunction()->getName()
-             << *inst << '\n';
-      std::exit(1);
-    } else {
-      if (!inst->user_empty()) {
-        Instruction *insertPoint = getRepalcementInsertPoint(inst);
-        Value *replace = nondetValue(inst->getType(), insertPoint, ndvalfn);
-        inst->replaceAllUsesWith(replace);
-      }
-      toRemoveInstructions.insert(inst);
     }
   }
 
   Instruction *getRepalcementInsertPoint(Instruction *inst) {
-    PHINode *phi = dyn_cast<PHINode>(inst);
-    if (!phi)
-      return inst;
-    for (Instruction &inst : *phi->getParent()) {
-      if (!isa<PHINode>(&inst))
-        return &inst;
-    }
-    errs() << "All instructions are PHINode.\n";
-    return nullptr;
+    return isa<PHINode>(inst) ? inst->getParent()->getFirstNonPHI() : inst;
   }
 
   Value *nondetValue(Type *type, Instruction *before,
                      DenseMap<const Type *, Function *> &ndvalfn) {
+    IRBuilder<> b(before);
     if (!type->isPointerTy()) {
       Function *nondetFn = getNondetValueFn(type, before->getModule(), ndvalfn);
-      return CallInst::Create(nondetFn, "", before);
+      Value *call = b.CreateCall(nondetFn);
+      if (StructType *s = dyn_cast<StructType>(type)) {
+        for (unsigned i = 0; i < s->getNumElements(); i++) {
+          Value *elem = nondetValue(s->getElementType(i), before, ndvalfn);
+          call = b.CreateInsertValue(call, elem, i);
+        }
+      }
+      return call;
     }
 
     Module *m = before->getModule();
-    IRBuilder<> builder(before);
-    return populateType(cast<PointerType>(type), m, builder, ndvalfn);
-  }
-
-  Value *populateType(PointerType *type, Module *m, IRBuilder<> &b,
-                      DenseMap<const Type *, Function *> &ndvalfn) {
     Type *elemType = type->getPointerElementType();
     if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
       return makeNewValFn(m, ft, ndvalfn.size());
     }
-    Function *malloc = nondetMalloc(m);
-    FunctionType *ft =
-        FunctionType::get(type, malloc->getArg(0)->getType(), false);
-    Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());
-    size_t size = m->getDataLayout().getTypeAllocSize(elemType);
-    Type *i64Type = Type::getInt64Ty(m->getContext());
-    return b.CreateCall(ft, casted, ConstantInt::get(i64Type, size));
+    /*Function *malloc = nondetMalloc(m);*/
+    /*FunctionType *ft =*/
+    /*    FunctionType::get(type, malloc->getArg(0)->getType(), false);*/
+    /*Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());*/
+    /*size_t size = m->getDataLayout().getTypeAllocSize(elemType);*/
+    /*Type *i64Type = Type::getInt64Ty(m->getContext());*/
+    /*Value *call = b.CreateCall(ft, casted, ConstantInt::get(i64Type, size));*/
+    Value *call = b.CreateAlloca(elemType);
+    if (elemType->isPointerTy()) {
+      Value *value = nondetValue(elemType, before, ndvalfn);
+      b.CreateStore(value, call);
+    }
+    return call;
   }
 
   Function *nondetMalloc(Module *m) {
@@ -376,8 +424,8 @@ private:
                             "nondet.malloc", m);
   }
 
-  void slimDownOnlyReachables(Module &m, Graph &g) {
-    std::set<Instruction *> toRemoveInstructions;
+  void slimDownOnlyReachables(Module &m, const Filter &filter) {
+    DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;
     for (Function &f : m) {
       // we keep these functions still.
@@ -386,14 +434,21 @@ private:
           f.getName().equals("kobject_init") ||
           f.getName().startswith("__DRVHORN_") || f.isDeclaration())
         continue;
-      for (Instruction &inst : instructions(f)) {
-        if (!g.isTarget(&inst)) {
-          handleNonRetainedInst(g, &inst, ndvalfn, toRemoveInstructions);
+      SmallVector<Instruction *> retained;
+      for (BasicBlock &bb : f) {
+        for (Instruction &inst : bb) {
+          if (filter.isTarget(&inst)) {
+            retained.push_back(&inst);
+          } else {
+            toRemoveInstructions.insert(&inst);
+          }
         }
+      }
+      for (Instruction *inst : retained) {
+        handleRetainedInst(inst, ndvalfn, toRemoveInstructions);
       }
     }
     for (Instruction *inst : toRemoveInstructions) {
-      inst->dropAllReferences();
       inst->eraseFromParent();
     }
   }
@@ -406,13 +461,12 @@ private:
     if (removeArg)
       pm.add(createDeadArgEliminationPass());
     pm.add(createCFGSimplificationPass());
-    pm.run(m);
-    removeUnusedNondetCalls(m);
-    pm.run(m);
-    removeUnusedNondetCalls(m);
-    pm.run(m);
-    removeUnusedNondetCalls(m);
-    pm.run(m);
+    int counter = 0;
+    while (counter++ < 10) {
+      removeUnusedNondetCalls(m);
+      if (!pm.run(m))
+        break;
+    }
   }
 
   void removeUnusedNondetCalls(Module &m) {
@@ -422,7 +476,8 @@ private:
       for (Instruction &inst : instructions(f)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
           if (Function *f = extractCalledFunction(call)) {
-            if (f->getName().equals("verifier.error"))
+            if (f->getName().equals("verifier.error") ||
+                f->getName().equals("verifier.assume"))
               continue;
             if (f->isDeclaration() && call->user_empty())
               toRemove.push_back(call);

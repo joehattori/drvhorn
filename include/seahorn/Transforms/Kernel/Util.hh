@@ -16,4 +16,5 @@ static void collectCallUser(const llvm::User *user,
 llvm::SmallVector<llvm::CallInst *, 16> getCalls(llvm::Function *fn);
 llvm::SmallVector<const llvm::CallInst *, 16>
 getCalls(const llvm::Function *fn);
+llvm::Optional<size_t> getEmbeddedDeviceIndex(const llvm::StructType *s);
 } // namespace seahorn

@@ -123,6 +123,7 @@ llvm::Pass *createKernelDebugPass();
 llvm::Pass *createSlimDownPass();
 llvm::Pass *createHandleNondetMallocPass();
 llvm::Pass *createIntoBinaryPass();
+llvm::Pass *createAssumeNonNullPass();
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

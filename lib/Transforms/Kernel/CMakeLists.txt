@@ -8,4 +8,6 @@ add_llvm_library(SeaTransformsKernel DISABLE_LLVM_LINK_LLVM_DYLIB
   Device.cc
   Util.cc
   NondetMalloc.cc
+  IntoBinary.cc
+  AssumeNonNull.cc
   )
