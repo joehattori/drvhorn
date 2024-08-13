@@ -256,3 +256,13 @@ done:
   put_device(dev);
   return error;
 }
+
+int __DRVHORN_of_phandle_iterator_next(struct of_phandle_iterator *it) {
+  of_node_put(it->node);
+  it->node = NULL;
+  if (nd_bool()) {
+    return -1;
+  }
+  it->node = of_find_node_by_phandle(it->phandle);
+  return 0;
+}

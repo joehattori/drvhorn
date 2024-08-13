@@ -249,13 +249,18 @@ private:
   }
 
   void stubSomeOfFunctions(Module &m) {
-    StringRef names[] = {"of_irq_parse_one"};
+    StringRef names[] = {
+        "of_phandle_iterator_next",
+    };
     for (StringRef name : names) {
-      for (CallInst *call : getCalls(m.getFunction(name))) {
-        Value *zero = Constant::getNullValue(call->getType());
-        call->replaceAllUsesWith(zero);
-        call->eraseFromParent();
-      }
+      Function *origFn = m.getFunction(name);
+      if (!origFn)
+        continue;
+      Constant *newFn = m.getFunction("__DRVHORN_" + name.str());
+      if (origFn->getType() != newFn->getType())
+        newFn = ConstantExpr::getBitCast(newFn, origFn->getType());
+      origFn->replaceAllUsesWith(newFn);
+      origFn->eraseFromParent();
     }
   }
 
