@@ -1,5 +1,4 @@
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -31,7 +30,7 @@ struct Filter {
     DenseSet<const Value *> memo;
     for (const CallInst *call : kobjCalls) {
       const Function *f = extractCalledFunction(call);
-      relevantArgs.insert(f->getArg(0));
+      targetArgs.insert(f->getArg(0));
       buildRelevantArgs(call, 0, memo);
     }
     buildTargets(m);
@@ -47,7 +46,7 @@ private:
   DenseSet<const Instruction *> targets;
   DenseSet<const CallInst *> kobjCalls;
   DenseSet<const CallInst *> startingPoints;
-  DenseSet<const Argument *> relevantArgs;
+  DenseSet<const Argument *> targetArgs;
 
   void buildNonArgStartingPoint(const Module &m) { recordDeviceNodeGetter(m); }
 
@@ -107,7 +106,7 @@ private:
     DenseMap<const Value *, const Value *> baseMemo;
     if (const Value *base = baseOfValue(v, baseMemo)) {
       if (const Argument *arg = dyn_cast<Argument>(base)) {
-        relevantArgs.insert(arg);
+        targetArgs.insert(arg);
         for (const CallInst *call : getCalls(arg->getParent())) {
           buildRelevantArgs(call, arg->getArgNo(), memo);
         }
@@ -169,7 +168,7 @@ private:
   void buildTargets(const Module &m) {
     DenseMap<const Value *, bool> memo;
 
-    for (const Argument *arg : relevantArgs) {
+    for (const Argument *arg : targetArgs) {
       unsigned argNo = arg->getArgNo();
       for (const CallInst *call : getCalls(arg->getParent())) {
         Value *v = call->getArgOperand(argNo);
@@ -179,6 +178,8 @@ private:
         }
         visitPredBranch(call->getParent(), memo);
       }
+      if (arg->getType()->isPointerTy())
+        collectStoresToArg(arg, memo);
     }
     errs() << "target counts " << targets.size() << "\n";
   }
@@ -251,8 +252,7 @@ private:
     bool isTarget = false;
     for (unsigned i = 0; i < call->arg_size(); i++) {
       const Value *argVal = call->getArgOperand(i);
-      if (isValueTarget(argVal, memo) && f &&
-          relevantArgs.count(f->getArg(i))) {
+      if (isValueTarget(argVal, memo) && f && targetArgs.count(f->getArg(i))) {
         isTarget = true;
       }
     }
@@ -325,6 +325,37 @@ private:
     } else if (const PHINode *phi = dyn_cast<PHINode>(val)) {
       for (const Value *v : phi->incoming_values()) {
         collectStores(v, stores, visited);
+      }
+    }
+  }
+
+  void collectStoresToArg(const Argument *arg,
+                          DenseMap<const Value *, bool> &memo) {
+    DenseSet<const Value *> pointers;
+    collectPointers(arg, pointers);
+    for (const Instruction &inst : instructions(arg->getParent())) {
+      if (const StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+        if (pointers.count(store->getPointerOperand())) {
+          isValueTarget(store->getValueOperand(), memo);
+          isValueTarget(store->getPointerOperand(), memo);
+          if (const Instruction *inst =
+                  dyn_cast<Instruction>(store->getValueOperand())) {
+            memo[inst] = true;
+            targets.insert(inst);
+          }
+          memo[store] = true;
+          targets.insert(store);
+        }
+      }
+    }
+  }
+
+  void collectPointers(const Value *v, DenseSet<const Value *> &pointers) {
+    if (!pointers.insert(v).second)
+      return;
+    for (const User *user : v->users()) {
+      if (isa<BitCastOperator, GEPOperator, SelectInst, PHINode>(user)) {
+        collectPointers(user, pointers);
       }
     }
   }
@@ -432,19 +463,8 @@ private:
   void handleRetainedInst(Instruction *inst,
                           DenseMap<const Type *, Function *> &ndvalfn,
                           DenseSet<Instruction *> &toRemoveInstructions) {
-    if (StoreInst *store = dyn_cast<StoreInst>(inst)) {
-      if (Instruction *dst =
-              dyn_cast<Instruction>(store->getPointerOperand())) {
-        if (toRemoveInstructions.count(dst)) {
-          AllocaInst *alloc =
-              new AllocaInst(store->getValueOperand()->getType(), 0, "", dst);
-          dst->replaceAllUsesWith(alloc);
-        }
-      }
-      return;
-    }
-    for (unsigned i = 0; i < inst->getNumOperands(); i++) {
-      if (Instruction *opInst = dyn_cast<Instruction>(inst->getOperand(i))) {
+    for (Value *op : inst->operands()) {
+      if (Instruction *opInst = dyn_cast<Instruction>(op)) {
         if (toRemoveInstructions.count(opInst)) {
           Instruction *insertPoint = getRepalcementInsertPoint(opInst);
           Value *replace = nondetValue(opInst->getType(), insertPoint, ndvalfn);
