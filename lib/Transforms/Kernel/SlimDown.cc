@@ -3,6 +3,7 @@
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -28,17 +29,23 @@ struct Filter {
     buildNonArgStartingPoint(m);
     buildCoreTargets(m);
     DenseSet<const Value *> memo;
-    for (const CallInst *call : coreTargets) {
+    for (const CallInst *call : kobjCalls) {
+      const Function *f = extractCalledFunction(call);
+      relevantArgs.insert(f->getArg(0));
       buildRelevantArgs(call, 0, memo);
     }
     buildTargets(m);
   }
 
-  bool isTarget(const Instruction *inst) const { return targets.count(inst); }
+  bool isTarget(const Instruction *inst) const {
+    if (isa<BranchInst, SwitchInst, ReturnInst, PHINode, UnreachableInst>(inst))
+      return true;
+    return targets.count(inst);
+  }
 
 private:
   DenseSet<const Instruction *> targets;
-  DenseSet<const CallInst *> coreTargets;
+  DenseSet<const CallInst *> kobjCalls;
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> relevantArgs;
 
@@ -86,7 +93,7 @@ private:
     for (StringRef name : fnNames) {
       if (const Function *f = m.getFunction(name)) {
         for (const CallInst *call : getCalls(f)) {
-          coreTargets.insert(call);
+          kobjCalls.insert(call);
         }
       }
     }
@@ -145,7 +152,7 @@ private:
       }
       return nullptr;
     } else if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-      if (startingPoints.count(call) || coreTargets.count(call)) {
+      if (startingPoints.count(call) || kobjCalls.count(call)) {
         return call;
       }
       return nullptr;
@@ -161,14 +168,16 @@ private:
 
   void buildTargets(const Module &m) {
     DenseMap<const Value *, bool> memo;
-    for (const Function &f : m) {
-      for (const Instruction &inst : instructions(f)) {
-        if (isa<BranchInst, SwitchInst, ReturnInst, PHINode, UnreachableInst>(
-                inst)) {
-          targets.insert(&inst);
-        } else {
-          isValueTarget(&inst, memo);
+
+    for (const Argument *arg : relevantArgs) {
+      unsigned argNo = arg->getArgNo();
+      for (const CallInst *call : getCalls(arg->getParent())) {
+        Value *v = call->getArgOperand(argNo);
+        if (isValueTarget(v, memo)) {
+          memo[call] = true;
+          targets.insert(call);
         }
+        visitPredBranch(call->getParent(), memo);
       }
     }
     errs() << "target counts " << targets.size() << "\n";
@@ -208,13 +217,15 @@ private:
     } else if (isa<StoreInst>(inst)) {
       return false;
     } else {
+      bool isTarget = false;
       for (const Value *v : inst->operands()) {
         if (isValueTarget(v, memo)) {
           targets.insert(inst);
-          return true;
+          visitPredBranch(inst->getParent(), memo);
+          isTarget = true;
         }
       }
-      return false;
+      return isTarget;
     }
   }
 
@@ -222,6 +233,7 @@ private:
     for (const Value *v : phi->incoming_values()) {
       if (isValueTarget(v, memo)) {
         targets.insert(phi);
+        visitPredBranch(phi->getParent(), memo);
         return true;
       }
     }
@@ -229,22 +241,49 @@ private:
   }
 
   bool isCallTarget(const CallInst *call, DenseMap<const Value *, bool> &memo) {
-    if (startingPoints.count(call) || coreTargets.count(call)) {
+    const Function *f = extractCalledFunction(call);
+    if (startingPoints.count(call) || kobjCalls.count(call)) {
       targets.insert(call);
+      visitRet(*f, memo);
+      visitPredBranch(call->getParent(), memo);
       return true;
     }
+    bool isTarget = false;
     for (unsigned i = 0; i < call->arg_size(); i++) {
       const Value *argVal = call->getArgOperand(i);
-      if (isValueTarget(argVal, memo)) {
-        if (const Function *f = extractCalledFunction(call)) {
-          if (relevantArgs.count(f->getArg(i))) {
-            targets.insert(call);
-            return true;
-          }
+      if (isValueTarget(argVal, memo) && f &&
+          relevantArgs.count(f->getArg(i))) {
+        isTarget = true;
+      }
+    }
+    if (isTarget) {
+      if (f)
+        visitRet(*f, memo);
+      visitPredBranch(call->getParent(), memo);
+      targets.insert(call);
+    }
+    return isTarget;
+  }
+
+  void visitRet(const Function &f, DenseMap<const Value *, bool> &memo) {
+    for (const BasicBlock &blk : f) {
+      if (const ReturnInst *ret = dyn_cast<ReturnInst>(blk.getTerminator())) {
+        if (const Value *v = ret->getReturnValue()) {
+          isValueTarget(v, memo);
         }
       }
     }
-    return false;
+  }
+
+  void visitPredBranch(const BasicBlock *blk,
+                       DenseMap<const Value *, bool> &memo) {
+    for (const BasicBlock *pred : predecessors(blk)) {
+      if (const BranchInst *br = dyn_cast<BranchInst>(pred->getTerminator())) {
+        if (br->isConditional()) {
+          isValueTarget(br->getCondition(), memo);
+        }
+      }
+    }
   }
 
   bool isLoadTarget(const LoadInst *load, DenseMap<const Value *, bool> &memo) {
@@ -301,6 +340,7 @@ public:
     updateLinkage(m);
     runDCEPasses(m);
     removeCompilerUsed(m);
+    removeObviousGetPutPairs(m);
     runDCEPasses(m);
 
     Filter filter(m);
@@ -309,9 +349,9 @@ public:
     return true;
   }
 
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<seahorn::SeaBuiltinsInfoWrapperPass>();
-    AU.setPreservesAll();
+  void getAnalysisUsage(AnalysisUsage &au) const override {
+    au.addRequired<seahorn::SeaBuiltinsInfoWrapperPass>();
+    au.setPreservesAll();
   }
 
   virtual StringRef getPassName() const override { return "SlimDown"; }
@@ -325,6 +365,46 @@ private:
       compilerUsed->eraseFromParent();
       // llvm.compiler.used seems to be required, so insert an empty value
       M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
+    }
+  }
+
+  void removeObviousGetPutPairs(Module &m) {
+    // remove obvious get/put pairs.
+    // If a pair resides in the same basic block, we can remove them.
+    std::pair<StringRef, StringRef> pairs[] = {
+        {"kobject_get", "kobject_put"},
+        {"get_device", "put_device"},
+        {"of_node_get", "of_node_put"},
+    };
+    for (std::pair<StringRef, StringRef> &p : pairs) {
+      for (Function &f : m) {
+        for (BasicBlock &blk : f) {
+          CallInst *getter = nullptr;
+          CallInst *putter = nullptr;
+          Value *op = nullptr;
+          for (Instruction &inst : blk) {
+            if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+              Function *callee = extractCalledFunction(call);
+              if (!getter) {
+                if (callee && callee->getName().equals(p.first)) {
+                  getter = call;
+                  op = call->getArgOperand(0);
+                }
+              } else {
+                if (callee && callee->getName().equals(p.second) &&
+                    call->getArgOperand(0) == op)
+                  putter = call;
+              }
+            }
+          }
+          if (putter) {
+            getter->replaceAllUsesWith(op);
+            putter->replaceAllUsesWith(op);
+            getter->eraseFromParent();
+            putter->eraseFromParent();
+          }
+        }
+      }
     }
   }
 
@@ -471,14 +551,15 @@ private:
 
   void removeUnusedNondetCalls(Module &m) {
     // nondet function calls are not removed by DCE passes.
-    std::vector<Instruction *> toRemove;
+    SmallVector<Instruction *, 16> toRemove;
+    SeaBuiltinsInfo &sbi = getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
         if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          if (sbi.isSeaBuiltin(*call)) {
+            continue;
+          }
           if (Function *f = extractCalledFunction(call)) {
-            if (f->getName().equals("verifier.error") ||
-                f->getName().equals("verifier.assume"))
-              continue;
             if (f->isDeclaration() && call->user_empty())
               toRemove.push_back(call);
           }

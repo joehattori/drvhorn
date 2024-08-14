@@ -201,14 +201,10 @@ void __DRVHORN_setup_device(struct device *dev) {
 void __DRVHORN_assert(void) {
   if (device_node_kobject) {
     int counter = __DRVHORN_util_get_kobject_count(device_node_kobject);
-    /*sassert(counter == 1 || counter == 2);*/
-    /*sassert(counter == 1 || counter == 0);*/
     sassert(counter == 1);
   }
   if (dev_kobject) {
     int counter = __DRVHORN_util_get_kobject_count(dev_kobject);
-    /*sassert(counter == 1 || counter == 2);*/
-    /*sassert(counter == 1 || counter == 0);*/
     sassert(counter == 1);
   }
 }
