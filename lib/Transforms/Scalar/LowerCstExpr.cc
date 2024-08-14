@@ -3,11 +3,12 @@
 #include "boost/range.hpp"
 
 #include "llvm/ADT/SmallPtrSet.h"
-//#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "seahorn/Support/SeaDebug.h"
+
+#include <queue>
 
 using namespace llvm;
 
@@ -34,23 +35,21 @@ bool LowerCstExprPass::runOnModule(Module &M) {
 
 bool LowerCstExprPass::runOnFunction(Function &F) {
 
-  SmallPtrSet<Instruction *, 8> worklist;
+  std::queue<Instruction *> worklist;
+  DenseSet<ConstantExpr *> visited;
 
-  for (inst_iterator It = inst_begin(F), E = inst_end(F); It != E; ++It) {
-    Instruction *I = &*It;
-
-    for (unsigned int i = 0; i < I->getNumOperands(); ++i) {
-      if (hasCstExpr(I->getOperand(i)))
-        worklist.insert(I);
+  for (Instruction &I : instructions(F)) {
+    for (unsigned int i = 0; i < I.getNumOperands(); ++i) {
+      if (hasCstExpr(I.getOperand(i)))
+        worklist.push(&I);
     }
   }
 
   bool change = !worklist.empty();
 
   while (!worklist.empty()) {
-    auto It = worklist.begin();
-    Instruction *I = *It;
-    worklist.erase(*It);
+    Instruction *I = worklist.front();
+    worklist.pop();
 
     if (PHINode *PHI = dyn_cast<PHINode>(I)) {
       for (unsigned int i = 0; i < PHI->getNumIncomingValues(); ++i) {
@@ -58,6 +57,8 @@ bool LowerCstExprPass::runOnFunction(Function &F) {
         assert(InsertLoc);
 
         if (ConstantExpr *CstExp = hasCstExpr(PHI->getIncomingValue(i))) {
+          if (!visited.insert(CstExp).second)
+            continue;
           // skip if CstExp is not the same as incoming PHI value
           if (CstExp != PHI->getIncomingValue(i))
             continue;
@@ -68,17 +69,19 @@ bool LowerCstExprPass::runOnFunction(Function &F) {
               PHI->setIncomingValue(j - 1, NewInst);
             }
           }
-          worklist.insert(NewInst);
+          worklist.push(NewInst);
         }
       }
     } else {
-      for (unsigned int i = 0; i < I->getNumOperands(); ++i) {
-        if (ConstantExpr *CstExp = hasCstExpr(I->getOperand(i))) {
+      for (Value *op : I->operands()) {
+        if (ConstantExpr *CstExp = hasCstExpr(op)) {
+          if (!visited.insert(CstExp).second)
+            continue;
           Instruction *NewInst = lowerCstExpr(CstExp, I);
           LOG("lower-cst-expr", errs() << "Lowering " << *CstExp << "\n");
 
           I->replaceUsesOfWith(CstExp, NewInst);
-          worklist.insert(NewInst);
+          worklist.push(NewInst);
         }
       }
     }
@@ -100,11 +103,8 @@ ConstantExpr *LowerCstExprPass::hasCstExpr(Value *V,
       // for ConstantStruct, ConstantArray, etc, we need to check
       // recursively.
       for (unsigned u = 0; u < cst->getNumOperands(); ++u) {
-        Use &p = cst->getOperandUse(u);
-        // for (auto p : boost::make_iterator_range (cst->op_begin (),
-        //                                           cst->op_end ()))
-        // {
-        if (ConstantExpr *cst_exp_i = hasCstExpr(p.get(), visited))
+        Value *p = cst->getOperand(u);
+        if (ConstantExpr *cst_exp_i = hasCstExpr(p, visited))
           return cst_exp_i;
       }
     }
