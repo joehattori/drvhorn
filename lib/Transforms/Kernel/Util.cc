@@ -36,6 +36,16 @@ llvm::Function *extractCalledFunction(llvm::CallInst *call) {
       call->getCalledOperand()->stripPointerCasts());
 }
 
+const llvm::Function *extractCalledFunction(const llvm::CallInst &call) {
+  return llvm::dyn_cast<llvm::Function>(
+      call.getCalledOperand()->stripPointerCasts());
+}
+
+llvm::Function *extractCalledFunction(llvm::CallInst &call) {
+  return llvm::dyn_cast<llvm::Function>(
+      call.getCalledOperand()->stripPointerCasts());
+}
+
 static void collectCallUser(llvm::User *user,
                             llvm::SmallVector<llvm::CallInst *, 16> &res,
                             llvm::DenseSet<llvm::User *> &visited) {

@@ -1,5 +1,4 @@
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
@@ -9,6 +8,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
 
@@ -23,32 +23,188 @@
 using namespace llvm;
 
 namespace seahorn {
-struct Filter {
-  Filter(const Module &m) {
-    buildNonArgStartingPoint(m);
-    buildCoreTargets(m);
+
+struct Visitor : public InstVisitor<Visitor, bool> {
+public:
+  Visitor(ModulePass *pass) : pass(pass) {}
+  bool isTarget(const Instruction *inst) const { return targets.count(inst); }
+
+  void visitModule(Module &m) {
+    DenseSet<const CallInst *> kobjCalls = getKobjCalls(m);
     DenseSet<const Value *> memo;
+    buildStartingPoint(m);
     for (const CallInst *call : kobjCalls) {
       const Function *f = extractCalledFunction(call);
       targetArgs.insert(f->getArg(0));
-      buildRelevantArgs(call, 0, memo);
+      targetArgValues.insert(call->getArgOperand(0));
+      buildTargetArgs(call, 0, memo, kobjCalls);
     }
-    buildTargets(m);
   }
 
-  bool isTarget(const Instruction *inst) const {
-    if (isa<BranchInst, SwitchInst, ReturnInst, PHINode, UnreachableInst>(inst))
-      return true;
-    return targets.count(inst);
+  void visitFunction(Function &f) {
+    if (!f.isDeclaration())
+      aa_ = &pass->getAnalysis<AAResultsWrapperPass>(f).getAAResults();
+  }
+
+  bool visitCallInst(CallInst &call) {
+    const Function *f = extractCalledFunction(call);
+    if (!f)
+      return false;
+    bool isTarget = false;
+    if (startingPoints.count(&call)) {
+      isTarget = true;
+    }
+    for (Value *argVal : call.args()) {
+      if (targetArgValues.count(argVal)) {
+        acceptValue(argVal);
+        isTarget = true;
+      }
+    }
+    if (isTarget) {
+      targets.insert(&call);
+    }
+    cache[&call] = isTarget;
+    return isTarget;
+  }
+
+  bool visitLoadInst(LoadInst &load) {
+    bool isTarget = visitValue(load.getPointerOperand());
+    for (StoreInst *store : getStores(load)) {
+      if (visitValue(store->getValueOperand())) {
+        targets.insert(store);
+        isTarget = true;
+      }
+    }
+    if (isTarget)
+      targets.insert(&load);
+    cache[&load] = isTarget;
+    return isTarget;
+  }
+
+  bool visitStore(StoreInst &store) {
+    bool isTarget = any_of(targetArgValues, [this, &store](const Value *v) {
+      return aa_->alias(store.getPointerOperand(), v) == AliasResult::MustAlias;
+    });
+    if (isTarget) {
+      targets.insert(&store);
+      acceptValue(store.getValueOperand());
+    }
+    cache[&store] = isTarget;
+    return isTarget;
+  }
+
+  bool visitPHINode(PHINode &phi) {
+    cache[&phi] = true;
+    for (Value *v : phi.incoming_values()) {
+      visitValue(v);
+    }
+    targets.insert(&phi);
+    return true;
+  }
+
+  bool visitTerminator(Instruction &inst) {
+    cache[&inst] = true;
+    for (Value *v : inst.operands()) {
+      visitValue(v);
+    }
+    targets.insert(&inst);
+    return true;
+  }
+
+  bool visitInstruction(Instruction &inst) {
+    bool isTarget = false;
+    for (Value *v : inst.operands()) {
+      if (visitValue(v))
+        isTarget = true;
+    }
+    if (isTarget) {
+      targets.insert(&inst);
+    }
+    cache[&inst] = isTarget;
+    return isTarget;
   }
 
 private:
-  DenseSet<const Instruction *> targets;
-  DenseSet<const CallInst *> kobjCalls;
+  DenseMap<const Value *, bool> cache;
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
+  DenseSet<const Value *> targetArgValues;
+  DenseSet<const Instruction *> targets;
+  AAResults *aa_;
+  ModulePass *pass;
 
-  void buildNonArgStartingPoint(const Module &m) { recordDeviceNodeGetter(m); }
+  bool visitValue(Value *v) {
+    if (Argument *arg = dyn_cast<Argument>(v))
+      return targetArgs.count(arg);
+    if (isa<Constant, BasicBlock, MetadataAsValue, InlineAsm>(v))
+      return false;
+    if (cache.count(v))
+      return cache[v];
+
+    cache[v] = false;
+    if (Instruction *inst = dyn_cast<Instruction>(v)) {
+      return cache[v] = visit(*inst);
+    } else if (Operator *op = dyn_cast<Operator>(v)) {
+      for (Value *v : op->operands()) {
+        if (visitValue(v)) {
+          return cache[op] = true;
+        }
+      }
+      return false;
+    } else {
+      errs() << "TODO: isValueTarget " << *v << '\n';
+      std::exit(1);
+    }
+  }
+
+  SmallVector<StoreInst *> getStores(LoadInst &load) {
+    SmallVector<StoreInst *> stores;
+    DenseSet<Value *> visited;
+    for (User *user : load.getPointerOperand()->users()) {
+      collectStores(user, stores, visited);
+    }
+    return stores;
+  }
+
+  void collectStores(Value *val, SmallVector<StoreInst *> &stores,
+                     DenseSet<Value *> &visited) {
+    if (!visited.insert(val).second)
+      return;
+    if (StoreInst *store = dyn_cast<StoreInst>(val)) {
+      stores.push_back(store);
+    } else if (Operator *op = dyn_cast<Operator>(val)) {
+      for (Value *v : op->operands())
+        collectStores(v, stores, visited);
+    } else if (SelectInst *select = dyn_cast<SelectInst>(val)) {
+      collectStores(select->getTrueValue(), stores, visited);
+      collectStores(select->getFalseValue(), stores, visited);
+    } else if (PHINode *phi = dyn_cast<PHINode>(val)) {
+      for (Value *v : phi->incoming_values()) {
+        collectStores(v, stores, visited);
+      }
+    }
+  }
+
+  void acceptValue(const Value *v) {
+    DenseSet<const Value *> visited;
+    acceptValue(v, visited);
+  }
+
+  void acceptValue(const Value *v, DenseSet<const Value *> &visited) {
+    if (!visited.insert(v).second)
+      return;
+    cache[v] = true;
+    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
+      targets.insert(inst);
+      for (const Value *v : inst->operands()) {
+        acceptValue(v, visited);
+      }
+    } else if (const Operator *op = dyn_cast<Operator>(v)) {
+      for (const Value *v : op->operands()) {
+        acceptValue(v, visited);
+      }
+    }
+  }
 
   void recordCallers(const Function *f) {
     DenseSet<const Function *> visited;
@@ -66,7 +222,7 @@ private:
     }
   }
 
-  void recordDeviceNodeGetter(const Module &m) {
+  void buildStartingPoint(const Module &m) {
     StringRef names[] = {
         "__DRVHORN_get_device_node",
         "__DRVHORN_create_device_node",
@@ -83,32 +239,37 @@ private:
     }
   }
 
-  void buildCoreTargets(const Module &m) {
+  DenseSet<const CallInst *> getKobjCalls(const Module &m) {
     StringRef fnNames[] = {
         "kobject_init",
         "kobject_get",
         "kobject_put",
     };
+    DenseSet<const CallInst *> calls;
     for (StringRef name : fnNames) {
       if (const Function *f = m.getFunction(name)) {
         for (const CallInst *call : getCalls(f)) {
-          kobjCalls.insert(call);
+          calls.insert(call);
         }
       }
     }
+    return calls;
   }
 
-  void buildRelevantArgs(const CallInst *call, unsigned argIdx,
-                         DenseSet<const Value *> &memo) {
+  void buildTargetArgs(const CallInst *call, unsigned argIdx,
+                       DenseSet<const Value *> &memo,
+                       const DenseSet<const CallInst *> &kobjCalls) {
     if (!memo.insert(call).second)
       return;
     const Value *v = call->getArgOperand(argIdx);
     DenseMap<const Value *, const Value *> baseMemo;
-    if (const Value *base = baseOfValue(v, baseMemo)) {
+    if (const Value *base = baseOfValue(v, baseMemo, kobjCalls)) {
       if (const Argument *arg = dyn_cast<Argument>(base)) {
         targetArgs.insert(arg);
         for (const CallInst *call : getCalls(arg->getParent())) {
-          buildRelevantArgs(call, arg->getArgNo(), memo);
+          unsigned argNo = arg->getArgNo();
+          targetArgValues.insert(call->getArgOperand(argNo));
+          buildTargetArgs(call, argNo, memo, kobjCalls);
         }
       }
     }
@@ -116,7 +277,8 @@ private:
 
   // returns either an llvm::Argument*, an llvm::CallInst*, or nullptr.
   const Value *baseOfValue(const Value *v,
-                           DenseMap<const Value *, const Value *> &memo) const {
+                           DenseMap<const Value *, const Value *> &memo,
+                           const DenseSet<const CallInst *> &kobjCalls) const {
     if (const Argument *arg = dyn_cast<Argument>(v)) {
       return arg;
     }
@@ -127,11 +289,11 @@ private:
       return memo[v];
     memo[v] = nullptr;
     if (const Instruction *inst = dyn_cast<Instruction>(v)) {
-      return memo[v] = baseOfInst(inst, memo);
+      return memo[v] = baseOfInst(inst, memo, kobjCalls);
     }
     if (const Operator *op = dyn_cast<Operator>(v)) {
       for (const Value *v : op->operands()) {
-        if (const Value *base = baseOfValue(v, memo)) {
+        if (const Value *base = baseOfValue(v, memo, kobjCalls)) {
           return memo[op] = base;
         }
       }
@@ -142,221 +304,30 @@ private:
   }
 
   const Value *baseOfInst(const Instruction *inst,
-                          DenseMap<const Value *, const Value *> &memo) const {
+                          DenseMap<const Value *, const Value *> &memo,
+                          const DenseSet<const CallInst *> &kobjCalls) const {
     if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
       for (const Value *v : phi->incoming_values()) {
-        if (const Value *base = baseOfValue(v, memo)) {
+        if (const Value *base = baseOfValue(v, memo, kobjCalls)) {
           return base;
         }
       }
       return nullptr;
     } else if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-      if (startingPoints.count(call) || kobjCalls.count(call)) {
+      if (kobjCalls.count(call)) {
+        return baseOfValue(call->getArgOperand(0), memo, kobjCalls);
+      }
+      if (startingPoints.count(call)) {
         return call;
       }
       return nullptr;
     } else {
       for (const Value *v : inst->operands()) {
-        if (const Value *base = baseOfValue(v, memo)) {
+        if (const Value *base = baseOfValue(v, memo, kobjCalls)) {
           return base;
         }
       }
       return nullptr;
-    }
-  }
-
-  void buildTargets(const Module &m) {
-    DenseMap<const Value *, bool> memo;
-
-    for (const Argument *arg : targetArgs) {
-      unsigned argNo = arg->getArgNo();
-      for (const CallInst *call : getCalls(arg->getParent())) {
-        Value *v = call->getArgOperand(argNo);
-        if (isValueTarget(v, memo)) {
-          memo[call] = true;
-          targets.insert(call);
-        }
-        visitPredBranch(call->getParent(), memo);
-      }
-      if (arg->getType()->isPointerTy())
-        collectStoresToArg(arg, memo);
-    }
-    errs() << "target counts " << targets.size() << "\n";
-  }
-
-  bool isValueTarget(const Value *v, DenseMap<const Value *, bool> &memo) {
-    if (isa<Argument>(v))
-      return true;
-    if (isa<Constant, MetadataAsValue, InlineAsm>(v))
-      return false;
-    if (memo.count(v))
-      return memo[v];
-    memo[v] = false;
-    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
-      return memo[v] = isInstTarget(inst, memo);
-    } else if (const Operator *op = dyn_cast<Operator>(v)) {
-      for (const Value *v : op->operands()) {
-        if (isValueTarget(v, memo)) {
-          return memo[op] = true;
-        }
-      }
-      return false;
-    } else {
-      errs() << "TODO: isValueTarget " << *v << '\n';
-      std::exit(1);
-    }
-  }
-
-  bool isInstTarget(const Instruction *inst,
-                    DenseMap<const Value *, bool> &memo) {
-    if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
-      return isPHITarget(phi, memo);
-    } else if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-      return isCallTarget(call, memo);
-    } else if (const LoadInst *load = dyn_cast<LoadInst>(inst)) {
-      return isLoadTarget(load, memo);
-    } else if (isa<StoreInst>(inst)) {
-      return false;
-    } else {
-      bool isTarget = false;
-      for (const Value *v : inst->operands()) {
-        if (isValueTarget(v, memo)) {
-          targets.insert(inst);
-          visitPredBranch(inst->getParent(), memo);
-          isTarget = true;
-        }
-      }
-      return isTarget;
-    }
-  }
-
-  bool isPHITarget(const PHINode *phi, DenseMap<const Value *, bool> &memo) {
-    for (const Value *v : phi->incoming_values()) {
-      if (isValueTarget(v, memo)) {
-        targets.insert(phi);
-        visitPredBranch(phi->getParent(), memo);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  bool isCallTarget(const CallInst *call, DenseMap<const Value *, bool> &memo) {
-    const Function *f = extractCalledFunction(call);
-    if (startingPoints.count(call) || kobjCalls.count(call)) {
-      targets.insert(call);
-      visitRet(*f, memo);
-      visitPredBranch(call->getParent(), memo);
-      return true;
-    }
-    bool isTarget = false;
-    for (unsigned i = 0; i < call->arg_size(); i++) {
-      const Value *argVal = call->getArgOperand(i);
-      if (isValueTarget(argVal, memo) && f && targetArgs.count(f->getArg(i))) {
-        isTarget = true;
-      }
-    }
-    if (isTarget) {
-      if (f)
-        visitRet(*f, memo);
-      visitPredBranch(call->getParent(), memo);
-      targets.insert(call);
-    }
-    return isTarget;
-  }
-
-  void visitRet(const Function &f, DenseMap<const Value *, bool> &memo) {
-    for (const BasicBlock &blk : f) {
-      if (const ReturnInst *ret = dyn_cast<ReturnInst>(blk.getTerminator())) {
-        if (const Value *v = ret->getReturnValue()) {
-          isValueTarget(v, memo);
-        }
-      }
-    }
-  }
-
-  void visitPredBranch(const BasicBlock *blk,
-                       DenseMap<const Value *, bool> &memo) {
-    for (const BasicBlock *pred : predecessors(blk)) {
-      if (const BranchInst *br = dyn_cast<BranchInst>(pred->getTerminator())) {
-        if (br->isConditional()) {
-          isValueTarget(br->getCondition(), memo);
-        }
-      }
-    }
-  }
-
-  bool isLoadTarget(const LoadInst *load, DenseMap<const Value *, bool> &memo) {
-    for (const StoreInst *store : getStores(load)) {
-      if (isValueTarget(store->getValueOperand(), memo)) {
-        targets.insert(store);
-        targets.insert(load);
-        return true;
-      }
-    }
-    if (isValueTarget(load->getPointerOperand(), memo)) {
-      targets.insert(load);
-      return true;
-    }
-    return false;
-  }
-
-  SmallVector<const StoreInst *> getStores(const LoadInst *load) {
-    SmallVector<const StoreInst *> stores;
-    DenseSet<const Value *> visited;
-    for (const User *user : load->getPointerOperand()->users()) {
-      collectStores(user, stores, visited);
-    }
-    return stores;
-  }
-
-  void collectStores(const Value *val, SmallVector<const StoreInst *> &stores,
-                     DenseSet<const Value *> &visited) {
-    if (!visited.insert(val).second)
-      return;
-    if (const StoreInst *store = dyn_cast<StoreInst>(val)) {
-      stores.push_back(store);
-    } else if (const Operator *op = dyn_cast<Operator>(val)) {
-      for (const Value *v : op->operands())
-        collectStores(v, stores, visited);
-    } else if (const SelectInst *select = dyn_cast<SelectInst>(val)) {
-      collectStores(select->getTrueValue(), stores, visited);
-      collectStores(select->getFalseValue(), stores, visited);
-    } else if (const PHINode *phi = dyn_cast<PHINode>(val)) {
-      for (const Value *v : phi->incoming_values()) {
-        collectStores(v, stores, visited);
-      }
-    }
-  }
-
-  void collectStoresToArg(const Argument *arg,
-                          DenseMap<const Value *, bool> &memo) {
-    DenseSet<const Value *> pointers;
-    collectPointers(arg, pointers);
-    for (const Instruction &inst : instructions(arg->getParent())) {
-      if (const StoreInst *store = dyn_cast<StoreInst>(&inst)) {
-        if (pointers.count(store->getPointerOperand())) {
-          isValueTarget(store->getValueOperand(), memo);
-          isValueTarget(store->getPointerOperand(), memo);
-          if (const Instruction *inst =
-                  dyn_cast<Instruction>(store->getValueOperand())) {
-            memo[inst] = true;
-            targets.insert(inst);
-          }
-          memo[store] = true;
-          targets.insert(store);
-        }
-      }
-    }
-  }
-
-  void collectPointers(const Value *v, DenseSet<const Value *> &pointers) {
-    if (!pointers.insert(v).second)
-      return;
-    for (const User *user : v->users()) {
-      if (isa<BitCastOperator, GEPOperator, SelectInst, PHINode>(user)) {
-        collectPointers(user, pointers);
-      }
     }
   }
 };
@@ -374,14 +345,14 @@ public:
     removeObviousGetPutPairs(m);
     runDCEPasses(m);
 
-    Filter filter(m);
-    slimDownOnlyReachables(m, filter);
+    slimDownOnlyReachables(m);
     runDCEPasses(m, true);
     return true;
   }
 
   void getAnalysisUsage(AnalysisUsage &au) const override {
     au.addRequired<seahorn::SeaBuiltinsInfoWrapperPass>();
+    au.addRequired<AAResultsWrapperPass>();
     au.setPreservesAll();
   }
 
@@ -463,12 +434,28 @@ private:
   void handleRetainedInst(Instruction *inst,
                           DenseMap<const Type *, Function *> &ndvalfn,
                           DenseSet<Instruction *> &toRemoveInstructions) {
-    for (Value *op : inst->operands()) {
-      if (Instruction *opInst = dyn_cast<Instruction>(op)) {
-        if (toRemoveInstructions.count(opInst)) {
-          Instruction *insertPoint = getRepalcementInsertPoint(opInst);
-          Value *replace = nondetValue(opInst->getType(), insertPoint, ndvalfn);
-          opInst->replaceAllUsesWith(replace);
+    if (isa<BinaryOperator, CmpInst, GetElementPtrInst>(inst)) {
+      bool isOperandRemoved =
+          any_of(inst->operands(), [&toRemoveInstructions](Value *op) -> bool {
+            if (Instruction *opInst = dyn_cast<Instruction>(op)) {
+              return toRemoveInstructions.count(opInst);
+            }
+            return false;
+          });
+      if (isOperandRemoved) {
+        Value *replace = nondetValue(inst->getType(), inst, ndvalfn);
+        inst->replaceAllUsesWith(replace);
+        toRemoveInstructions.insert(inst);
+      }
+    } else {
+      for (Value *op : inst->operands()) {
+        if (Instruction *opInst = dyn_cast<Instruction>(op)) {
+          if (toRemoveInstructions.count(opInst)) {
+            Instruction *insertPoint = getRepalcementInsertPoint(opInst);
+            Value *replace =
+                nondetValue(opInst->getType(), insertPoint, ndvalfn);
+            opInst->replaceAllUsesWith(replace);
+          }
         }
       }
     }
@@ -478,53 +465,9 @@ private:
     return isa<PHINode>(inst) ? inst->getParent()->getFirstNonPHI() : inst;
   }
 
-  Value *nondetValue(Type *type, Instruction *before,
-                     DenseMap<const Type *, Function *> &ndvalfn) {
-    IRBuilder<> b(before);
-    if (!type->isPointerTy()) {
-      Function *nondetFn = getNondetValueFn(type, before->getModule(), ndvalfn);
-      Value *call = b.CreateCall(nondetFn);
-      if (StructType *s = dyn_cast<StructType>(type)) {
-        for (unsigned i = 0; i < s->getNumElements(); i++) {
-          Value *elem = nondetValue(s->getElementType(i), before, ndvalfn);
-          call = b.CreateInsertValue(call, elem, i);
-        }
-      }
-      return call;
-    }
-
-    Module *m = before->getModule();
-    Type *elemType = type->getPointerElementType();
-    if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
-      return makeNewValFn(m, ft, ndvalfn.size());
-    }
-    /*Function *malloc = nondetMalloc(m);*/
-    /*FunctionType *ft =*/
-    /*    FunctionType::get(type, malloc->getArg(0)->getType(), false);*/
-    /*Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());*/
-    /*size_t size = m->getDataLayout().getTypeAllocSize(elemType);*/
-    /*Type *i64Type = Type::getInt64Ty(m->getContext());*/
-    /*Value *call = b.CreateCall(ft, casted, ConstantInt::get(i64Type, size));*/
-    Value *call = b.CreateAlloca(elemType);
-    if (elemType->isPointerTy()) {
-      Value *value = nondetValue(elemType, before, ndvalfn);
-      b.CreateStore(value, call);
-    }
-    return call;
-  }
-
-  Function *nondetMalloc(Module *m) {
-    if (Function *f = m->getFunction("nondet.malloc"))
-      return f;
-    FunctionType *nondetMallocType =
-        FunctionType::get(Type::getInt8PtrTy(m->getContext()),
-                          Type::getInt64Ty(m->getContext()), false);
-    return Function::Create(nondetMallocType,
-                            GlobalValue::LinkageTypes::ExternalLinkage,
-                            "nondet.malloc", m);
-  }
-
-  void slimDownOnlyReachables(Module &m, const Filter &filter) {
+  void slimDownOnlyReachables(Module &m) {
+    Visitor visitor(this);
+    visitor.visit(m);
     DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;
     for (Function &f : m) {
@@ -535,13 +478,11 @@ private:
           f.getName().startswith("__DRVHORN_") || f.isDeclaration())
         continue;
       SmallVector<Instruction *> retained;
-      for (BasicBlock &bb : f) {
-        for (Instruction &inst : bb) {
-          if (filter.isTarget(&inst)) {
-            retained.push_back(&inst);
-          } else {
-            toRemoveInstructions.insert(&inst);
-          }
+      for (Instruction &inst : instructions(f)) {
+        if (visitor.isTarget(&inst)) {
+          retained.push_back(&inst);
+        } else {
+          toRemoveInstructions.insert(&inst);
         }
       }
       for (Instruction *inst : retained) {
@@ -589,6 +530,52 @@ private:
     for (Instruction *inst : toRemove) {
       inst->eraseFromParent();
     }
+  }
+
+  Value *nondetValue(Type *type, Instruction *before,
+                     DenseMap<const Type *, Function *> &ndvalfn) {
+    IRBuilder<> b(before);
+    if (!type->isPointerTy()) {
+      Function *nondetFn = getNondetValueFn(type, before->getModule(), ndvalfn);
+      Value *call = b.CreateCall(nondetFn);
+      if (StructType *s = dyn_cast<StructType>(type)) {
+        for (unsigned i = 0; i < s->getNumElements(); i++) {
+          Value *elem = nondetValue(s->getElementType(i), before, ndvalfn);
+          call = b.CreateInsertValue(call, elem, i);
+        }
+      }
+      return call;
+    }
+
+    Module *m = before->getModule();
+    Type *elemType = type->getPointerElementType();
+    if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
+      return makeNewValFn(m, ft, ndvalfn.size());
+    }
+    /*Function *malloc = nondetMalloc(m);*/
+    /*FunctionType *ft =*/
+    /*    FunctionType::get(type, malloc->getArg(0)->getType(), false);*/
+    /*Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());*/
+    /*size_t size = m->getDataLayout().getTypeAllocSize(elemType);*/
+    /*Type *i64Type = Type::getInt64Ty(m->getContext());*/
+    /*Value *call = b.CreateCall(ft, casted, ConstantInt::get(i64Type, size));*/
+    Value *call = b.CreateAlloca(elemType);
+    if (elemType->isPointerTy()) {
+      Value *value = nondetValue(elemType, before, ndvalfn);
+      b.CreateStore(value, call);
+    }
+    return call;
+  }
+
+  Function *nondetMalloc(Module *m) {
+    if (Function *f = m->getFunction("nondet.malloc"))
+      return f;
+    FunctionType *nondetMallocType =
+        FunctionType::get(Type::getInt8PtrTy(m->getContext()),
+                          Type::getInt64Ty(m->getContext()), false);
+    return Function::Create(nondetMallocType,
+                            GlobalValue::LinkageTypes::ExternalLinkage,
+                            "nondet.malloc", m);
   }
 
   Function *getNondetValueFn(Type *retType, Module *m,
