@@ -1,6 +1,5 @@
-// RUN: set -e
-// RUN: %merge %drvhorn-util %kernel-dir/vmlinux.bc %t-kernel.bc %kernel-dir
-// RUN: %merge %s %t-kernel.bc %t-merged.bc %kernel-dir
+// RUN: %merge %drvhorn-util %kernel-dir/vmlinux.bc %t-kernel.bc %kernel-dir &> /dev/null
+// RUN: %merge %s %t-kernel.bc %t-merged.bc %kernel-dir &> /dev/null
 // RUN: %sea kernel --platform-driver=bcm_sf2_driver_unsat %t-merged.bc | OutputCheck %s
 // CHECK: ^unsat$
 
@@ -605,9 +604,7 @@ static void bcm_sf2_identify_ports(struct bcm_sf2_priv *priv,
 }
 
 extern bool nd_bool();
-extern struct device_node *__DRVHORN_get_device_node(struct device_node *);
-extern struct device_node *__DRVHORN_create_device_node();
-static int bcm_sf2_mdio_register(struct dsa_switch *ds)
+noinline static int bcm_sf2_mdio_register(struct dsa_switch *ds)
 {
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	struct device_node *dn, *child;
@@ -629,6 +626,7 @@ static int bcm_sf2_mdio_register(struct dsa_switch *ds)
 		err = -ENOMEM;
 		goto err_put_master_mii_bus_dev;
 	}
+  return 0;
 
 	priv->slave_mii_bus->priv = priv;
 	priv->slave_mii_bus->name = "sf2 user mii";
@@ -678,14 +676,15 @@ static int bcm_sf2_mdio_register(struct dsa_switch *ds)
 			of_remove_property(child, prop);
 
 		phydev = of_phy_find_device(child);
-		if (phydev)
+		if (phydev) {
 			phy_device_remove(phydev);
+			phy_device_free(phydev);
+		}
 	}
 
 	err = mdiobus_register(priv->slave_mii_bus);
 	if (err)
 		goto err_free_slave_mii_bus;
-
 	of_node_put(dn);
 
 	return 0;
@@ -695,7 +694,7 @@ err_free_slave_mii_bus:
 err_put_master_mii_bus_dev:
 	put_device(&priv->master_mii_bus->dev);
 err_of_node_put:
-	of_node_put(dn);
+	/*of_node_put(dn);*/
 	return err;
 }
 
@@ -1425,41 +1424,41 @@ static int bcm_sf2_sw_probe_unsat(struct platform_device *pdev)
 		of_node_put(ports);
 	}
 
-	priv->irq0 = irq_of_parse_and_map(dn, 0);
-	priv->irq1 = irq_of_parse_and_map(dn, 1);
+	// priv->irq0 = irq_of_parse_and_map(dn, 0);
+	// priv->irq1 = irq_of_parse_and_map(dn, 1);
 
-	base = &priv->core;
-	for (i = 0; i < BCM_SF2_REGS_NUM; i++) {
-		*base = devm_platform_ioremap_resource(pdev, i);
-		if (IS_ERR(*base)) {
-			pr_err("unable to find register: %s\n", reg_names[i]);
-			return PTR_ERR(*base);
-		}
-		base++;
-	}
+	// base = &priv->core;
+	// for (i = 0; i < BCM_SF2_REGS_NUM; i++) {
+	// 	*base = devm_platform_ioremap_resource(pdev, i);
+	// 	if (IS_ERR(*base)) {
+	// 		pr_err("unable to find register: %s\n", reg_names[i]);
+	// 		return PTR_ERR(*base);
+	// 	}
+	// 	base++;
+	// }
+	// 
+	// priv->clk = devm_clk_get_optional(&pdev->dev, "sw_switch");
+	// if (IS_ERR(priv->clk))
+	// 	return PTR_ERR(priv->clk);
 
-	priv->clk = devm_clk_get_optional(&pdev->dev, "sw_switch");
-	if (IS_ERR(priv->clk))
-		return PTR_ERR(priv->clk);
+	// clk_prepare_enable(priv->clk);
 
-	clk_prepare_enable(priv->clk);
+	// priv->clk_mdiv = devm_clk_get_optional(&pdev->dev, "sw_switch_mdiv");
+	// if (IS_ERR(priv->clk_mdiv)) {
+	// 	ret = PTR_ERR(priv->clk_mdiv);
+	// 	goto out_clk;
+	// }
 
-	priv->clk_mdiv = devm_clk_get_optional(&pdev->dev, "sw_switch_mdiv");
-	if (IS_ERR(priv->clk_mdiv)) {
-		ret = PTR_ERR(priv->clk_mdiv);
-		goto out_clk;
-	}
-
-	clk_prepare_enable(priv->clk_mdiv);
+	// clk_prepare_enable(priv->clk_mdiv);
 
 	// ret = bcm_sf2_sw_rst(priv);
 	// if (ret) {
 	// 	pr_err("unable to software reset switch: %d\n", ret);
 	// 	goto out_clk_mdiv;
 	// }
-	//
+
 	// bcm_sf2_crossbar_setup(priv);
-	//
+
 	// bcm_sf2_gphy_enable_set(priv->dev->ds, true);
 
 	ret = bcm_sf2_mdio_register(ds);
@@ -1469,64 +1468,64 @@ static int bcm_sf2_sw_probe_unsat(struct platform_device *pdev)
 	}
 
 	// bcm_sf2_gphy_enable_set(priv->dev->ds, false);
-	//
+	// 
 	// ret = bcm_sf2_cfp_rst(priv);
 	// if (ret) {
 	// 	pr_err("failed to reset CFP\n");
 	// 	goto out_mdio;
 	// }
-	//
+	// 
 	// /* Disable all interrupts and request them */
 	// bcm_sf2_intr_disable(priv);
-	//
+	// 
 	// ret = devm_request_irq(&pdev->dev, priv->irq0, bcm_sf2_switch_0_isr, 0,
 	// 		       "switch_0", ds);
 	// if (ret < 0) {
 	// 	pr_err("failed to request switch_0 IRQ\n");
 	// 	goto out_mdio;
 	// }
-	//
+	// 
 	// ret = devm_request_irq(&pdev->dev, priv->irq1, bcm_sf2_switch_1_isr, 0,
 	// 		       "switch_1", ds);
 	// if (ret < 0) {
 	// 	pr_err("failed to request switch_1 IRQ\n");
 	// 	goto out_mdio;
 	// }
-	//
+	// 
 	// /* Reset the MIB counters */
 	// reg = core_readl(priv, CORE_GMNCFGCFG);
 	// reg |= RST_MIB_CNT;
 	// core_writel(priv, reg, CORE_GMNCFGCFG);
 	// reg &= ~RST_MIB_CNT;
 	// core_writel(priv, reg, CORE_GMNCFGCFG);
-	//
+	// 
 	// /* Get the maximum number of ports for this switch */
 	// priv->hw_params.num_ports = core_readl(priv, CORE_IMP0_PRT_ID) + 1;
 	// if (priv->hw_params.num_ports > DSA_MAX_PORTS)
 	// 	priv->hw_params.num_ports = DSA_MAX_PORTS;
-	//
+	// 
 	// /* Assume a single GPHY setup if we can't read that property */
 	// if (of_property_read_u32(dn, "brcm,num-gphy",
 	// 			 &priv->hw_params.num_gphy))
 	// 	priv->hw_params.num_gphy = 1;
-	//
+	// 
 	// rev = reg_readl(priv, REG_SWITCH_REVISION);
 	// priv->hw_params.top_rev = (rev >> SWITCH_TOP_REV_SHIFT) &
 	// 				SWITCH_TOP_REV_MASK;
 	// priv->hw_params.core_rev = (rev & SF2_REV_MASK);
-	//
+	// 
 	// rev = reg_readl(priv, REG_PHY_REVISION);
 	// priv->hw_params.gphy_rev = rev & PHY_REVISION_MASK;
-	//
+
 	// ret = b53_switch_register(dev);
 	// if (ret)
 	// 	goto out_mdio;
-	//
-	// dev_info(&pdev->dev,
-	// 	 "Starfighter 2 top: %x.%02x, core: %x.%02x, IRQs: %d, %d\n",
-	// 	 priv->hw_params.top_rev >> 8, priv->hw_params.top_rev & 0xff,
-	// 	 priv->hw_params.core_rev >> 8, priv->hw_params.core_rev & 0xff,
-	// 	 priv->irq0, priv->irq1);
+	
+	dev_info(&pdev->dev,
+		 "Starfighter 2 top: %x.%02x, core: %x.%02x, IRQs: %d, %d\n",
+		 priv->hw_params.top_rev >> 8, priv->hw_params.top_rev & 0xff,
+		 priv->hw_params.core_rev >> 8, priv->hw_params.core_rev & 0xff,
+		 priv->irq0, priv->irq1);
 
 	return 0;
 

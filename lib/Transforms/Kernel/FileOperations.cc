@@ -89,14 +89,28 @@ private:
 
   void callSetupDevice(Module &m, IRBuilder<> &b, Value *devicePtr) {
     Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
+    PointerType *kobjPtrType =
+        StructType::getTypeByName(m.getContext(), "struct.kobject")
+            ->getPointerTo();
+    Value *kobj = new GlobalVariable(
+        m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantPointerNull::get(kobjPtrType), "drvhorn.kobject.struct.device");
     if (setupDevice->getArg(0)->getType() != devicePtr->getType())
       devicePtr = b.CreateBitCast(devicePtr, setupDevice->getArg(0)->getType());
-    b.CreateCall(setupDevice, {devicePtr});
+    if (setupDevice->getArg(1)->getType() != kobj->getType())
+      kobj = b.CreateBitCast(kobj, setupDevice->getArg(1)->getType());
+    b.CreateCall(setupDevice, {devicePtr, kobj});
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    b.CreateCall(m.getFunction("__DRVHORN_assert"));
+    Function *checker = m.getFunction("__DRVHORN_assert_kobject");
+    for (GlobalVariable *g : getKobjects(m)) {
+      Value *v = b.CreateLoad(g->getValueType(), g);
+      if (v->getType() != checker->getArg(0)->getType())
+        v = b.CreateBitCast(v, checker->getArg(0)->getType());
+      b.CreateCall(checker, v);
+    }
     b.CreateBr(ret);
   }
 

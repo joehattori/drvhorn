@@ -158,22 +158,10 @@ struct kobj_type __DRVHORN_ktype = {
     .release = __DRVHORN_kobject_release,
 };
 
-static struct kobject *device_node_kobject;
-static void __DRVHORN_record_device_node_kobject(struct kobject *k) {
-  if (nd_bool()) {
-    device_node_kobject = k;
-  }
-}
+struct kobject *device_node_kobject;
 
-static struct kobject *dev_kobject;
-static void __DRVHORN_record_device_kobject(struct kobject *k) {
-  if (nd_bool()) {
-    dev_kobject = k;
-  }
-}
-
-static struct device_node *__DRVHORN_create_device_node(void) {
 #define LIMIT 0x10000
+static struct device_node *__DRVHORN_create_device_node(void) {
   static unsigned counter = 0;
   static struct device_node storage[LIMIT];
 
@@ -181,8 +169,20 @@ static struct device_node *__DRVHORN_create_device_node(void) {
     return NULL;
   struct device_node *dn = &storage[counter++];
   kobject_init(&dn->kobj, &__DRVHORN_ktype);
-  __DRVHORN_record_device_node_kobject(&dn->kobj);
+  if (nd_bool()) {
+    device_node_kobject = &dn->kobj;
+  }
   return dn;
+}
+
+struct device_node *__DRVHORN_of_get_next_child(const struct device_node *node, struct device_node *prev) {
+  if (!node) {
+    return NULL;
+  }
+  struct device_node *child =  __DRVHORN_create_device_node();
+  of_node_get(child);
+  of_node_put(prev);
+  return child;
 }
 
 struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
@@ -192,19 +192,17 @@ struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
   return dn;
 }
 
-void __DRVHORN_setup_device(struct device *dev) {
+void __DRVHORN_setup_device(struct device *dev, struct kobject **global_kobj) {
   kobject_init(&dev->kobj, &__DRVHORN_ktype);
-  __DRVHORN_record_device_kobject(&dev->kobj);
+  if (nd_bool()) {
+    *global_kobj = &dev->kobj;
+  }
   // dev->of_node = __DRVHORN_create_device_node();
 }
 
-void __DRVHORN_assert(void) {
-  if (device_node_kobject) {
-    int counter = __DRVHORN_util_get_kobject_count(device_node_kobject);
-    sassert(counter == 1);
-  }
-  if (dev_kobject) {
-    int counter = __DRVHORN_util_get_kobject_count(dev_kobject);
+void __DRVHORN_assert_kobject(const struct kobject *kobj) {
+  if (kobj) {
+    int counter = __DRVHORN_util_get_kobject_count(kobj);
     sassert(counter == 1);
   }
 }
@@ -259,6 +257,7 @@ int __DRVHORN_of_phandle_iterator_next(struct of_phandle_iterator *it) {
   if (nd_bool()) {
     return -1;
   }
-  it->node = of_find_node_by_phandle(it->phandle);
+  if (nd_bool())
+    it->node = of_find_node_by_phandle(it->phandle);
   return 0;
 }

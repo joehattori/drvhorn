@@ -1,5 +1,6 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 
 #include "seahorn/Transforms/Kernel/Util.hh"
 
@@ -99,5 +100,17 @@ llvm::Optional<size_t> getEmbeddedDeviceIndex(const llvm::StructType *s) {
       return i;
   }
   return llvm::None;
+}
+
+llvm::SmallVector<llvm::GlobalVariable *> getKobjects(llvm::Module &m) {
+  llvm::SmallVector<llvm::GlobalVariable *> res;
+  if (llvm::GlobalVariable *g = m.getGlobalVariable("device_node_kobject")) {
+    res.push_back(g);
+  }
+  for (llvm::GlobalVariable &g : m.globals()) {
+    if (g.getName().startswith("drvhorn.kobject."))
+      res.push_back(&g);
+  }
+  return res;
 }
 } // namespace seahorn

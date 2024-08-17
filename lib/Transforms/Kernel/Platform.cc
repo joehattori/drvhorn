@@ -4,6 +4,7 @@
 #include "llvm/Pass.h"
 
 #include "seahorn/Analysis/SeaBuiltinsInfo.hh"
+#include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;
 
@@ -67,19 +68,34 @@ private:
   void setupPDev(Module &m, IRBuilder<> &b, Value *pdev) {
     Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
     Type *pdevType = pdev->getType()->getPointerElementType();
-    Type *i32Type = Type::getInt32Ty(m.getContext());
-    Type *i64Type = Type::getInt64Ty(m.getContext());
+    LLVMContext &ctx = m.getContext();
+    PointerType *kobjPtrType =
+        StructType::getTypeByName(ctx, "struct.kobject")->getPointerTo();
+    Value *kobj = new GlobalVariable(m, kobjPtrType, false,
+                                     GlobalValue::LinkageTypes::PrivateLinkage,
+                                     ConstantPointerNull::get(kobjPtrType),
+                                     "drvhorn.kobject.struct.platform_device");
+    Type *i32Type = Type::getInt32Ty(ctx);
+    Type *i64Type = Type::getInt64Ty(ctx);
     Constant *zero = ConstantInt::get(i64Type, 0);
     Constant *idx = ConstantInt::get(i32Type, pDevDeviceGEPIndex);
     Value *devPtr = b.CreateGEP(pdevType, pdev, {zero, idx});
     if (devPtr->getType() != setupDevice->getArg(0)->getType())
       devPtr = b.CreateBitCast(devPtr, setupDevice->getArg(0)->getType());
-    b.CreateCall(setupDevice, {devPtr});
+    if (kobj->getType() != setupDevice->getArg(1)->getType())
+      kobj = b.CreateBitCast(kobj, setupDevice->getArg(1)->getType());
+    b.CreateCall(setupDevice, {devPtr, kobj});
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    b.CreateCall(m.getFunction("__DRVHORN_assert"));
+    Function *checker = m.getFunction("__DRVHORN_assert_kobject");
+    for (GlobalVariable *g : getKobjects(m)) {
+      Value *v = b.CreateLoad(g->getValueType(), g);
+      if (v->getType() != checker->getArg(0)->getType())
+        v = b.CreateBitCast(v, checker->getArg(0)->getType());
+      b.CreateCall(checker, v);
+    }
     b.CreateBr(ret);
   }
 

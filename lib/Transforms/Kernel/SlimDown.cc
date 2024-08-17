@@ -1,4 +1,6 @@
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
@@ -8,7 +10,6 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
 
@@ -26,7 +27,6 @@ namespace seahorn {
 
 struct Visitor : public InstVisitor<Visitor, bool> {
 public:
-  Visitor(ModulePass *pass) : pass(pass) {}
   bool isTarget(const Instruction *inst) const { return targets.count(inst); }
 
   void visitModule(Module &m) {
@@ -36,26 +36,23 @@ public:
     for (const CallInst *call : kobjCalls) {
       const Function *f = extractCalledFunction(call);
       targetArgs.insert(f->getArg(0));
-      targetArgValues.insert(call->getArgOperand(0));
       buildTargetArgs(call, 0, memo, kobjCalls);
     }
   }
 
-  void visitFunction(Function &f) {
-    if (!f.isDeclaration())
-      aa_ = &pass->getAnalysis<AAResultsWrapperPass>(f).getAAResults();
-  }
-
   bool visitCallInst(CallInst &call) {
     const Function *f = extractCalledFunction(call);
-    if (!f)
+    if (!f) {
+      cache[&call] = false;
       return false;
+    }
     bool isTarget = false;
     if (startingPoints.count(&call)) {
       isTarget = true;
     }
-    for (Value *argVal : call.args()) {
-      if (targetArgValues.count(argVal)) {
+    for (const Argument &arg : f->args()) {
+      if (targetArgs.count(&arg)) {
+        const Value *argVal = call.getArgOperand(arg.getArgNo());
         acceptValue(argVal);
         isTarget = true;
       }
@@ -82,12 +79,15 @@ public:
   }
 
   bool visitStore(StoreInst &store) {
-    bool isTarget = any_of(targetArgValues, [this, &store](const Value *v) {
-      return aa_->alias(store.getPointerOperand(), v) == AliasResult::MustAlias;
-    });
+    bool isTarget = false;
+    if (const Argument *arg = dyn_cast<Argument>(
+            getUnderlyingObject(store.getPointerOperand()))) {
+      isTarget = targetArgs.count(arg);
+    }
     if (isTarget) {
       targets.insert(&store);
       acceptValue(store.getValueOperand());
+      acceptValue(store.getPointerOperand());
     }
     cache[&store] = isTarget;
     return isTarget;
@@ -128,15 +128,14 @@ private:
   DenseMap<const Value *, bool> cache;
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
-  DenseSet<const Value *> targetArgValues;
   DenseSet<const Instruction *> targets;
-  AAResults *aa_;
-  ModulePass *pass;
 
   bool visitValue(Value *v) {
     if (Argument *arg = dyn_cast<Argument>(v))
       return targetArgs.count(arg);
-    if (isa<Constant, BasicBlock, MetadataAsValue, InlineAsm>(v))
+    if (isa<Constant>(v))
+      return true;
+    if (isa<BasicBlock, MetadataAsValue, InlineAsm>(v))
       return false;
     if (cache.count(v))
       return cache[v];
@@ -160,7 +159,7 @@ private:
   SmallVector<StoreInst *> getStores(LoadInst &load) {
     SmallVector<StoreInst *> stores;
     DenseSet<Value *> visited;
-    for (User *user : load.getPointerOperand()->users()) {
+    for (User *user : load.getPointerOperand()->stripPointerCasts()->users()) {
       collectStores(user, stores, visited);
     }
     return stores;
@@ -195,9 +194,11 @@ private:
       return;
     cache[v] = true;
     if (const Instruction *inst = dyn_cast<Instruction>(v)) {
-      targets.insert(inst);
-      for (const Value *v : inst->operands()) {
-        acceptValue(v, visited);
+      if (!isa<CallInst>(inst)) {
+        targets.insert(inst);
+        for (const Value *v : inst->operands()) {
+          acceptValue(v, visited);
+        }
       }
     } else if (const Operator *op = dyn_cast<Operator>(v)) {
       for (const Value *v : op->operands()) {
@@ -268,7 +269,6 @@ private:
         targetArgs.insert(arg);
         for (const CallInst *call : getCalls(arg->getParent())) {
           unsigned argNo = arg->getArgNo();
-          targetArgValues.insert(call->getArgOperand(argNo));
           buildTargetArgs(call, argNo, memo, kobjCalls);
         }
       }
@@ -352,7 +352,6 @@ public:
 
   void getAnalysisUsage(AnalysisUsage &au) const override {
     au.addRequired<seahorn::SeaBuiltinsInfoWrapperPass>();
-    au.addRequired<AAResultsWrapperPass>();
     au.setPreservesAll();
   }
 
@@ -466,7 +465,7 @@ private:
   }
 
   void slimDownOnlyReachables(Module &m) {
-    Visitor visitor(this);
+    Visitor visitor;
     visitor.visit(m);
     DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;

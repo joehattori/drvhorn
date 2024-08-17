@@ -6,6 +6,8 @@
 
 #include "seahorn/Transforms/Kernel/Util.hh"
 
+#define STORAGE_LIMIT 0x10000
+
 using namespace llvm;
 
 namespace seahorn {
@@ -18,6 +20,7 @@ public:
   bool runOnModule(Module &m) override {
     handleDeviceNodeFinders(m);
     handleDeviceFinders(m);
+    handleChildNodeFinders(m);
     stubSomeOfFunctions(m);
     handleDeviceAdd(m);
     killDeviceNodeNotify(m);
@@ -88,6 +91,21 @@ private:
     for (std::pair<CallInst *, Value *> p : toReplace) {
       p.first->replaceAllUsesWith(p.second);
       p.first->eraseFromParent();
+    }
+  }
+
+  void handleChildNodeFinders(Module &m) {
+    StringRef names[] = {"of_get_next_child", "of_get_next_available_child"};
+    Function *stub = m.getFunction("__DRVHORN_of_get_next_child");
+    for (StringRef name : names) {
+      Function *f = m.getFunction(name);
+      if (!f)
+        continue;
+      Value *replacement = stub;
+      if (f->getFunctionType() != stub->getFunctionType())
+        replacement = ConstantExpr::getBitCast(stub, f->getType());
+      f->replaceAllUsesWith(replacement);
+      f->eraseFromParent();
     }
   }
 
@@ -181,17 +199,27 @@ private:
     IntegerType *i64Type = Type::getInt64Ty(ctx);
     PointerType *devPtrType =
         surroundingDevType->getElementType(devIndex)->getPointerTo();
+    PointerType *kobjPtrType =
+        StructType::getTypeByName(ctx, "struct.kobject")->getPointerTo();
 
-    std::string funcName = "__DRVHORN_embedded_device.getter." +
-                           surroundingDevType->getName().str();
-    static uint64_t STORAGE_LIMIT = 0x10000;
+    std::string suffix = surroundingDevType->getName().str();
+    std::string funcName = "__DRVHORN_embedded_device.getter." + suffix;
+
     ArrayType *storageType = ArrayType::get(surroundingDevType, STORAGE_LIMIT);
+    Constant *storageContent[STORAGE_LIMIT];
+    for (size_t i = 0; i < STORAGE_LIMIT; i++) {
+      storageContent[i] = Constant::getNullValue(surroundingDevType);
+    }
     GlobalVariable *storage = new GlobalVariable(
-        m, storageType, false, GlobalValue::LinkageTypes::ExternalLinkage,
-        nullptr, funcName + ".storage");
+        m, storageType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantArray::get(storageType, storageContent), funcName + ".storage");
+
     GlobalVariable *counter = new GlobalVariable(
-        m, i64Type, false, GlobalValue::LinkageTypes::ExternalLinkage, nullptr,
-        funcName + ".counter");
+        m, i64Type, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantInt::get(i64Type, 0), funcName + ".counter");
+    GlobalVariable *kobj = new GlobalVariable(
+        m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantPointerNull::get(kobjPtrType), "drvhorn.kobject." + suffix);
     Function *getter = Function::Create(
         FunctionType::get(devPtrType, false),
         GlobalValue::LinkageTypes::ExternalLinkage, funcName, &m);
@@ -215,9 +243,9 @@ private:
     Value *devPtr = b.CreateGEP(
         surroundingDevType, surroundingDevPtr,
         {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, devIndex)});
-    callWithNecessaryBitCast(m.getFunction("__DRVHORN_setup_device"), devPtr,
-                             b);
-    callWithNecessaryBitCast(m.getFunction("get_device"), devPtr, b);
+    callWithNecessaryBitCast(m.getFunction("__DRVHORN_setup_device"),
+                             {devPtr, kobj}, b);
+    callWithNecessaryBitCast(m.getFunction("get_device"), {devPtr}, b);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
@@ -229,11 +257,14 @@ private:
     return getter;
   }
 
-  Value *callWithNecessaryBitCast(Function *f, Value *arg, IRBuilder<> &b) {
-    if (arg->getType() != f->getArg(0)->getType()) {
-      arg = b.CreateBitCast(arg, f->getArg(0)->getType());
+  Value *callWithNecessaryBitCast(Function *f, SmallVector<Value *> args,
+                                  IRBuilder<> &b) {
+    for (size_t i = 0; i < args.size(); i++) {
+      if (args[i]->getType() != f->getArg(i)->getType()) {
+        args[i] = b.CreateBitCast(args[i], f->getArg(i)->getType());
+      }
     }
-    return b.CreateCall(f, arg);
+    return b.CreateCall(f, args);
   }
 
   CallInst *getCallInst(User *user) {
@@ -270,7 +301,7 @@ private:
     for (CallInst *call : getCalls(orig)) {
       IRBuilder<> b(call);
       Value *devPtr = call->getArgOperand(0);
-      Value *newCall = callWithNecessaryBitCast(replace, devPtr, b);
+      Value *newCall = callWithNecessaryBitCast(replace, {devPtr}, b);
       call->replaceAllUsesWith(newCall);
       call->dropAllReferences();
       call->eraseFromParent();

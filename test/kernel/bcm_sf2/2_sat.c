@@ -1445,15 +1445,15 @@ static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
 
 	clk_prepare_enable(priv->clk_mdiv);
 
-	// ret = bcm_sf2_sw_rst(priv);
-	// if (ret) {
-	// 	pr_err("unable to software reset switch: %d\n", ret);
-	// 	goto out_clk_mdiv;
-	// }
-	//
-	// bcm_sf2_crossbar_setup(priv);
-	//
-	// bcm_sf2_gphy_enable_set(priv->dev->ds, true);
+	ret = bcm_sf2_sw_rst(priv);
+	if (ret) {
+		pr_err("unable to software reset switch: %d\n", ret);
+		goto out_clk_mdiv;
+	}
+	
+	bcm_sf2_crossbar_setup(priv);
+	
+	bcm_sf2_gphy_enable_set(priv->dev->ds, true);
 
 	ret = bcm_sf2_mdio_register(ds);
 	if (ret) {
@@ -1461,24 +1461,24 @@ static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
 		goto out_clk_mdiv;
 	}
 
-	// bcm_sf2_gphy_enable_set(priv->dev->ds, false);
-	//
-	// ret = bcm_sf2_cfp_rst(priv);
-	// if (ret) {
-	// 	pr_err("failed to reset CFP\n");
-	// 	goto out_mdio;
-	// }
-	//
-	// /* Disable all interrupts and request them */
-	// bcm_sf2_intr_disable(priv);
-	//
-	// ret = devm_request_irq(&pdev->dev, priv->irq0, bcm_sf2_switch_0_isr, 0,
-	// 		       "switch_0", ds);
-	// if (ret < 0) {
-	// 	pr_err("failed to request switch_0 IRQ\n");
-	// 	goto out_mdio;
-	// }
-	//
+	bcm_sf2_gphy_enable_set(priv->dev->ds, false);
+	
+	ret = bcm_sf2_cfp_rst(priv);
+	if (ret) {
+		pr_err("failed to reset CFP\n");
+		goto out_mdio;
+	}
+
+	/* Disable all interrupts and request them */
+	bcm_sf2_intr_disable(priv);
+	
+	ret = devm_request_irq(&pdev->dev, priv->irq0, bcm_sf2_switch_0_isr, 0,
+			       "switch_0", ds);
+	if (ret < 0) {
+		pr_err("failed to request switch_0 IRQ\n");
+		goto out_mdio;
+	}
+
 	// ret = devm_request_irq(&pdev->dev, priv->irq1, bcm_sf2_switch_1_isr, 0,
 	// 		       "switch_1", ds);
 	// if (ret < 0) {
