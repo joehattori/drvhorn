@@ -22,6 +22,9 @@ public:
 
   bool runOnModule(Module &m) override {
     Function *open = getOpenFunc(m);
+    if (!open) {
+      return false;
+    }
     constructMain(m, open);
     return true;
   }
@@ -70,15 +73,14 @@ private:
     switch (devicePtrs.size()) {
     case 0:
       errs() << "No struct device found\n";
-      return;
+      break;
     case 1:
+      callSetupDevice(m, b, devicePtrs[0]);
       break;
     default:
       errs() << "TODO: multiple struct device\n";
       return;
     }
-    Value *devicePtr = devicePtrs[0];
-    callSetupDevice(m, b, devicePtr);
 
     Type *filePtrType = open->getArg(1)->getType();
     Value *file = allocType(m, b, filePtrType->getPointerElementType());

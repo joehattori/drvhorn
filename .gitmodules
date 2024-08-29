@@ -1,3 +1,6 @@
 [submodule "kernel"]
 	path = kernel
 	url = https://github.com/torvalds/linux.git
+[submodule "sea-dsa"]
+	path = sea-dsa
+	url = git@github.com:joehattori/sea-dsa.git

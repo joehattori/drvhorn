@@ -7,7 +7,6 @@
 /static/
 /dsa-seahorn/
 /clam/
-/sea-dsa/
 /sea-svf/
 /llvm-dsa/
 *.pyc

@@ -1,11 +1,11 @@
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstIterator.h"
-#include "llvm/IR/Module.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Pass.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
-#include "llvm/Pass.h"
 
 #include "seahorn/Transforms/Kernel/Util.hh"
 
@@ -20,61 +20,61 @@ public:
 
   bool runOnModule(Module &m) override {
     // first, make nondet functions binary.
-    // SmallVector<Function *, 16> nondetFns;
-    // for (Function &f : m) {
-    //   if (f.isDeclaration() && f.getName().startswith("verifier.nondet")) {
-    //     nondetFns.push_back(&f);
-    //   }
-    // }
-    // Function *ndBool = m.getFunction("nd_bool");
-    // for (Function *f : nondetFns) {
-    //   for (CallInst *call : getCalls(f)) {
-    //     DenseMap<const User *, bool> visited;
-    //     if (isUsedOnlyBinary(call, visited)) {
-    //       if (!call->getType()->isIntegerTy())
-    //         continue;
-    //       Instruction *newCall = CallInst::Create(ndBool, "", call);
-    //       if (!call->getType()->isIntegerTy(1))
-    //         newCall = new ZExtInst(newCall, call->getType(), "", call);
-    //       call->replaceAllUsesWith(newCall);
-    //       call->eraseFromParent();
-    //     }
-    //   }
-    // }
-    // // next, replace the return values of functions that are only used as binary values.
-    // SmallVector<Function *> binaryFns;
-    // for (Function &f : m) {
-    //   if (f.isDeclaration() || f.getName().equals("main"))
-    //     continue;
-    //   if (isUsedOnlyBinary(&f)) {
-    //     binaryFns.push_back(&f);
-    //   }
-    // }
-    // for (Function *f : binaryFns) {
-    //   makeBinary(f);
-    // }
-    // runDCEPasses(m, true);
+    SmallVector<Function *, 16> nondetFns;
+    for (Function &f : m) {
+      if (f.isDeclaration() && f.getName().startswith("verifier.nondet")) {
+        nondetFns.push_back(&f);
+      }
+    }
+    Function *ndBool = getOrCreateNdBool(m);
+    for (Function *f : nondetFns) {
+      for (CallInst *call : getCalls(f)) {
+        DenseMap<const User *, bool> visited;
+        if (isOnlyUsedAsBinary(call, visited)) {
+          if (!call->getType()->isIntegerTy())
+            continue;
+          Instruction *newCall = CallInst::Create(ndBool, "", call);
+          if (!call->getType()->isIntegerTy(1))
+            newCall = new ZExtInst(newCall, call->getType(), "", call);
+          call->replaceAllUsesWith(newCall);
+          call->eraseFromParent();
+        }
+      }
+    }
+    // next, replace the return values of functions that are only used as
+    // binary values.
+    SmallVector<Function *> binaryFns;
+    for (Function &f : m) {
+      if (f.isDeclaration() || f.getName().equals("main"))
+        continue;
+      if (isOnlyUsedAsBinary(&f)) {
+        binaryFns.push_back(&f);
+      }
+    }
+    for (Function *f : binaryFns) {
+      makeBinary(f);
+    }
+    runDCEPasses(m, true);
     return true;
   }
 
-  virtual StringRef getPassName() const override {
-    return "IntoBinary";
-  }
+  virtual StringRef getPassName() const override { return "IntoBinary"; }
 
 private:
-  bool isUsedOnlyBinary(const Function *f) {
+  bool isOnlyUsedAsBinary(const Function *f) {
     if (!f->getReturnType()->isIntegerTy())
       return false;
     for (const CallInst *call : getCalls(f)) {
       DenseMap<const User *, bool> visited;
-      if (!isUsedOnlyBinary(call, visited)) {
+      if (!isOnlyUsedAsBinary(call, visited)) {
         return false;
       }
     }
     return true;
   }
-  
-  bool isUsedOnlyBinary(const User *user, DenseMap<const User *, bool> &visited) {
+
+  bool isOnlyUsedAsBinary(const User *user,
+                          DenseMap<const User *, bool> &visited) {
     if (visited.count(user))
       return visited[user];
     if (isa<ICmpInst>(user) || isa<BranchInst>(user)) {
@@ -83,15 +83,16 @@ private:
     visited[user] = false;
     if (const ReturnInst *ret = dyn_cast<ReturnInst>(user)) {
       for (const CallInst *call : getCalls(ret->getFunction())) {
-        if (!isUsedOnlyBinary(call, visited))
+        if (!isOnlyUsedAsBinary(call, visited))
           return false;
       }
       visited[user] = true;
       return true;
     }
-    if (isa<TruncInst>(user) || isa<ZExtInst>(user) || isa<CallInst>(user) || isa<PHINode>(user) || isa<BinaryOperator>(user) || isa<SelectInst>(user)) {
+    if (isa<TruncInst, ZExtInst, CallInst, PHINode, BinaryOperator, SelectInst>(
+            user)) {
       for (const User *u : user->users()) {
-        if (!isUsedOnlyBinary(u, visited)) {
+        if (!isOnlyUsedAsBinary(u, visited)) {
           return false;
         }
       }
@@ -100,15 +101,16 @@ private:
     }
     return false;
   }
-  
-  bool isOperandUsedBinary(const Value *value, DenseMap<const User *, bool> &visited) {
+
+  bool isOperandUsedBinary(const Value *value,
+                           DenseMap<const User *, bool> &visited) {
     if (isa<Constant>(value)) {
       return true;
     }
     if (const User *user = dyn_cast<User>(value)) {
       for (const Value *v : user->operands()) {
         if (const User *u = dyn_cast<User>(v)) {
-          if (!isUsedOnlyBinary(u, visited))
+          if (!isOnlyUsedAsBinary(u, visited))
             return false;
         } else if (isa<Argument>(v)) {
           return false;
@@ -118,7 +120,7 @@ private:
     }
     return false;
   }
-  
+
   void makeBinary(Function *f) {
     SmallVector<ReturnInst *, 16> ret;
     for (Instruction &inst : instructions(f)) {
@@ -130,7 +132,7 @@ private:
       makeInstBinary(r);
     }
   }
-  
+
   void makeInstBinary(Instruction *inst) {
     if (ReturnInst *ret = dyn_cast<ReturnInst>(inst)) {
       makeRetBinary(ret);
@@ -145,18 +147,21 @@ private:
       }
     } else if (PtrToIntInst *ptr2int = dyn_cast<PtrToIntInst>(inst)) {
       Value *ptr = ptr2int->getPointerOperand();
-      ICmpInst *eqNull = new ICmpInst(inst, CmpInst::Predicate::ICMP_NE, ptr, ConstantPointerNull::get(cast<PointerType>(ptr->getType())));
+      ICmpInst *eqNull = new ICmpInst(
+          inst, CmpInst::Predicate::ICMP_NE, ptr,
+          ConstantPointerNull::get(cast<PointerType>(ptr->getType())));
       ZExtInst *zext = new ZExtInst(eqNull, ptr2int->getType(), "", inst);
       ptr2int->replaceAllUsesWith(zext);
       ptr2int->eraseFromParent();
     }
   }
-  
+
   void makeRetBinary(ReturnInst *ret) {
     Value *val = ret->getReturnValue();
     if (ConstantInt *c = dyn_cast<ConstantInt>(val)) {
       if (!c->isZero()) {
-        ReturnInst *newRet = ReturnInst::Create(ret->getContext(), ConstantInt::get(c->getType(), 1), ret);
+        ReturnInst *newRet = ReturnInst::Create(
+            ret->getContext(), ConstantInt::get(c->getType(), 1), ret);
         ret->replaceAllUsesWith(newRet);
         ret->eraseFromParent();
       }
@@ -167,7 +172,7 @@ private:
       std::exit(1);
     }
   }
-  
+
   void makePHIBinary(PHINode *node) {
     for (unsigned i = 0; i < node->getNumIncomingValues(); i++) {
       Value *v = node->getIncomingValue(i);

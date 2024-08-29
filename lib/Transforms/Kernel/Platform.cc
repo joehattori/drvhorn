@@ -45,7 +45,7 @@ private:
   DenseMap<const Type *, Function *> ndfn;
 
   Function *getProbeFn(Module &m) {
-    GlobalVariable *drv = m.getGlobalVariable(platformDriverName);
+    GlobalVariable *drv = m.getGlobalVariable(platformDriverName, true);
     Constant *probe =
         drv->getInitializer()->getAggregateElement(platformDriverProbeIndex);
     return dyn_cast_or_null<Function>(probe);

@@ -1,6 +1,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
@@ -27,6 +29,8 @@ namespace seahorn {
 
 struct Visitor : public InstVisitor<Visitor, bool> {
 public:
+  Visitor(ModulePass *pass) : pass(pass) {}
+
   bool isTarget(const Instruction *inst) const { return targets.count(inst); }
 
   void visitModule(Module &m) {
@@ -36,12 +40,12 @@ public:
     for (const CallInst *call : kobjCalls) {
       const Function *f = extractCalledFunction(call);
       targetArgs.insert(f->getArg(0));
-      buildTargetArgs(call, 0, memo, kobjCalls);
+      buildTargetArgs(call->getArgOperand(0), memo, kobjCalls);
     }
   }
 
   bool visitCallInst(CallInst &call) {
-    const Function *f = extractCalledFunction(call);
+    Function *f = extractCalledFunction(call);
     if (!f) {
       cache[&call] = false;
       return false;
@@ -50,9 +54,9 @@ public:
     if (startingPoints.count(&call)) {
       isTarget = true;
     }
-    for (const Argument &arg : f->args()) {
+    for (Argument &arg : f->args()) {
       if (targetArgs.count(&arg)) {
-        const Value *argVal = call.getArgOperand(arg.getArgNo());
+        Value *argVal = call.getArgOperand(arg.getArgNo());
         acceptValue(argVal);
         isTarget = true;
       }
@@ -65,31 +69,14 @@ public:
   }
 
   bool visitLoadInst(LoadInst &load) {
-    bool isTarget = visitValue(load.getPointerOperand());
-    for (StoreInst *store : getStores(load)) {
-      if (visitValue(store->getValueOperand())) {
-        targets.insert(store);
-        isTarget = true;
-      }
+    bool isTarget = false;
+    if (visitValue(load.getPointerOperand())) {
+      isTarget = true;
+      trackStores(&load);
     }
     if (isTarget)
       targets.insert(&load);
     cache[&load] = isTarget;
-    return isTarget;
-  }
-
-  bool visitStore(StoreInst &store) {
-    bool isTarget = false;
-    if (const Argument *arg = dyn_cast<Argument>(
-            getUnderlyingObject(store.getPointerOperand()))) {
-      isTarget = targetArgs.count(arg);
-    }
-    if (isTarget) {
-      targets.insert(&store);
-      acceptValue(store.getValueOperand());
-      acceptValue(store.getPointerOperand());
-    }
-    cache[&store] = isTarget;
     return isTarget;
   }
 
@@ -129,6 +116,7 @@ private:
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
   DenseSet<const Instruction *> targets;
+  ModulePass *pass;
 
   bool visitValue(Value *v) {
     if (Argument *arg = dyn_cast<Argument>(v))
@@ -156,69 +144,76 @@ private:
     }
   }
 
-  SmallVector<StoreInst *> getStores(LoadInst &load) {
-    SmallVector<StoreInst *> stores;
-    DenseSet<Value *> visited;
-    for (User *user : load.getPointerOperand()->stripPointerCasts()->users()) {
-      collectStores(user, stores, visited);
-    }
-    return stores;
-  }
+  void trackStores(LoadInst *load) {
+    Function *f = load->getFunction();
+    AAResults &aa = pass->getAnalysis<AAResultsWrapperPass>(*f).getAAResults();
+    DominatorTree dt(*f);
+    MemorySSA mssa(*f, &aa, &dt);
+    DenseSet<MemoryAccess *> visited;
+    std::queue<MemoryAccess *> workList;
 
-  void collectStores(Value *val, SmallVector<StoreInst *> &stores,
-                     DenseSet<Value *> &visited) {
-    if (!visited.insert(val).second)
-      return;
-    if (StoreInst *store = dyn_cast<StoreInst>(val)) {
-      stores.push_back(store);
-    } else if (Operator *op = dyn_cast<Operator>(val)) {
-      for (Value *v : op->operands())
-        collectStores(v, stores, visited);
-    } else if (SelectInst *select = dyn_cast<SelectInst>(val)) {
-      collectStores(select->getTrueValue(), stores, visited);
-      collectStores(select->getFalseValue(), stores, visited);
-    } else if (PHINode *phi = dyn_cast<PHINode>(val)) {
-      for (Value *v : phi->incoming_values()) {
-        collectStores(v, stores, visited);
-      }
-    }
-  }
-
-  void acceptValue(const Value *v) {
-    DenseSet<const Value *> visited;
-    acceptValue(v, visited);
-  }
-
-  void acceptValue(const Value *v, DenseSet<const Value *> &visited) {
-    if (!visited.insert(v).second)
-      return;
-    cache[v] = true;
-    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
-      if (!isa<CallInst>(inst)) {
-        targets.insert(inst);
-        for (const Value *v : inst->operands()) {
-          acceptValue(v, visited);
+    workList.push(mssa.getMemoryAccess(load));
+    while (!workList.empty()) {
+      MemoryAccess *access = workList.front();
+      workList.pop();
+      if (!visited.insert(access).second)
+        continue;
+      if (MemoryUse *use = dyn_cast<MemoryUse>(access)) {
+        workList.push(use->getOptimized());
+      } else if (MemoryDef *def = dyn_cast<MemoryDef>(access)) {
+        if (StoreInst *store =
+                dyn_cast_or_null<StoreInst>(def->getMemoryInst())) {
+          targets.insert(store);
+        }
+      } else {
+        MemoryPhi *phi = cast<MemoryPhi>(access);
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+          workList.push(phi->getIncomingValue(i));
         }
       }
-    } else if (const Operator *op = dyn_cast<Operator>(v)) {
-      for (const Value *v : op->operands()) {
-        acceptValue(v, visited);
+    }
+  }
+
+  void acceptValue(Value *v) {
+    DenseSet<Value *> visited;
+    std::queue<Value *> workList;
+    workList.push(v);
+    while (!workList.empty()) {
+      Value *v = workList.front();
+      workList.pop();
+      if (!visited.insert(v).second)
+        continue;
+      cache[v] = true;
+      if (Instruction *inst = dyn_cast<Instruction>(v)) {
+        if (!isa<CallInst>(inst)) {
+          if (LoadInst *load = dyn_cast<LoadInst>(inst)) {
+            trackStores(load);
+          }
+          targets.insert(inst);
+          for (Value *v : inst->operands()) {
+            workList.push(v);
+          }
+        }
+      } else if (Operator *op = dyn_cast<Operator>(v)) {
+        for (Value *v : op->operands()) {
+          workList.push(v);
+        }
       }
     }
   }
 
   void recordCallers(const Function *f) {
     DenseSet<const Function *> visited;
-    std::queue<const Function *> worklist;
-    worklist.push(f);
-    while (!worklist.empty()) {
-      const Function *f = worklist.front();
-      worklist.pop();
+    std::queue<const Function *> workList;
+    workList.push(f);
+    while (!workList.empty()) {
+      const Function *f = workList.front();
+      workList.pop();
       if (!visited.insert(f).second)
         continue;
       for (const CallInst *call : getCalls(f)) {
         startingPoints.insert(call);
-        worklist.push(call->getFunction());
+        workList.push(call->getFunction());
       }
     }
   }
@@ -257,25 +252,23 @@ private:
     return calls;
   }
 
-  void buildTargetArgs(const CallInst *call, unsigned argIdx,
-                       DenseSet<const Value *> &memo,
+  void buildTargetArgs(const Value *argVal, DenseSet<const Value *> &memo,
                        const DenseSet<const CallInst *> &kobjCalls) {
-    if (!memo.insert(call).second)
+    if (!memo.insert(argVal).second)
       return;
-    const Value *v = call->getArgOperand(argIdx);
     DenseMap<const Value *, const Value *> baseMemo;
-    if (const Value *base = baseOfValue(v, baseMemo, kobjCalls)) {
-      if (const Argument *arg = dyn_cast<Argument>(base)) {
-        targetArgs.insert(arg);
-        for (const CallInst *call : getCalls(arg->getParent())) {
-          unsigned argNo = arg->getArgNo();
-          buildTargetArgs(call, argNo, memo, kobjCalls);
-        }
+    if (const Argument *arg = dyn_cast_or_null<Argument>(
+            baseOfValue(argVal, baseMemo, kobjCalls))) {
+      targetArgs.insert(arg);
+      for (const CallInst *call : getCalls(arg->getParent())) {
+        const Value *v = call->getArgOperand(arg->getArgNo());
+        buildTargetArgs(v, memo, kobjCalls);
       }
     }
   }
 
   // returns either an llvm::Argument*, an llvm::CallInst*, or nullptr.
+  // TODO: use getUnderlyingObject instead.
   const Value *baseOfValue(const Value *v,
                            DenseMap<const Value *, const Value *> &memo,
                            const DenseSet<const CallInst *> &kobjCalls) const {
@@ -347,11 +340,14 @@ public:
 
     slimDownOnlyReachables(m);
     runDCEPasses(m, true);
+    removeNotCalledFunctions(m);
+    runDCEPasses(m, true);
     return true;
   }
 
   void getAnalysisUsage(AnalysisUsage &au) const override {
     au.addRequired<seahorn::SeaBuiltinsInfoWrapperPass>();
+    au.addRequired<AAResultsWrapperPass>();
     au.setPreservesAll();
   }
 
@@ -432,40 +428,41 @@ private:
 
   void handleRetainedInst(Instruction *inst,
                           DenseMap<const Type *, Function *> &ndvalfn,
-                          DenseSet<Instruction *> &toRemoveInstructions) {
-    if (isa<BinaryOperator, CmpInst, GetElementPtrInst>(inst)) {
-      bool isOperandRemoved =
-          any_of(inst->operands(), [&toRemoveInstructions](Value *op) -> bool {
-            if (Instruction *opInst = dyn_cast<Instruction>(op)) {
-              return toRemoveInstructions.count(opInst);
-            }
-            return false;
-          });
-      if (isOperandRemoved) {
-        Value *replace = nondetValue(inst->getType(), inst, ndvalfn);
-        inst->replaceAllUsesWith(replace);
-        toRemoveInstructions.insert(inst);
-      }
-    } else {
-      for (Value *op : inst->operands()) {
-        if (Instruction *opInst = dyn_cast<Instruction>(op)) {
-          if (toRemoveInstructions.count(opInst)) {
-            Instruction *insertPoint = getRepalcementInsertPoint(opInst);
-            Value *replace =
-                nondetValue(opInst->getType(), insertPoint, ndvalfn);
-            opInst->replaceAllUsesWith(replace);
-          }
+                          const DenseSet<Instruction *> &toRemoveInstructions) {
+    for (Value *op : inst->operands()) {
+      if (Instruction *opInst = dyn_cast<Instruction>(op)) {
+        if (toRemoveInstructions.count(opInst)) {
+          Value *replace = getReplacement(opInst, ndvalfn);
+          opInst->replaceAllUsesWith(replace);
         }
       }
     }
   }
 
-  Instruction *getRepalcementInsertPoint(Instruction *inst) {
-    return isa<PHINode>(inst) ? inst->getParent()->getFirstNonPHI() : inst;
+  Value *getReplacement(Instruction *inst,
+                        DenseMap<const Type *, Function *> &ndvalfn) {
+    if (CallInst *call = dyn_cast<CallInst>(inst)) {
+      if (Function *f = extractCalledFunction(call)) {
+        if (f->getName().equals("devm_kmalloc")) {
+          Type *i8Type = Type::getInt8Ty(inst->getContext());
+          uint64_t size = 1024;
+          if (ConstantInt *arg =
+                  dyn_cast<ConstantInt>(call->getArgOperand(1))) {
+            size = arg->getZExtValue();
+          }
+          ArrayType *arrType = ArrayType::get(i8Type, size);
+          AllocaInst *alloca = new AllocaInst(arrType, 0, "", inst);
+          return new BitCastInst(alloca, i8Type->getPointerTo(), "", inst);
+        }
+      }
+    }
+    Instruction *insertPoint =
+        isa<PHINode>(inst) ? inst->getParent()->getFirstNonPHI() : inst;
+    return nondetValue(inst->getType(), insertPoint, ndvalfn);
   }
 
   void slimDownOnlyReachables(Module &m) {
-    Visitor visitor;
+    Visitor visitor(this);
     visitor.visit(m);
     DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;
@@ -506,6 +503,15 @@ private:
       removeUnusedNondetCalls(m);
       if (!pm.run(m))
         break;
+    }
+  }
+
+  void removeNotCalledFunctions(Module &m) {
+    for (Function &f : m) {
+      if (f.getName().equals("main"))
+        continue;
+      if (getCalls(&f).empty())
+        f.deleteBody();
     }
   }
 

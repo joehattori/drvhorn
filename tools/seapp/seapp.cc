@@ -31,6 +31,7 @@
 #include "llvm/Transforms/IPO.h"
 
 #include "llvm/IR/Verifier.h"
+#include <llvm-14/llvm/Transforms/Scalar.h>
 
 #include "seahorn/InitializePasses.hh"
 #include "seahorn/Passes.hh"
@@ -735,6 +736,13 @@ int main(int argc, char **argv) {
     // AG: Dangerous. Promotes verifier.assume() to llvm.assume()
     if (PromoteAssumptions)
       pm_wrapper.add(seahorn::createPromoteSeahornAssumePass());
+  }
+
+  if (Kernel) {
+    pm_wrapper.add(seahorn::createRemoveUnnecessaryStoresPass());
+    pm_wrapper.add(llvm::createAggressiveDCEPass());
+    pm_wrapper.add(llvm::createCFGSimplificationPass());
+    /*pm_wrapper.add(seahorn::createKernelDebugPass());*/
   }
 
   if (NameValues)

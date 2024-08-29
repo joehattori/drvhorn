@@ -113,4 +113,13 @@ llvm::SmallVector<llvm::GlobalVariable *> getKobjects(llvm::Module &m) {
   }
   return res;
 }
+
+llvm::Function *getOrCreateNdBool(llvm::Module &m) {
+  if (llvm::Function *f = m.getFunction("nd_bool"))
+    return f;
+  llvm::FunctionType *ft =
+      llvm::FunctionType::get(llvm::Type::getInt1Ty(m.getContext()), false);
+  return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "nd_bool",
+                                &m);
+}
 } // namespace seahorn
