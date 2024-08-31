@@ -113,19 +113,45 @@ private:
   deviceGetter(Module &m, CallInst *call,
                DenseMap<StructType *, Function *> &structTypeReplacer) {
     Value *arg = call->getArgOperand(0);
+    LLVMContext &ctx = m.getContext();
     for (Value *clsOrBusPtr : getClassOrBusPtrs(arg->stripPointerCasts())) {
-      if (StructType *t = getSurroundingDeviceType(clsOrBusPtr)) {
-        if (structTypeReplacer.count(t))
-          return structTypeReplacer[t];
-        Optional<size_t> devIndex = getEmbeddedDeviceIndex(t);
-        if (!devIndex.hasValue()) {
-          errs() << "surroundingDevType " << *t << " does not embed a device\n";
-          std::exit(1);
-        }
-        Function *f = embeddedDeviceGetter(m, t, *devIndex);
-        structTypeReplacer[t] = f;
-        return f;
+      GlobalVariable *gv = nullptr;
+      if (LoadInst *load = dyn_cast<LoadInst>(clsOrBusPtr)) {
+        gv = dyn_cast<GlobalVariable>(load->getPointerOperand());
+      } else {
+        gv = dyn_cast<GlobalVariable>(clsOrBusPtr);
       }
+      if (!gv) {
+        errs() << "unhandled class or bus pointer: " << *clsOrBusPtr << '\n';
+        std::exit(1);
+      }
+      StructType *t = nullptr;
+      if (gv->getName().equals("mdio_bus_class")) {
+        t = StructType::getTypeByName(ctx, "struct.mii_bus");
+      } else if (gv->getName().equals("power_supply_class")) {
+        t = StructType::getTypeByName(ctx, "struct.power_supply");
+      } else if (gv->getName().equals("net_class")) {
+        t = StructType::getTypeByName(ctx, "struct.net_device");
+      } else if (gv->getName().equals("mdio_bus_type")) {
+        t = StructType::getTypeByName(ctx, "struct.phy_device");
+      } else if (gv->getName().equals("platform_bus_type")) {
+        t = StructType::getTypeByName(ctx, "struct.platform_device");
+      } else if (gv->getName().equals("acpi_bus_type")) {
+        t = StructType::getTypeByName(ctx, "struct.acpi_device");
+      } else {
+        errs() << "unknown class or bus " << *gv << '\n';
+        std::exit(1);
+      }
+      if (structTypeReplacer.count(t))
+        return structTypeReplacer[t];
+      Optional<SmallVector<size_t>> devIndices = getEmbeddedDeviceIndices(t);
+      if (!devIndices.hasValue()) {
+        errs() << "surroundingDevType " << *t << " does not embed a device\n";
+        std::exit(1);
+      }
+      Function *f = embeddedDeviceGetter(m, t, *devIndices);
+      structTypeReplacer[t] = f;
+      return f;
     }
     return nullptr;
   }
@@ -146,59 +172,11 @@ private:
     return {};
   }
 
-  StructType *getSurroundingDeviceType(Value *clsOrBusPtr) {
-    auto findSurroundingDeviceType = [](Value *dest) -> StructType * {
-      GEPOperator *gep = dyn_cast<GEPOperator>(dest);
-      if (!gep)
-        return nullptr;
-      Type *i8Type = Type::getInt8Ty(dest->getContext());
-      if (gep->getSourceElementType() != i8Type) {
-        StructType *t = dyn_cast<StructType>(gep->getSourceElementType());
-        return t && getEmbeddedDeviceIndex(t).hasValue() ? t : nullptr;
-      }
-      // kmalloc'ed type
-      CallInst *call = dyn_cast<CallInst>(gep->getPointerOperand());
-      if (!call ||
-          !call->getCalledFunction()->getName().equals("__DRVHORN___kmalloc"))
-        return nullptr;
-      for (User *user : call->users()) {
-        if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(user)) {
-          StructType *casted = dyn_cast<StructType>(
-              bitcast->getDestTy()->getPointerElementType());
-          if (casted && getEmbeddedDeviceIndex(casted).hasValue())
-            return casted;
-        }
-      }
-      return nullptr;
-    };
-
-    // struct.class is stored in the class field of struct.device.
-    for (StoreInst *store : getStores(clsOrBusPtr)) {
-      Value *dest = store->getPointerOperand()->stripPointerCasts();
-      if (StructType *ret = findSurroundingDeviceType(dest))
-        return ret;
-    }
-    return nullptr;
-  }
-
-  SmallVector<StoreInst *> getStores(Value *ptr) {
-    SmallVector<StoreInst *, 8> stores;
-    for (User *user : ptr->users()) {
-      if (isa<BitCastOperator>(user))
-        stores.append(getStores(user));
-      if (StoreInst *store = dyn_cast<StoreInst>(user))
-        stores.push_back(store);
-    }
-    return stores;
-  }
-
   Function *embeddedDeviceGetter(Module &m, StructType *surroundingDevType,
-                                 size_t devIndex) {
+                                 SmallVector<size_t> devIndices) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Type = Type::getInt32Ty(ctx);
     IntegerType *i64Type = Type::getInt64Ty(ctx);
-    PointerType *devPtrType =
-        surroundingDevType->getElementType(devIndex)->getPointerTo();
     PointerType *kobjPtrType =
         StructType::getTypeByName(ctx, "struct.kobject")->getPointerTo();
 
@@ -220,6 +198,13 @@ private:
     GlobalVariable *kobj = new GlobalVariable(
         m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
         ConstantPointerNull::get(kobjPtrType), "drvhorn.kobject." + suffix);
+
+    StructType *curType = surroundingDevType;
+    for (size_t i : devIndices) {
+      curType = cast<StructType>(curType->getElementType(i));
+    }
+    PointerType *devPtrType = curType->getPointerTo();
+
     Function *getter = Function::Create(
         FunctionType::get(devPtrType, false),
         GlobalValue::LinkageTypes::ExternalLinkage, funcName, &m);
@@ -240,9 +225,14 @@ private:
     Value *surroundingDevPtr = b.CreateGEP(
         storageType, storage, {ConstantInt::get(i64Type, 0), newCount});
     b.CreateStore(newCount, counter);
-    Value *devPtr = b.CreateGEP(
-        surroundingDevType, surroundingDevPtr,
-        {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, devIndex)});
+
+    SmallVector<Value *> gepIndices(devIndices.size() + 1);
+    gepIndices[0] = ConstantInt::get(i64Type, 0);
+    for (size_t i = 0; i < devIndices.size(); i++) {
+      gepIndices[i + 1] = ConstantInt::get(i32Type, devIndices[i]);
+    }
+    Value *devPtr =
+        b.CreateGEP(surroundingDevType, surroundingDevPtr, gepIndices);
     callWithNecessaryBitCast(m.getFunction("__DRVHORN_setup_device"),
                              {devPtr, kobj}, b);
     callWithNecessaryBitCast(m.getFunction("get_device"), {devPtr}, b);
@@ -265,18 +255,6 @@ private:
       }
     }
     return b.CreateCall(f, args);
-  }
-
-  CallInst *getCallInst(User *user) {
-    if (isa<Instruction>(user)) {
-      return dyn_cast<CallInst>(user);
-    } else {
-      for (User *u : user->users()) {
-        if (CallInst *call = getCallInst(u))
-          return call;
-      }
-      return nullptr;
-    }
   }
 
   void stubSomeOfFunctions(Module &m) {
@@ -321,6 +299,34 @@ private:
       call->dropAllReferences();
       call->eraseFromParent();
     }
+  }
+
+  Optional<SmallVector<size_t>> getEmbeddedDeviceIndices(const StructType *s) {
+    Optional<SmallVector<size_t>> indices = getEmbeddedDeviceReversedIndices(s);
+    if (!indices.hasValue())
+      return None;
+    std::reverse(indices->begin(), indices->end());
+    return indices;
+  }
+
+  Optional<SmallVector<size_t>>
+  getEmbeddedDeviceReversedIndices(const StructType *s) {
+    const StructType *deviceType =
+        StructType::getTypeByName(s->getContext(), "struct.device");
+    for (size_t i = 0; i < s->getNumElements(); i++) {
+      const Type *elemType = s->getElementType(i);
+      if (equivTypes(elemType, deviceType))
+        return SmallVector<size_t>{i};
+      if (const StructType *sTy = dyn_cast<StructType>(elemType)) {
+        Optional<SmallVector<size_t>> indices =
+            getEmbeddedDeviceReversedIndices(sTy);
+        if (indices.hasValue()) {
+          indices->push_back(i);
+          return indices;
+        }
+      }
+    }
+    return None;
   }
 };
 

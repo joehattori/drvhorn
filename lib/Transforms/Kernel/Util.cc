@@ -92,16 +92,6 @@ getCalls(const llvm::Function *fn) {
   return res;
 }
 
-llvm::Optional<size_t> getEmbeddedDeviceIndex(const llvm::StructType *s) {
-  const llvm::StructType *deviceType =
-      llvm::StructType::getTypeByName(s->getContext(), "struct.device");
-  for (size_t i = 0; i < s->getNumElements(); i++) {
-    if (equivTypes(s->getElementType(i), deviceType))
-      return i;
-  }
-  return llvm::None;
-}
-
 llvm::SmallVector<llvm::GlobalVariable *> getKobjects(llvm::Module &m) {
   llvm::SmallVector<llvm::GlobalVariable *> res;
   if (llvm::GlobalVariable *g = m.getGlobalVariable("device_node_kobject")) {
