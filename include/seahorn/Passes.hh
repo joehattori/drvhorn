@@ -124,6 +124,7 @@ llvm::Pass *createSlimDownPass();
 llvm::Pass *createHandleNondetMallocPass();
 llvm::Pass *createIntoBinaryPass();
 llvm::Pass *createAssumeNonNullPass();
+llvm::Pass *createDsaSwitchOpsPass(llvm::StringRef dsaSwitchOpsName);
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

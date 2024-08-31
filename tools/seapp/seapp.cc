@@ -308,6 +308,10 @@ static llvm::cl::opt<std::string>
     FileOperation("file-operations", llvm::cl::desc("Target File Operations"),
                   llvm::cl::init(""));
 
+static llvm::cl::opt<std::string>
+    DsaSwitchOps("dsa-switch-ops", llvm::cl::desc("Target DSA Switch Ops"),
+                   llvm::cl::init(""));
+
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
   std::string filename = str;
@@ -416,6 +420,7 @@ int main(int argc, char **argv) {
   llvm::initializeSeaAnnotation2MetadataLegacyPass(Registry);
 
   llvm::initializeRemovePtrToIntPass(Registry);
+  seahorn::initializeShadowMemPassPass(Registry);
 
   // add an appropriate DataLayout instance for the module
   const llvm::DataLayout *dl = &module->getDataLayout();
@@ -442,6 +447,8 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createFileOperationsSetupPass(FileOperation));
     } else if (!PlatformDriver.empty()) {
       pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
+    } else if (!DsaSwitchOps.empty()) {
+      pm_wrapper.add(seahorn::createDsaSwitchOpsPass(DsaSwitchOps));
     }
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
@@ -736,13 +743,6 @@ int main(int argc, char **argv) {
     // AG: Dangerous. Promotes verifier.assume() to llvm.assume()
     if (PromoteAssumptions)
       pm_wrapper.add(seahorn::createPromoteSeahornAssumePass());
-  }
-
-  if (Kernel) {
-    pm_wrapper.add(seahorn::createRemoveUnnecessaryStoresPass());
-    pm_wrapper.add(llvm::createAggressiveDCEPass());
-    pm_wrapper.add(llvm::createCFGSimplificationPass());
-    /*pm_wrapper.add(seahorn::createKernelDebugPass());*/
   }
 
   if (NameValues)
