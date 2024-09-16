@@ -6,8 +6,6 @@
 
 #include "seahorn/Transforms/Kernel/Util.hh"
 
-#define STORAGE_LIMIT 0x10000
-
 using namespace llvm;
 
 namespace seahorn {
@@ -173,31 +171,19 @@ private:
   }
 
   Function *embeddedDeviceGetter(Module &m, StructType *surroundingDevType,
-                                 SmallVector<size_t> devIndices) {
+                                 ArrayRef<size_t> devIndices) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Type = Type::getInt32Ty(ctx);
     IntegerType *i64Type = Type::getInt64Ty(ctx);
-    PointerType *kobjPtrType =
-        StructType::getTypeByName(ctx, "struct.kobject")->getPointerTo();
+    PointerType *krefPtrType =
+        StructType::getTypeByName(ctx, "struct.kref")->getPointerTo();
 
     std::string suffix = surroundingDevType->getName().str();
     std::string funcName = "__DRVHORN_embedded_device.getter." + suffix;
 
-    ArrayType *storageType = ArrayType::get(surroundingDevType, STORAGE_LIMIT);
-    Constant *storageContent[STORAGE_LIMIT];
-    for (size_t i = 0; i < STORAGE_LIMIT; i++) {
-      storageContent[i] = Constant::getNullValue(surroundingDevType);
-    }
-    GlobalVariable *storage = new GlobalVariable(
-        m, storageType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantArray::get(storageType, storageContent), funcName + ".storage");
-
-    GlobalVariable *counter = new GlobalVariable(
-        m, i64Type, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantInt::get(i64Type, 0), funcName + ".counter");
-    GlobalVariable *kobj = new GlobalVariable(
-        m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(kobjPtrType), "drvhorn.kobject." + suffix);
+    GlobalVariable *kref = new GlobalVariable(
+        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantPointerNull::get(krefPtrType), "drvhorn.kref." + suffix);
 
     StructType *curType = surroundingDevType;
     for (size_t i : devIndices) {
@@ -214,18 +200,10 @@ private:
 
     IRBuilder<> b(entry);
     Value *ndCond = b.CreateCall(m.getFunction("nd_bool"));
-    Value *curCount = b.CreateLoad(i64Type, counter);
-    Value *limit =
-        b.CreateICmpSGE(curCount, ConstantInt::get(i64Type, STORAGE_LIMIT));
-    Value *cond = b.CreateOr(ndCond, limit);
-    b.CreateCondBr(cond, body, ret);
+    b.CreateCondBr(ndCond, body, ret);
 
     b.SetInsertPoint(body);
-    Value *newCount = b.CreateAdd(curCount, ConstantInt::get(i64Type, 1));
-    Value *surroundingDevPtr = b.CreateGEP(
-        storageType, storage, {ConstantInt::get(i64Type, 0), newCount});
-    b.CreateStore(newCount, counter);
-
+    Value *surroundingDevPtr = b.CreateAlloca(surroundingDevType);
     SmallVector<Value *> gepIndices(devIndices.size() + 1);
     gepIndices[0] = ConstantInt::get(i64Type, 0);
     for (size_t i = 0; i < devIndices.size(); i++) {
@@ -234,7 +212,7 @@ private:
     Value *devPtr =
         b.CreateGEP(surroundingDevType, surroundingDevPtr, gepIndices);
     callWithNecessaryBitCast(m.getFunction("__DRVHORN_setup_device"),
-                             {devPtr, kobj}, b);
+                             {devPtr, kref}, b);
     callWithNecessaryBitCast(m.getFunction("get_device"), {devPtr}, b);
     b.CreateBr(ret);
 

@@ -12,7 +12,7 @@ using namespace llvm;
 namespace seahorn {
 
 static unsigned iPrivateGEPIndex = 41;
-static unsigned fileOpOpenIndex = 14;
+static unsigned fileOpOpenIndex = 13;
 
 class FileOperations : public ModulePass {
 public:
@@ -23,6 +23,8 @@ public:
   bool runOnModule(Module &m) override {
     Function *open = getOpenFunc(m);
     if (!open) {
+      errs() << "No open function found for struct file_operations "
+             << fileOpName << "\n";
       return false;
     }
     constructMain(m, open);
@@ -91,23 +93,23 @@ private:
 
   void callSetupDevice(Module &m, IRBuilder<> &b, Value *devicePtr) {
     Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
-    PointerType *kobjPtrType =
-        StructType::getTypeByName(m.getContext(), "struct.kobject")
+    PointerType *krefPtrType =
+        StructType::getTypeByName(m.getContext(), "struct.kref")
             ->getPointerTo();
-    Value *kobj = new GlobalVariable(
-        m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(kobjPtrType), "drvhorn.kobject.struct.device");
+    Value *kref = new GlobalVariable(
+        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantPointerNull::get(krefPtrType), "drvhorn.kref.struct.device");
     if (setupDevice->getArg(0)->getType() != devicePtr->getType())
       devicePtr = b.CreateBitCast(devicePtr, setupDevice->getArg(0)->getType());
-    if (setupDevice->getArg(1)->getType() != kobj->getType())
-      kobj = b.CreateBitCast(kobj, setupDevice->getArg(1)->getType());
-    b.CreateCall(setupDevice, {devicePtr, kobj});
+    if (setupDevice->getArg(1)->getType() != kref->getType())
+      kref = b.CreateBitCast(kref, setupDevice->getArg(1)->getType());
+    b.CreateCall(setupDevice, {devicePtr, kref});
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("__DRVHORN_assert_kobject");
-    for (GlobalVariable *g : getKobjects(m)) {
+    Function *checker = m.getFunction("__DRVHORN_assert_kref");
+    for (GlobalVariable *g : getKrefs(m)) {
       Value *v = b.CreateLoad(g->getValueType(), g);
       if (v->getType() != checker->getArg(0)->getType())
         v = b.CreateBitCast(v, checker->getArg(0)->getType());

@@ -12,6 +12,7 @@
 extern _Bool nd_bool();
 extern char nd_char();
 extern int nd_int();
+extern unsigned nd_uint();
 extern size_t nd_size();
 extern void __VERIFIER_error(void);
 extern void __VERIFIER_assume(int);
@@ -54,6 +55,11 @@ __DRVHORN___kmalloc_node_track_caller(unsigned long size, unsigned flags,
 
 void *__attribute__((always_inline))
 __DRVHORN_kmalloc_large(unsigned long size, unsigned flags) {
+  return __DRVHORN_malloc(size, flags);
+}
+
+void *__attribute__((always_inline))
+__DRVHORN_kmalloc_trace(struct kmem_cache *s, unsigned int flags, unsigned long size) {
   return __DRVHORN_malloc(size, flags);
 }
 
@@ -149,32 +155,33 @@ u32 __DRVHORN_util_read_u32(u8 *addr) { return *(u32 *)addr; }
 u16 __DRVHORN_util_read_u16(u8 *addr) { return *(u16 *)addr; }
 u8 __DRVHORN_util_read_u8(u8 *addr) { return *addr; }
 
-static int __DRVHORN_util_get_kobject_count(const struct kobject *kobj) {
-  return kobj->kref.refcount.refs.counter;
+static int __DRVHORN_util_get_kref_count(const struct kref *kref) {
+  return kref->refcount.refs.counter;
 }
 
-static void __DRVHORN_kobject_release(struct kobject *kobj) {}
+static void __DRVHORN_kref_release(struct kref *kref) {}
 struct kobj_type __DRVHORN_ktype = {
-    .release = __DRVHORN_kobject_release,
+    .release = __DRVHORN_kref_release,
 };
 
-struct kobject *device_node_kobject;
-
-#define LIMIT 0x10000
-static struct device_node *__DRVHORN_create_device_node(void) {
-  static unsigned counter = 0;
+#define LIMIT 0x100
+struct kref *__DRVHORN_kref_device_node;
+struct device_node *__DRVHORN_create_device_node(void) {
+  static unsigned count = 0;
   static struct device_node storage[LIMIT];
 
-  if (nd_bool() || counter >= LIMIT)
+  if (count >= LIMIT)
     return NULL;
-  struct device_node *dn = &storage[counter++];
-  kobject_init(&dn->kobj, &__DRVHORN_ktype);
+  struct device_node *ret = &storage[count++];
+  ret->kobj.kref.refcount.refs.counter = 1;
   if (nd_bool()) {
-    device_node_kobject = &dn->kobj;
+    __DRVHORN_kref_device_node = &ret->kobj.kref;
   }
-  return dn;
+  return ret;
 }
 
+// defined in Deivce.cc
+// extern struct device_node *__DRVHORN_create_device_node(void);
 struct device_node *__DRVHORN_of_get_next_child(const struct device_node *node, struct device_node *prev) {
   if (!node) {
     return NULL;
@@ -192,17 +199,17 @@ struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
   return dn;
 }
 
-void __DRVHORN_setup_device(struct device *dev, struct kobject **global_kobj) {
-  kobject_init(&dev->kobj, &__DRVHORN_ktype);
+void __DRVHORN_setup_device(struct device *dev, struct kref **global_kref) {
+  dev->kobj.kref.refcount.refs.counter = 1;
   if (nd_bool()) {
-    *global_kobj = &dev->kobj;
+    *global_kref = &dev->kobj.kref;
   }
   // dev->of_node = __DRVHORN_create_device_node();
 }
 
-void __DRVHORN_assert_kobject(const struct kobject *kobj) {
-  if (kobj) {
-    int counter = __DRVHORN_util_get_kobject_count(kobj);
+void __DRVHORN_assert_kref(const struct kref *kref) {
+  if (kref) {
+    int counter = __DRVHORN_util_get_kref_count(kref);
     sassert(counter == 1);
   }
 }

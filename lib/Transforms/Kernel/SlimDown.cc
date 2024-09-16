@@ -1,8 +1,5 @@
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
@@ -29,8 +26,6 @@ namespace seahorn {
 
 struct Visitor : public InstVisitor<Visitor, bool> {
 public:
-  Visitor(ModulePass *pass) : pass(pass) {}
-
   bool isTarget(const Instruction *inst) const { return targets.count(inst); }
 
   void visitModule(Module &m) {
@@ -56,8 +51,6 @@ public:
     }
     for (Argument &arg : f->args()) {
       if (targetArgs.count(&arg)) {
-        Value *argVal = call.getArgOperand(arg.getArgNo());
-        acceptValue(argVal);
         isTarget = true;
       }
     }
@@ -72,11 +65,38 @@ public:
     bool isTarget = false;
     if (visitValue(load.getPointerOperand())) {
       isTarget = true;
-      trackStores(&load);
-    }
-    if (isTarget)
       targets.insert(&load);
+    }
     cache[&load] = isTarget;
+    return isTarget;
+  }
+
+  bool visitStoreInst(StoreInst &store) {
+    Value *v = getUnderlyingObject(store.getPointerOperand());
+    DenseSet<Value *> visited;
+    SmallVector<Value *> workList;
+    workList.push_back(v);
+    visited.insert(v);
+
+    bool isTarget = false;
+    while (!workList.empty()) {
+      Value *v = workList.back();
+      workList.pop_back();
+      if (visitValue(v)) {
+        isTarget = true;
+        break;
+      }
+      if (LoadInst *load = dyn_cast<LoadInst>(v)) {
+        Value *nxt = getUnderlyingObject(load->getPointerOperand());
+        if (visited.insert(nxt).second) {
+          workList.push_back(nxt);
+        }
+      }
+    }
+
+    if (isTarget)
+      targets.insert(&store);
+    cache[&store] = isTarget;
     return isTarget;
   }
 
@@ -116,7 +136,6 @@ private:
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
   DenseSet<const Instruction *> targets;
-  ModulePass *pass;
 
   bool visitValue(Value *v) {
     if (Argument *arg = dyn_cast<Argument>(v))
@@ -141,64 +160,6 @@ private:
     } else {
       errs() << "TODO: isValueTarget " << *v << '\n';
       std::exit(1);
-    }
-  }
-
-  void trackStores(LoadInst *load) {
-    Function *f = load->getFunction();
-    AAResults &aa = pass->getAnalysis<AAResultsWrapperPass>(*f).getAAResults();
-    DominatorTree dt(*f);
-    MemorySSA mssa(*f, &aa, &dt);
-    DenseSet<MemoryAccess *> visited;
-    std::queue<MemoryAccess *> workList;
-
-    workList.push(mssa.getMemoryAccess(load));
-    while (!workList.empty()) {
-      MemoryAccess *access = workList.front();
-      workList.pop();
-      if (!visited.insert(access).second)
-        continue;
-      if (MemoryUse *use = dyn_cast<MemoryUse>(access)) {
-        workList.push(use->getOptimized());
-      } else if (MemoryDef *def = dyn_cast<MemoryDef>(access)) {
-        if (StoreInst *store =
-                dyn_cast_or_null<StoreInst>(def->getMemoryInst())) {
-          targets.insert(store);
-        }
-      } else {
-        MemoryPhi *phi = cast<MemoryPhi>(access);
-        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
-          workList.push(phi->getIncomingValue(i));
-        }
-      }
-    }
-  }
-
-  void acceptValue(Value *v) {
-    DenseSet<Value *> visited;
-    std::queue<Value *> workList;
-    workList.push(v);
-    while (!workList.empty()) {
-      Value *v = workList.front();
-      workList.pop();
-      if (!visited.insert(v).second)
-        continue;
-      cache[v] = true;
-      if (Instruction *inst = dyn_cast<Instruction>(v)) {
-        if (!isa<CallInst>(inst)) {
-          if (LoadInst *load = dyn_cast<LoadInst>(inst)) {
-            trackStores(load);
-          }
-          targets.insert(inst);
-          for (Value *v : inst->operands()) {
-            workList.push(v);
-          }
-        }
-      } else if (Operator *op = dyn_cast<Operator>(v)) {
-        for (Value *v : op->operands()) {
-          workList.push(v);
-        }
-      }
     }
   }
 
@@ -237,9 +198,9 @@ private:
 
   DenseSet<const CallInst *> getKobjCalls(const Module &m) {
     StringRef fnNames[] = {
-        "kobject_init",
-        "kobject_get",
-        "kobject_put",
+        "drvhorn.kref_init",
+        "drvhorn.kref_get",
+        "drvhorn.kref_put",
     };
     DenseSet<const CallInst *> calls;
     for (StringRef name : fnNames) {
@@ -347,7 +308,6 @@ public:
 
   void getAnalysisUsage(AnalysisUsage &au) const override {
     au.addRequired<seahorn::SeaBuiltinsInfoWrapperPass>();
-    au.addRequired<AAResultsWrapperPass>();
     au.setPreservesAll();
   }
 
@@ -441,36 +401,19 @@ private:
 
   Value *getReplacement(Instruction *inst,
                         DenseMap<const Type *, Function *> &ndvalfn) {
-    if (CallInst *call = dyn_cast<CallInst>(inst)) {
-      if (Function *f = extractCalledFunction(call)) {
-        if (f->getName().equals("devm_kmalloc")) {
-          Type *i8Type = Type::getInt8Ty(inst->getContext());
-          uint64_t size = 1024;
-          if (ConstantInt *arg =
-                  dyn_cast<ConstantInt>(call->getArgOperand(1))) {
-            size = arg->getZExtValue();
-          }
-          ArrayType *arrType = ArrayType::get(i8Type, size);
-          AllocaInst *alloca = new AllocaInst(arrType, 0, "", inst);
-          return new BitCastInst(alloca, i8Type->getPointerTo(), "", inst);
-        }
-      }
-    }
     Instruction *insertPoint =
         isa<PHINode>(inst) ? inst->getParent()->getFirstNonPHI() : inst;
     return nondetValue(inst->getType(), insertPoint, ndvalfn);
   }
 
   void slimDownOnlyReachables(Module &m) {
-    Visitor visitor(this);
+    Visitor visitor;
     visitor.visit(m);
     DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;
     for (Function &f : m) {
       // we keep these functions still.
-      if (f.getName().equals("main") || f.getName().equals("kobject_get") ||
-          f.getName().equals("kobject_put") ||
-          f.getName().equals("kobject_init") ||
+      if (f.getName().equals("main") || f.getName().startswith("drvhorn.") ||
           f.getName().startswith("__DRVHORN_") || f.isDeclaration())
         continue;
       SmallVector<Instruction *> retained;
@@ -508,9 +451,7 @@ private:
 
   void removeNotCalledFunctions(Module &m) {
     for (Function &f : m) {
-      if (f.getName().equals("main"))
-        continue;
-      if (getCalls(&f).empty())
+      if (!f.getName().equals("main") && getCalls(&f).empty())
         f.deleteBody();
     }
   }

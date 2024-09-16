@@ -69,12 +69,15 @@ private:
     Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
     Type *pdevType = pdev->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
-    PointerType *kobjPtrType =
-        StructType::getTypeByName(ctx, "struct.kobject")->getPointerTo();
-    Value *kobj = new GlobalVariable(m, kobjPtrType, false,
-                                     GlobalValue::LinkageTypes::PrivateLinkage,
-                                     ConstantPointerNull::get(kobjPtrType),
-                                     "drvhorn.kobject.struct.platform_device");
+    PointerType *krefPtrType =
+        StructType::getTypeByName(ctx, "struct.kref")->getPointerTo();
+    StringRef kobjName = "drvhorn.kref.struct.platform_device";
+    Value *kobj = m.getGlobalVariable(kobjName, true);
+    if (!kobj) {
+      kobj = new GlobalVariable(
+          m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+          ConstantPointerNull::get(krefPtrType), kobjName);
+    }
     Type *i32Type = Type::getInt32Ty(ctx);
     Type *i64Type = Type::getInt64Ty(ctx);
     Constant *zero = ConstantInt::get(i64Type, 0);
@@ -89,8 +92,8 @@ private:
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("__DRVHORN_assert_kobject");
-    for (GlobalVariable *g : getKobjects(m)) {
+    Function *checker = m.getFunction("__DRVHORN_assert_kref");
+    for (GlobalVariable *g : getKrefs(m)) {
       Value *v = b.CreateLoad(g->getValueType(), g);
       if (v->getType() != checker->getArg(0)->getType())
         v = b.CreateBitCast(v, checker->getArg(0)->getType());

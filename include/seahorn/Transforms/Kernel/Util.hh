@@ -12,6 +12,6 @@ llvm::Function *extractCalledFunction(llvm::CallInst &call);
 llvm::SmallVector<llvm::CallInst *, 16> getCalls(llvm::Function *fn);
 llvm::SmallVector<const llvm::CallInst *, 16>
 getCalls(const llvm::Function *fn);
-llvm::SmallVector<llvm::GlobalVariable *> getKobjects(llvm::Module &m);
+llvm::SmallVector<llvm::GlobalVariable *> getKrefs(llvm::Module &m);
 llvm::Function *getOrCreateNdBool(llvm::Module &m);
 } // namespace seahorn

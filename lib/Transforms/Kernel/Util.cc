@@ -92,13 +92,12 @@ getCalls(const llvm::Function *fn) {
   return res;
 }
 
-llvm::SmallVector<llvm::GlobalVariable *> getKobjects(llvm::Module &m) {
+llvm::SmallVector<llvm::GlobalVariable *> getKrefs(llvm::Module &m) {
   llvm::SmallVector<llvm::GlobalVariable *> res;
-  if (llvm::GlobalVariable *g = m.getGlobalVariable("device_node_kobject")) {
+  if (llvm::GlobalVariable *g = m.getGlobalVariable("__DRVHORN_kref_device_node"))
     res.push_back(g);
-  }
   for (llvm::GlobalVariable &g : m.globals()) {
-    if (g.getName().startswith("drvhorn.kobject."))
+    if (g.getName().startswith("drvhorn.kref."))
       res.push_back(&g);
   }
   return res;

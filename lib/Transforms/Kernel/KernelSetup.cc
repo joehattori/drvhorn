@@ -4,6 +4,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Pass.h"
@@ -253,10 +254,12 @@ public:
   bool runOnModule(Module &m) override {
     stubKernelFunctions(m);
     stubAllocPages(m);
-    handleKobjAPIs(m);
+    stubDevmKmalloc(m);
+    handleKrefAPIs(m);
     handleFree(m);
     handleKmemCache(m);
     ignoreKernelFunctions(m);
+    stubDeviceRegistrations(m);
 
     handleCallRcu(m);
 
@@ -281,6 +284,7 @@ private:
                                "__kmalloc_node",
                                "__kmalloc_node_track_caller",
                                "kmalloc_large",
+                               "kmalloc_trace",
                                "kmalloc_large_node",
                                "__vmalloc_node_range",
                                "slob_alloc",
@@ -338,99 +342,116 @@ private:
     }
   }
 
-  void handleKobjAPIs(Module &m) {
+  void stubDevmKmalloc(Module &m) {
+    Function *f = m.getFunction("devm_kmalloc");
+    SmallVector<CallInst *> toRemove;
+    Function *mallocFn = m.getFunction("malloc");
+    for (CallInst *call : getCalls(f)) {
+      CallInst *malloc = CallInst::Create(mallocFn, {call->getArgOperand(1)},
+                                          "devm_kmalloc", call);
+      call->replaceAllUsesWith(malloc);
+      call->eraseFromParent();
+      toRemove.push_back(call);
+    }
+  }
+
+  Function *buildKrefInit(Module &m) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    StructType *krefTy = StructType::getTypeByName(ctx, "struct.kref");
+    FunctionType *krefInitTy = FunctionType::get(
+        Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
+    Function *krefInit =
+        Function::Create(krefInitTy, GlobalValue::LinkageTypes::InternalLinkage,
+                         "drvhorn.kref_init", &m);
+    BasicBlock *block = BasicBlock::Create(ctx, "", krefInit);
+    IRBuilder<> b(block);
+    Value *gep =
+        b.CreateGEP(krefTy, krefInit->getArg(0),
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+                     ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    b.CreateStore(ConstantInt::get(i32Ty, 1), gep);
+    b.CreateRetVoid();
 
-    {
-      Function *kobjInit = m.getFunction("kobject_init");
-      kobjInit->setName("kobject_init.old");
-      Function *newKobjInit = Function::Create(
-          kobjInit->getFunctionType(),
-          GlobalValue::LinkageTypes::InternalLinkage, "kobject_init", &m);
-      BasicBlock *block = BasicBlock::Create(ctx, "", newKobjInit);
-      IRBuilder<> b(block);
-      Argument *kobj = newKobjInit->getArg(0);
-      PointerType *kobjPtrTy = cast<PointerType>(kobj->getType());
-      Value *gep =
-          b.CreateGEP(kobjPtrTy->getPointerElementType(), kobj,
-                      {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 6),
-                       ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0),
-                       ConstantInt::get(i32Ty, 0)});
-      b.CreateStore(ConstantInt::get(i32Ty, 1), gep);
-      b.CreateRetVoid();
+    return krefInit;
+  }
 
-      kobjInit->replaceAllUsesWith(newKobjInit);
-      kobjInit->eraseFromParent();
-    }
+  Function *buildKrefGet(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    StructType *krefTy = StructType::getTypeByName(ctx, "struct.kref");
+    FunctionType *krefGetTy = FunctionType::get(
+        Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
+    Function *krefGet =
+        Function::Create(krefGetTy, GlobalValue::LinkageTypes::InternalLinkage,
+                         "drvhorn.kref_get", &m);
+    BasicBlock *block = BasicBlock::Create(ctx, "", krefGet);
+    IRBuilder<> b(block);
+    Value *gep =
+        b.CreateGEP(krefTy, krefGet->getArg(0),
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+                     ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    LoadInst *load = b.CreateLoad(i32Ty, gep);
+    Value *add = b.CreateAdd(load, ConstantInt::get(i32Ty, 1));
+    b.CreateStore(add, gep);
+    b.CreateRetVoid();
+    return krefGet;
+  }
 
-    {
-      Function *kobjGet = m.getFunction("kobject_get");
-      kobjGet->setName("koject_get.old");
-      Function *newKobjGet = Function::Create(
-          kobjGet->getFunctionType(),
-          GlobalValue::LinkageTypes::InternalLinkage, "kobject_get", &m);
-      BasicBlock *entry = BasicBlock::Create(ctx, "", newKobjGet);
-      BasicBlock *mid = BasicBlock::Create(ctx, "", newKobjGet);
-      BasicBlock *ret = BasicBlock::Create(ctx, "", newKobjGet);
+  Function *buildKrefPut(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    StructType *krefTy = StructType::getTypeByName(ctx, "struct.kref");
+    FunctionType *krefPutTy =
+        FunctionType::get(i32Ty, {krefTy->getPointerTo()}, false);
+    Function *krefPut =
+        Function::Create(krefPutTy, GlobalValue::LinkageTypes::InternalLinkage,
+                         "drvhorn.kref_put", &m);
+    BasicBlock *block = BasicBlock::Create(ctx, "", krefPut);
 
-      Argument *kobj = newKobjGet->getArg(0);
-      PointerType *kobjPtrTy = cast<PointerType>(kobj->getType());
-      IRBuilder<> b(entry);
-      Value *cond = b.CreateICmpEQ(kobj, ConstantPointerNull::get(kobjPtrTy));
-      b.CreateCondBr(cond, ret, mid);
+    IRBuilder<> b(block);
+    Value *gep =
+        b.CreateGEP(krefTy, krefPut->getArg(0),
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+                     ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    LoadInst *load = b.CreateLoad(i32Ty, gep);
+    Value *sub = b.CreateSub(load, ConstantInt::get(i32Ty, 1));
+    b.CreateStore(sub, gep);
+    Value *isZero = b.CreateICmpEQ(sub, ConstantInt::get(i32Ty, 0));
+    Value *ret = b.CreateZExt(isZero, i32Ty);
+    b.CreateRet(ret);
+    return krefPut;
+  }
 
-      b.SetInsertPoint(mid);
-      Value *gep =
-          b.CreateGEP(kobjPtrTy->getPointerElementType(), kobj,
-                      {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 6),
-                       ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0),
-                       ConstantInt::get(i32Ty, 0)});
-      LoadInst *load = b.CreateLoad(i32Ty, gep);
-      Value *add = b.CreateAdd(load, ConstantInt::get(i32Ty, 1));
-      b.CreateStore(add, gep);
-      b.CreateBr(ret);
+  void handleKrefAPIs(Module &m) {
+    Function *krefInit = buildKrefInit(m);
+    Function *krefGet = buildKrefGet(m);
+    Function *krefPut = buildKrefPut(m);
 
-      b.SetInsertPoint(ret);
-      b.CreateRet(kobj);
+    auto replaceCalls = [](Function *orig, Function *newFn) {
+      for (CallInst *call : getCalls(orig)) {
+        Value *arg = call->getArgOperand(0);
+        if (arg->getType() != newFn->getArg(0)->getType()) {
+          arg = new BitCastInst(arg, newFn->getArg(0)->getType(), "", call);
+        }
+        CallInst *newCall = CallInst::Create(newFn, arg, "", call);
+        call->replaceAllUsesWith(newCall);
+        call->eraseFromParent();
+      }
+    };
 
-      kobjGet->replaceAllUsesWith(newKobjGet);
-      kobjGet->eraseFromParent();
-    }
-
-    {
-      Function *kobjPut = m.getFunction("kobject_put");
-      kobjPut->setName("kobject_put.old");
-      Function *newKobjPut = Function::Create(
-          kobjPut->getFunctionType(),
-          GlobalValue::LinkageTypes::InternalLinkage, "kobject_put", &m);
-      BasicBlock *entry = BasicBlock::Create(ctx, "", newKobjPut);
-      BasicBlock *mid = BasicBlock::Create(ctx, "", newKobjPut);
-      BasicBlock *ret = BasicBlock::Create(ctx, "", newKobjPut);
-
-      Argument *kobj = newKobjPut->getArg(0);
-      PointerType *kobjPtrTy = cast<PointerType>(kobj->getType());
-      IRBuilder<> b(entry);
-      Value *cond = b.CreateICmpEQ(kobj, ConstantPointerNull::get(kobjPtrTy));
-      b.CreateCondBr(cond, ret, mid);
-
-      b.SetInsertPoint(mid);
-      Value *gep =
-          b.CreateGEP(kobjPtrTy->getPointerElementType(), kobj,
-                      {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 6),
-                       ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0),
-                       ConstantInt::get(i32Ty, 0)});
-      LoadInst *load = b.CreateLoad(i32Ty, gep);
-      Value *sub = b.CreateSub(load, ConstantInt::get(i32Ty, 1));
-      b.CreateStore(sub, gep);
-      b.CreateBr(ret);
-
-      b.SetInsertPoint(ret);
-      b.CreateRetVoid();
-
-      kobjPut->replaceAllUsesWith(newKobjPut);
-      kobjPut->eraseFromParent();
+    for (Function &f : m) {
+      StringRef name = f.getName();
+      if (name.equals("kref_init") || name.startswith("kref_init.")) {
+        replaceCalls(&f, krefInit);
+      } else if (name.equals("kref_get") || name.startswith("kref_get.")) {
+        replaceCalls(&f, krefGet);
+      } else if (name.equals("kref_put") || name.startswith("kref_put.")) {
+        replaceCalls(&f, krefPut);
+      }
     }
   }
 
@@ -553,6 +574,19 @@ private:
           ft, GlobalValue::LinkageTypes::ExternalLinkage, stubName, &m);
       f->replaceAllUsesWith(stub);
       f->eraseFromParent();
+    }
+  }
+
+  void stubDeviceRegistrations(Module &m) {
+    StringRef names[] = {
+        "__mdiobus_register",
+        "mdiobus_unregister",
+    };
+    for (StringRef name : names) {
+      Function *f = m.getFunction(name);
+      if (!f)
+        return;
+      f->deleteBody();
     }
   }
 

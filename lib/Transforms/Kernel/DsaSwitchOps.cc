@@ -70,7 +70,7 @@ private:
     GlobalVariable *kobj = new GlobalVariable(
         m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
         ConstantPointerNull::get(kobjPtrType),
-        "drvhorn.kobject.struct.dsa_switch");
+        "drvhorn.kref.struct.dsa_switch");
     b.CreateCall(setupDevice, {devPtr, kobj});
     Type *i32Type = Type::getInt32Ty(ctx);
     Type *i64Type = Type::getInt64Ty(ctx);
@@ -84,8 +84,8 @@ private:
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("__DRVHORN_assert_kobject");
-    for (GlobalVariable *g : getKobjects(m)) {
+    Function *checker = m.getFunction("__DRVHORN_assert_kref");
+    for (GlobalVariable *g : getKrefs(m)) {
       Value *v = b.CreateLoad(g->getValueType(), g);
       if (v->getType() != checker->getArg(0)->getType())
         v = b.CreateBitCast(v, checker->getArg(0)->getType());
