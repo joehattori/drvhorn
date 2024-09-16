@@ -88,7 +88,7 @@ private:
   }
 
   Value *allocNullableType(PointerType *type, Module *m, Instruction *before) {
-    Function *malloc = m->getFunction("__DRVHORN_malloc");
+    Function *malloc = m->getFunction("drvhorn.malloc");
     FunctionType *ft =
         FunctionType::get(type, malloc->getArg(0)->getType(), false);
     Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());

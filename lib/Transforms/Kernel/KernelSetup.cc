@@ -271,6 +271,7 @@ public:
     handleStrChr(m);
 
     handleInlineAssembly(m);
+    renameDrvhornFunctions(m);
     return true;
   }
 
@@ -587,6 +588,24 @@ private:
       if (!f)
         return;
       f->deleteBody();
+    }
+  }
+
+  void renameDrvhornFunctions(Module &m) {
+    for (Function &f : m) {
+      if (f.getName().startswith("__DRVHORN_")) {
+        StringRef realName = f.getName().substr(10);
+        std::string newName = "drvhorn." + realName.str();
+        f.setName(newName);
+      }
+    }
+
+    for (GlobalVariable &gv : m.globals()) {
+      if (gv.getName().startswith("__DRVHORN_")) {
+        StringRef realName = gv.getName().substr(10);
+        std::string newName = "drvhorn." + realName.str();
+        gv.setName(newName);
+      }
     }
   }
 

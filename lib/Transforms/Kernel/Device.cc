@@ -40,13 +40,13 @@ private:
         {"of_find_matching_node_and_match", 0},
         {"of_find_node_with_property", 0},
     };
-    Function *getter = m.getFunction("__DRVHORN_get_device_node");
+    Function *getter = m.getFunction("drvhorn.get_device_node");
     for (const std::pair<StringRef, Optional<size_t>> &nameAndIndex :
          namesAndDeviceNodeIndices) {
       Function *f = m.getFunction(nameAndIndex.first);
       if (!f)
         continue;
-      std::string stubName = "__DRVHORN_" + nameAndIndex.first.str();
+      std::string stubName = "drvhorn." + nameAndIndex.first.str();
       Function *stub = Function::Create(
           f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
           stubName, &m);
@@ -94,7 +94,7 @@ private:
 
   void handleChildNodeFinders(Module &m) {
     StringRef names[] = {"of_get_next_child", "of_get_next_available_child"};
-    Function *stub = m.getFunction("__DRVHORN_of_get_next_child");
+    Function *stub = m.getFunction("drvhorn.of_get_next_child");
     for (StringRef name : names) {
       Function *f = m.getFunction(name);
       if (!f)
@@ -173,15 +173,15 @@ private:
   Function *embeddedDeviceGetter(Module &m, StructType *surroundingDevType,
                                  ArrayRef<size_t> devIndices) {
     LLVMContext &ctx = m.getContext();
-    IntegerType *i32Type = Type::getInt32Ty(ctx);
-    IntegerType *i64Type = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
     PointerType *krefPtrType =
         StructType::getTypeByName(ctx, "struct.kref")->getPointerTo();
 
     std::string suffix = surroundingDevType->getName().str();
-    std::string funcName = "__DRVHORN_embedded_device.getter." + suffix;
+    std::string funcName = "drvhorn.embedded_device.getter." + suffix;
 
-    GlobalVariable *kref = new GlobalVariable(
+    GlobalVariable *globalKref = new GlobalVariable(
         m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
         ConstantPointerNull::get(krefPtrType), "drvhorn.kref." + suffix);
 
@@ -205,14 +205,18 @@ private:
     b.SetInsertPoint(body);
     Value *surroundingDevPtr = b.CreateAlloca(surroundingDevType);
     SmallVector<Value *> gepIndices(devIndices.size() + 1);
-    gepIndices[0] = ConstantInt::get(i64Type, 0);
+    gepIndices[0] = ConstantInt::get(i64Ty, 0);
     for (size_t i = 0; i < devIndices.size(); i++) {
-      gepIndices[i + 1] = ConstantInt::get(i32Type, devIndices[i]);
+      gepIndices[i + 1] = ConstantInt::get(i32Ty, devIndices[i]);
     }
     Value *devPtr =
         b.CreateGEP(surroundingDevType, surroundingDevPtr, gepIndices);
-    callWithNecessaryBitCast(m.getFunction("__DRVHORN_setup_device"),
-                             {devPtr, kref}, b);
+    Value *krefPtr =
+        b.CreateGEP(devPtr->getType()->getPointerElementType(), devPtr,
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+                     ConstantInt::get(i32Ty, 6)});
+    callWithNecessaryBitCast(m.getFunction("drvhorn.setup_kref"),
+                             {krefPtr, globalKref}, b);
     callWithNecessaryBitCast(m.getFunction("get_device"), {devPtr}, b);
     b.CreateBr(ret);
 
@@ -243,7 +247,7 @@ private:
       Function *origFn = m.getFunction(name);
       if (!origFn)
         continue;
-      Constant *newFn = m.getFunction("__DRVHORN_" + name.str());
+      Constant *newFn = m.getFunction("drvhorn." + name.str());
       if (origFn->getType() != newFn->getType())
         newFn = ConstantExpr::getBitCast(newFn, origFn->getType());
       origFn->replaceAllUsesWith(newFn);
@@ -253,7 +257,7 @@ private:
 
   void handleDeviceAdd(Module &m) {
     Function *orig = m.getFunction("device_add");
-    Function *replace = m.getFunction("__DRVHORN_device_add");
+    Function *replace = m.getFunction("drvhorn.device_add");
     for (CallInst *call : getCalls(orig)) {
       IRBuilder<> b(call);
       Value *devPtr = call->getArgOperand(0);

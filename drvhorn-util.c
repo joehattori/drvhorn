@@ -159,11 +159,6 @@ static int __DRVHORN_util_get_kref_count(const struct kref *kref) {
   return kref->refcount.refs.counter;
 }
 
-static void __DRVHORN_kref_release(struct kref *kref) {}
-struct kobj_type __DRVHORN_ktype = {
-    .release = __DRVHORN_kref_release,
-};
-
 #define LIMIT 0x100
 struct kref *__DRVHORN_kref_device_node;
 struct device_node *__DRVHORN_create_device_node(void) {
@@ -199,12 +194,11 @@ struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
   return dn;
 }
 
-void __DRVHORN_setup_device(struct device *dev, struct kref **global_kref) {
-  dev->kobj.kref.refcount.refs.counter = 1;
+void __DRVHORN_setup_kref(struct kref *kref, struct kref **global_kref) {
+  kref->refcount.refs.counter = 1;
   if (nd_bool()) {
-    *global_kref = &dev->kobj.kref;
+    *global_kref = kref;
   }
-  // dev->of_node = __DRVHORN_create_device_node();
 }
 
 void __DRVHORN_assert_kref(const struct kref *kref) {

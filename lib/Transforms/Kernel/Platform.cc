@@ -66,33 +66,38 @@ private:
   }
 
   void setupPDev(Module &m, IRBuilder<> &b, Value *pdev) {
-    Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
+    Function *setupKref = m.getFunction("drvhorn.setup_kref");
     Type *pdevType = pdev->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     PointerType *krefPtrType =
         StructType::getTypeByName(ctx, "struct.kref")->getPointerTo();
     StringRef kobjName = "drvhorn.kref.struct.platform_device";
-    Value *kobj = m.getGlobalVariable(kobjName, true);
-    if (!kobj) {
-      kobj = new GlobalVariable(
+    Value *globalKref = m.getGlobalVariable(kobjName, true);
+    if (!globalKref) {
+      globalKref = new GlobalVariable(
           m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
           ConstantPointerNull::get(krefPtrType), kobjName);
     }
-    Type *i32Type = Type::getInt32Ty(ctx);
-    Type *i64Type = Type::getInt64Ty(ctx);
-    Constant *zero = ConstantInt::get(i64Type, 0);
-    Constant *idx = ConstantInt::get(i32Type, pDevDeviceGEPIndex);
-    Value *devPtr = b.CreateGEP(pdevType, pdev, {zero, idx});
-    if (devPtr->getType() != setupDevice->getArg(0)->getType())
-      devPtr = b.CreateBitCast(devPtr, setupDevice->getArg(0)->getType());
-    if (kobj->getType() != setupDevice->getArg(1)->getType())
-      kobj = b.CreateBitCast(kobj, setupDevice->getArg(1)->getType());
-    b.CreateCall(setupDevice, {devPtr, kobj});
+    Type *i32Ty = Type::getInt32Ty(ctx);
+    Type *i64Ty = Type::getInt64Ty(ctx);
+    Value *krefPtr =
+        b.CreateGEP(pdevType, pdev,
+                    {
+                        ConstantInt::get(i64Ty, 0),
+                        ConstantInt::get(i32Ty, pDevDeviceGEPIndex),
+                        ConstantInt::get(i32Ty, 0),
+                        ConstantInt::get(i32Ty, 6),
+                    });
+    if (krefPtr->getType() != setupKref->getArg(0)->getType())
+      krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
+    if (globalKref->getType() != setupKref->getArg(1)->getType())
+      globalKref = b.CreateBitCast(globalKref, setupKref->getArg(1)->getType());
+    b.CreateCall(setupKref, {krefPtr, globalKref});
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("__DRVHORN_assert_kref");
+    Function *checker = m.getFunction("drvhorn.assert_kref");
     for (GlobalVariable *g : getKrefs(m)) {
       Value *v = b.CreateLoad(g->getValueType(), g);
       if (v->getType() != checker->getArg(0)->getType())

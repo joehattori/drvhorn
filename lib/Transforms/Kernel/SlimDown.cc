@@ -18,7 +18,7 @@
 #include <queue>
 
 #define COMPILER_USED_NAME "llvm.compiler.used"
-#define DEVICE_GETTER_PREFIX "__DRVHORN_embedded_device.getter."
+#define DEVICE_GETTER_PREFIX "drvhorn.embedded_device.getter."
 
 using namespace llvm;
 
@@ -181,8 +181,8 @@ private:
 
   void buildStartingPoint(const Module &m) {
     StringRef names[] = {
-        "__DRVHORN_get_device_node",
-        "__DRVHORN_create_device_node",
+        "drvhorn.get_device_node",
+        "drvhorn.create_device_node",
     };
     for (StringRef name : names) {
       if (const Function *getDevNode = m.getFunction(name)) {
@@ -370,7 +370,7 @@ private:
       if (f.isDeclaration())
         continue;
       if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_") ||
-          f.getName().equals("__DRVHORN_malloc"))
+          f.getName().equals("drvhorn.malloc"))
         continue;
       f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     }
@@ -414,7 +414,7 @@ private:
     for (Function &f : m) {
       // we keep these functions still.
       if (f.getName().equals("main") || f.getName().startswith("drvhorn.") ||
-          f.getName().startswith("__DRVHORN_") || f.isDeclaration())
+          f.isDeclaration())
         continue;
       SmallVector<Instruction *> retained;
       for (Instruction &inst : instructions(f)) {

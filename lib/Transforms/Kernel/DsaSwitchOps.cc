@@ -60,31 +60,37 @@ private:
   }
 
   void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch) {
-    Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
+    Function *setupKref = m.getFunction("drvhorn.setup_kref");
     LLVMContext &ctx = m.getContext();
-    Type *deviceType =
-        setupDevice->getArg(0)->getType()->getPointerElementType();
+    Type *deviceType = setupKref->getArg(0)->getType()->getPointerElementType();
     Value *devPtr = b.CreateAlloca(deviceType);
-    PointerType *kobjPtrType = cast<PointerType>(
-        setupDevice->getArg(1)->getType()->getPointerElementType());
-    GlobalVariable *kobj = new GlobalVariable(
-        m, kobjPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(kobjPtrType),
+    PointerType *krefPtrType = cast<PointerType>(
+        setupKref->getArg(1)->getType()->getPointerElementType());
+    GlobalVariable *globalKref = new GlobalVariable(
+        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantPointerNull::get(krefPtrType),
         "drvhorn.kref.struct.dsa_switch");
-    b.CreateCall(setupDevice, {devPtr, kobj});
+    Value *krefPtr = b.CreateGEP(deviceType, devPtr,
+                                 {ConstantInt::get(Type::getInt64Ty(ctx), 0),
+                                  ConstantInt::get(Type::getInt32Ty(ctx), 0),
+                                  ConstantInt::get(Type::getInt32Ty(ctx), 6)});
+    if (krefPtr->getType() != setupKref->getArg(0)->getType())
+      krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
+    b.CreateCall(setupKref, {krefPtr, globalKref});
     Type *i32Type = Type::getInt32Ty(ctx);
     Type *i64Type = Type::getInt64Ty(ctx);
     Value *gep = b.CreateGEP(
         dsaSwitch->getType()->getPointerElementType(), dsaSwitch,
         {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, 0)});
-    if (devPtr->getType() != gep->getType()->getPointerElementType())
-      devPtr = b.CreateBitCast(devPtr, gep->getType()->getPointerElementType());
+    if (krefPtr->getType() != gep->getType()->getPointerElementType())
+      krefPtr =
+          b.CreateBitCast(krefPtr, gep->getType()->getPointerElementType());
     b.CreateStore(devPtr, gep);
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("__DRVHORN_assert_kref");
+    Function *checker = m.getFunction("drvhorn.assert_kref");
     for (GlobalVariable *g : getKrefs(m)) {
       Value *v = b.CreateLoad(g->getValueType(), g);
       if (v->getType() != checker->getArg(0)->getType())

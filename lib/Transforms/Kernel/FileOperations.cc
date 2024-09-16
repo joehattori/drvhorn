@@ -77,7 +77,7 @@ private:
       errs() << "No struct device found\n";
       break;
     case 1:
-      callSetupDevice(m, b, devicePtrs[0]);
+      callSetupKref(m, b, devicePtrs[0]);
       break;
     default:
       errs() << "TODO: multiple struct device\n";
@@ -91,24 +91,30 @@ private:
     b.CreateCondBr(notZero, fail, ret);
   }
 
-  void callSetupDevice(Module &m, IRBuilder<> &b, Value *devicePtr) {
-    Function *setupDevice = m.getFunction("__DRVHORN_setup_device");
+  void callSetupKref(Module &m, IRBuilder<> &b, Value *devicePtr) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Function *setupKref = m.getFunction("drvhorn.setup_kref");
     PointerType *krefPtrType =
         StructType::getTypeByName(m.getContext(), "struct.kref")
             ->getPointerTo();
-    Value *kref = new GlobalVariable(
-        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+    GlobalVariable *globalKref = new GlobalVariable(
+        m, setupKref->getArg(1)->getType()->getPointerElementType(), false,
+        GlobalValue::LinkageTypes::PrivateLinkage,
         ConstantPointerNull::get(krefPtrType), "drvhorn.kref.struct.device");
-    if (setupDevice->getArg(0)->getType() != devicePtr->getType())
-      devicePtr = b.CreateBitCast(devicePtr, setupDevice->getArg(0)->getType());
-    if (setupDevice->getArg(1)->getType() != kref->getType())
-      kref = b.CreateBitCast(kref, setupDevice->getArg(1)->getType());
-    b.CreateCall(setupDevice, {devicePtr, kref});
+    Value *krefPtr =
+        b.CreateGEP(devicePtr->getType()->getPointerElementType(), devicePtr,
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+                     ConstantInt::get(i32Ty, 6)});
+    if (setupKref->getArg(0)->getType() != krefPtr->getType())
+      krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
+    b.CreateCall(setupKref, {krefPtr, globalKref});
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("__DRVHORN_assert_kref");
+    Function *checker = m.getFunction("drvhorn.assert_kref");
     for (GlobalVariable *g : getKrefs(m)) {
       Value *v = b.CreateLoad(g->getValueType(), g);
       if (v->getType() != checker->getArg(0)->getType())
