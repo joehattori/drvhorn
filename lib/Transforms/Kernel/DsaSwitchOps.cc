@@ -51,18 +51,22 @@ private:
   void buildEntryBlock(Module &m, Function *setup, BasicBlock *entry,
                        BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
-    Type *dsaSwitchType = setup->getArg(0)->getType()->getPointerElementType();
+    StructType *dsaSwitchType =
+        cast<StructType>(setup->getArg(0)->getType()->getPointerElementType());
     Value *dsaSwitch = allocType(m, b, dsaSwitchType);
-    setupDsaSwitch(m, b, dsaSwitch);
+    setupDsaSwitch(m, b, dsaSwitch, dsaSwitchType);
     CallInst *call = b.CreateCall(setup, {dsaSwitch});
     Value *zero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
     b.CreateCondBr(zero, ret, fail);
   }
 
-  void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch) {
+  void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch,
+                      StructType *dsaSwitchType) {
     Function *setupKref = m.getFunction("drvhorn.setup_kref");
     LLVMContext &ctx = m.getContext();
-    Type *deviceType = setupKref->getArg(0)->getType()->getPointerElementType();
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    Type *deviceType = dsaSwitchType->getElementType(0)->getPointerElementType();
     Value *devPtr = b.CreateAlloca(deviceType);
     PointerType *krefPtrType = cast<PointerType>(
         setupKref->getArg(1)->getType()->getPointerElementType());
@@ -70,18 +74,16 @@ private:
         m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
         ConstantPointerNull::get(krefPtrType),
         "drvhorn.kref.struct.dsa_switch");
-    Value *krefPtr = b.CreateGEP(deviceType, devPtr,
-                                 {ConstantInt::get(Type::getInt64Ty(ctx), 0),
-                                  ConstantInt::get(Type::getInt32Ty(ctx), 0),
-                                  ConstantInt::get(Type::getInt32Ty(ctx), 6)});
+    Value *krefPtr =
+        b.CreateGEP(deviceType, devPtr,
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+                     ConstantInt::get(i32Ty, 6)});
     if (krefPtr->getType() != setupKref->getArg(0)->getType())
       krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
     b.CreateCall(setupKref, {krefPtr, globalKref});
-    Type *i32Type = Type::getInt32Ty(ctx);
-    Type *i64Type = Type::getInt64Ty(ctx);
-    Value *gep = b.CreateGEP(
-        dsaSwitch->getType()->getPointerElementType(), dsaSwitch,
-        {ConstantInt::get(i64Type, 0), ConstantInt::get(i32Type, 0)});
+    Value *gep =
+        b.CreateGEP(dsaSwitchType, dsaSwitch,
+                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0)});
     if (krefPtr->getType() != gep->getType()->getPointerElementType())
       krefPtr =
           b.CreateBitCast(krefPtr, gep->getType()->getPointerElementType());

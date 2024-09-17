@@ -441,6 +441,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createKernelSetupPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createHandleDevicesPass());
+    // TODO: merge these passes into one.
     if (!AcpiDriver.empty()) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
     } else if (!FileOperation.empty()) {
@@ -452,6 +453,7 @@ int main(int argc, char **argv) {
     }
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(seahorn::createInitGlobalKrefsPass());
     pm_wrapper.add(seahorn::createAssumeNonNullPass());
     pm_wrapper.add(seahorn::createIntoBinaryPass());
     pm_wrapper.add(seahorn::createHandleNondetMallocPass());

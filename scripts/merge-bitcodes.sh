@@ -22,6 +22,7 @@ wllvm \
   -I${KERNEL_DIR}/drivers/char \
   -I${KERNEL_DIR}/drivers/net \
   -I${KERNEL_DIR}/drivers/net/dsa \
+  -I${KERNEL_DIR}/drivers/net/dsa/qca \
   -include ${KERNEL_DIR}/include/linux/compiler-version.h \
   -include ${KERNEL_DIR}/include/linux/kconfig.h \
   -include ${KERNEL_DIR}/include/linux/compiler_types.h \

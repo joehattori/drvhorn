@@ -370,6 +370,8 @@ private:
       if (f.isDeclaration())
         continue;
       if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_") ||
+          // might be used in InitGlobalKrefs.cc
+          f.getName().equals("drvhorn.setup_kref") ||
           f.getName().equals("drvhorn.malloc"))
         continue;
       f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
@@ -451,7 +453,9 @@ private:
 
   void removeNotCalledFunctions(Module &m) {
     for (Function &f : m) {
-      if (!f.getName().equals("main") && getCalls(&f).empty())
+      if (!f.getName().equals("main") &&
+          // setup_kref might be used later.
+          !f.getName().equals("drvhorn.setup_kref") && getCalls(&f).empty())
         f.deleteBody();
     }
   }
