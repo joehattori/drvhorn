@@ -175,8 +175,6 @@ struct device_node *__DRVHORN_create_device_node(void) {
   return ret;
 }
 
-// defined in Deivce.cc
-// extern struct device_node *__DRVHORN_create_device_node(void);
 struct device_node *__DRVHORN_of_get_next_child(const struct device_node *node, struct device_node *prev) {
   if (!node) {
     return NULL;

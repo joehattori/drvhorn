@@ -167,14 +167,9 @@ private:
   }
 
   void buildStartingPoint(const Module &m) {
-    StringRef names[] = {
-        "drvhorn.get_device_node",
-        "drvhorn.create_device_node",
-    };
-    for (StringRef name : names) {
-      if (const Function *getDevNode = m.getFunction(name)) {
-        recordCallers(getDevNode);
-      }
+    if (const Function *getDevNode =
+            m.getFunction("drvhorn.create_device_node")) {
+      recordCallers(getDevNode);
     }
     for (const Function &f : m) {
       if (f.getName().startswith(DEVICE_GETTER_PREFIX)) {
