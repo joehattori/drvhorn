@@ -29,14 +29,8 @@ public:
   bool isTarget(const Instruction *inst) const { return targets.count(inst); }
 
   void visitModule(Module &m) {
-    DenseSet<const CallInst *> kobjCalls = getKobjCalls(m);
-    DenseSet<const Value *> memo;
     buildStartingPoint(m);
-    for (const CallInst *call : kobjCalls) {
-      const Function *f = extractCalledFunction(call);
-      targetArgs.insert(f->getArg(0));
-      buildTargetArgs(call->getArgOperand(0), memo, kobjCalls);
-    }
+    buildTargetArgs(m);
   }
 
   bool visitCallInst(CallInst &call) {
@@ -45,14 +39,9 @@ public:
       cache[&call] = false;
       return false;
     }
-    bool isTarget = false;
-    if (startingPoints.count(&call)) {
-      isTarget = true;
-    }
+    bool isTarget = startingPoints.count(&call);
     for (Argument &arg : f->args()) {
-      if (targetArgs.count(&arg)) {
-        isTarget = true;
-      }
+      isTarget |= targetArgs.count(&arg);
     }
     if (isTarget) {
       targets.insert(&call);
@@ -62,9 +51,8 @@ public:
   }
 
   bool visitLoadInst(LoadInst &load) {
-    bool isTarget = false;
-    if (visitValue(load.getPointerOperand())) {
-      isTarget = true;
+    bool isTarget = visitValue(load.getPointerOperand());
+    if (isTarget) {
       targets.insert(&load);
     }
     cache[&load] = isTarget;
@@ -121,8 +109,7 @@ public:
   bool visitInstruction(Instruction &inst) {
     bool isTarget = false;
     for (Value *v : inst.operands()) {
-      if (visitValue(v))
-        isTarget = true;
+      isTarget |= visitValue(v);
     }
     if (isTarget) {
       targets.insert(&inst);
@@ -165,16 +152,16 @@ private:
 
   void recordCallers(const Function *f) {
     DenseSet<const Function *> visited;
-    std::queue<const Function *> workList;
-    workList.push(f);
+    SmallVector<const Function *> workList;
+    workList.push_back(f);
     while (!workList.empty()) {
-      const Function *f = workList.front();
-      workList.pop();
+      const Function *f = workList.back();
+      workList.pop_back();
       if (!visited.insert(f).second)
         continue;
       for (const CallInst *call : getCalls(f)) {
         startingPoints.insert(call);
-        workList.push(call->getFunction());
+        workList.push_back(call->getFunction());
       }
     }
   }
@@ -196,93 +183,56 @@ private:
     }
   }
 
-  DenseSet<const CallInst *> getKobjCalls(const Module &m) {
+  void buildTargetArgs(Module &m) {
+    SmallVector<const Argument *> workList;
+    DenseSet<const Argument *> visited;
     StringRef fnNames[] = {
         "drvhorn.kref_init",
         "drvhorn.kref_get",
         "drvhorn.kref_put",
     };
-    DenseSet<const CallInst *> calls;
     for (StringRef name : fnNames) {
       if (const Function *f = m.getFunction(name)) {
-        for (const CallInst *call : getCalls(f)) {
-          calls.insert(call);
-        }
+        const Argument *arg = f->getArg(0);
+        workList.push_back(arg);
+        visited.insert(arg);
       }
     }
-    return calls;
-  }
 
-  void buildTargetArgs(const Value *argVal, DenseSet<const Value *> &memo,
-                       const DenseSet<const CallInst *> &kobjCalls) {
-    if (!memo.insert(argVal).second)
-      return;
-    DenseMap<const Value *, const Value *> baseMemo;
-    if (const Argument *arg = dyn_cast_or_null<Argument>(
-            baseOfValue(argVal, baseMemo, kobjCalls))) {
+    while (!workList.empty()) {
+      const Argument *arg = workList.back();
+      workList.pop_back();
       targetArgs.insert(arg);
       for (const CallInst *call : getCalls(arg->getParent())) {
         const Value *v = call->getArgOperand(arg->getArgNo());
-        buildTargetArgs(v, memo, kobjCalls);
+        for (const Argument *arg : underlyingArgs(v)) {
+          if (visited.insert(arg).second) {
+            workList.push_back(arg);
+          }
+        }
       }
     }
   }
 
-  // returns either an llvm::Argument*, an llvm::CallInst*, or nullptr.
-  // TODO: use getUnderlyingObject instead.
-  const Value *baseOfValue(const Value *v,
-                           DenseMap<const Value *, const Value *> &memo,
-                           const DenseSet<const CallInst *> &kobjCalls) const {
-    if (const Argument *arg = dyn_cast<Argument>(v)) {
-      return arg;
-    }
-    if (isa<Constant, MetadataAsValue, InlineAsm>(v)) {
-      return nullptr;
-    }
-    if (memo.count(v))
-      return memo[v];
-    memo[v] = nullptr;
-    if (const Instruction *inst = dyn_cast<Instruction>(v)) {
-      return memo[v] = baseOfInst(inst, memo, kobjCalls);
-    }
-    if (const Operator *op = dyn_cast<Operator>(v)) {
-      for (const Value *v : op->operands()) {
-        if (const Value *base = baseOfValue(v, memo, kobjCalls)) {
-          return memo[op] = base;
+  SmallVector<const Argument *> underlyingArgs(const Value *v) {
+    SmallVector<const Argument *> ret;
+    SmallVector<const Value *> workList;
+    DenseSet<const Value *> visited;
+    workList.push_back(getUnderlyingObject(v));
+    while (!workList.empty()) {
+      const Value *v = workList.back();
+      workList.pop_back();
+      if (const Argument *arg = dyn_cast<Argument>(v)) {
+        ret.push_back(arg);
+      } else if (const PHINode *phi = dyn_cast<PHINode>(v)) {
+        for (const Value *v : phi->incoming_values()) {
+          if (visited.insert(v).second) {
+            workList.push_back(v);
+          }
         }
       }
-      return nullptr;
     }
-    errs() << "TODO: baseOfValue " << *v << '\n';
-    std::exit(1);
-  }
-
-  const Value *baseOfInst(const Instruction *inst,
-                          DenseMap<const Value *, const Value *> &memo,
-                          const DenseSet<const CallInst *> &kobjCalls) const {
-    if (const PHINode *phi = dyn_cast<PHINode>(inst)) {
-      for (const Value *v : phi->incoming_values()) {
-        if (const Value *base = baseOfValue(v, memo, kobjCalls)) {
-          return base;
-        }
-      }
-      return nullptr;
-    } else if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-      if (kobjCalls.count(call)) {
-        return baseOfValue(call->getArgOperand(0), memo, kobjCalls);
-      }
-      if (startingPoints.count(call)) {
-        return call;
-      }
-      return nullptr;
-    } else {
-      for (const Value *v : inst->operands()) {
-        if (const Value *base = baseOfValue(v, memo, kobjCalls)) {
-          return base;
-        }
-      }
-      return nullptr;
-    }
+    return ret;
   }
 };
 
