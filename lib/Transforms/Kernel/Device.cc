@@ -39,6 +39,8 @@ private:
         {"of_find_node_by_phandle", None},
         {"of_find_matching_node_and_match", 0},
         {"of_find_node_with_property", 0},
+        {"of_get_compatible_child", 0},
+        {"of_get_child_by_name", 0},
     };
     Function *getter = m.getFunction("drvhorn.get_device_node");
     for (const std::pair<StringRef, Optional<size_t>> &nameAndIndex :

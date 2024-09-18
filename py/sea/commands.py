@@ -312,6 +312,10 @@ class Seapp(sea.LimitedCmd):
                          default='none')
         ap.add_argument ('--entry', dest='entry', help='Make given function the entry point, deleting main if it exists.',
                          default=None, metavar='str')
+
+        # kernel options
+        ap.add_argument ('--specific-function', dest='specific_function', help='Specify a specific function name to verify',
+                         type=str, metavar='str,..')
         ap.add_argument ('--acpi-driver', dest='acpi_driver', help='Specify a ACPI driver to validate',
                          type=str, metavar='str')
         ap.add_argument ('--platform-driver', dest='platform_driver', help='Specify a platform driver to validate',
@@ -320,6 +324,7 @@ class Seapp(sea.LimitedCmd):
                          type=str, metavar='str,..')
         ap.add_argument ('--dsa-switch-ops', dest='dsa_switch_ops', help='Specify a dsa_switch_ops to validate',
                          type=str, metavar='str,..')
+
         ap.add_argument ('--externalize-addr-taken-functions',
                          help='Externalize uses of address-taken functions',
                          dest='enable_ext_funcs', default=False,
@@ -488,6 +493,9 @@ class Seapp(sea.LimitedCmd):
 
             if args.entry is not None:
                 argv.append ('--entry-point={0}'.format (args.entry))
+
+            if args.specific_function:
+                argv.append ('--specific-function={0}'.format (args.specific_function))
 
             if args.acpi_driver:
                 argv.append ('--acpi-driver={0}'.format (args.acpi_driver))

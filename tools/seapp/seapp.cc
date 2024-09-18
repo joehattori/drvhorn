@@ -312,6 +312,11 @@ static llvm::cl::opt<std::string>
     DsaSwitchOps("dsa-switch-ops", llvm::cl::desc("Target DSA Switch Ops"),
                    llvm::cl::init(""));
 
+static llvm::cl::opt<std::string>
+    SpecificFunction("specific-function",
+                     llvm::cl::desc("Specific function name"),
+                     llvm::cl::init(""));
+
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
   std::string filename = str;
@@ -442,7 +447,9 @@ int main(int argc, char **argv) {
     pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createHandleDevicesPass());
     // TODO: merge these passes into one.
-    if (!AcpiDriver.empty()) {
+    if (!SpecificFunction.empty()) {
+      pm_wrapper.add(seahorn::createSpecificFunctionPass(SpecificFunction));
+    } else if (!AcpiDriver.empty()) {
       pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
     } else if (!FileOperation.empty()) {
       pm_wrapper.add(seahorn::createFileOperationsSetupPass(FileOperation));

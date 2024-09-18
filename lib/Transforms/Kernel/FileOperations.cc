@@ -25,7 +25,7 @@ public:
     if (!open) {
       errs() << "No open function found for struct file_operations "
              << fileOpName << "\n";
-      return false;
+      std::exit(1);
     }
     constructMain(m, open);
     return true;
@@ -46,7 +46,7 @@ private:
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
     Function *main = Function::Create(
-        FunctionType::get(i32Ty, {}, false),
+        FunctionType::get(i32Ty, false),
         GlobalValue::LinkageTypes::ExternalLinkage, "main", &m);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", main);
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);

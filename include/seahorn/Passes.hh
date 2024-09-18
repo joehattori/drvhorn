@@ -113,6 +113,7 @@ llvm::ModulePass *createDebugVerifierPass(int instanceID, llvm::StringRef name);
 llvm::Pass *createUnifyAssumesPass();
 llvm::Pass *createCrabLowerIsDerefPass();
 
+llvm::Pass *createSpecificFunctionPass(llvm::StringRef fnName);
 llvm::Pass *createAcpiSetupPass(llvm::StringRef acpiDrivers);
 llvm::Pass *createFileOperationsSetupPass(llvm::StringRef fileOpName);
 llvm::Pass *createPlatformDriverPass(llvm::StringRef fileOpName);

@@ -35,6 +35,7 @@ wllvm \
   -DKBUILD_MODNAME=\"seahorn\" \
   -D__KBUILD_MODNAME=\"seahorn\" \
   -fshort-wchar \
+  -fno-inline-functions \
   -c ${INPUT} \
   -o ${OBJNAME}
 extract-bc ${OBJNAME}
