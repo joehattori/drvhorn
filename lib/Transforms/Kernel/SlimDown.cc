@@ -24,7 +24,15 @@ namespace seahorn {
 
 struct Visitor : public InstVisitor<Visitor, bool> {
 public:
-  bool isTarget(const Instruction *inst) const { return targets.count(inst); }
+  bool isTarget(const Instruction *inst) const {
+    if (const StoreInst *store = dyn_cast<StoreInst>(inst)) {
+      const Value *v = getUnderlyingObject(store->getPointerOperand());
+      return loadedUnderlyingPtrs.count(v) ||
+             targetArgs.count(dyn_cast<Argument>(v));
+    } else {
+      return targets.count(inst);
+    }
+  }
 
   void visitModule(Module &m) {
     buildStartingPoint(m);
@@ -50,40 +58,13 @@ public:
   }
 
   bool visitLoadInst(LoadInst &load) {
-    bool isTarget = visitValue(load.getPointerOperand());
+    Value *addr = load.getPointerOperand();
+    bool isTarget = visitValue(addr);
     if (isTarget) {
       targets.insert(&load);
+      loadedUnderlyingPtrs.insert(getUnderlyingObject(addr));
     }
     cache[&load] = isTarget;
-    return isTarget;
-  }
-
-  bool visitStoreInst(StoreInst &store) {
-    Value *v = getUnderlyingObject(store.getPointerOperand());
-    DenseSet<Value *> visited;
-    SmallVector<Value *> workList;
-    workList.push_back(v);
-    visited.insert(v);
-
-    bool isTarget = false;
-    while (!workList.empty()) {
-      Value *v = workList.back();
-      workList.pop_back();
-      if (visitValue(v)) {
-        isTarget = true;
-        break;
-      }
-      if (LoadInst *load = dyn_cast<LoadInst>(v)) {
-        Value *nxt = getUnderlyingObject(load->getPointerOperand());
-        if (visited.insert(nxt).second) {
-          workList.push_back(nxt);
-        }
-      }
-    }
-
-    if (isTarget)
-      targets.insert(&store);
-    cache[&store] = isTarget;
     return isTarget;
   }
 
@@ -122,6 +103,7 @@ private:
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
   DenseSet<const Instruction *> targets;
+  DenseSet<const Value *> loadedUnderlyingPtrs;
 
   bool visitValue(Value *v) {
     if (Argument *arg = dyn_cast<Argument>(v))

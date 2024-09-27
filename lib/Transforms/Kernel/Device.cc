@@ -79,6 +79,8 @@ private:
     DenseMap<StructType *, Function *> structTypeReplacer;
     for (StringRef name : deviceFinderNames) {
       Function *finder = m.getFunction(name);
+      if (!finder)
+        continue;
       for (CallInst *call : getCalls(finder)) {
         if (Function *getter = deviceGetter(m, call, structTypeReplacer)) {
           Value *newCall = CallInst::Create(getter, "", call);
