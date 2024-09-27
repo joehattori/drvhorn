@@ -165,7 +165,7 @@ struct device_node *__DRVHORN_create_device_node(void) {
   static unsigned count = 0;
   static struct device_node storage[LIMIT];
 
-  if (count >= LIMIT)
+  if (count >= LIMIT || nd_bool())
     return NULL;
   struct device_node *ret = &storage[count++];
   ret->kobj.kref.refcount.refs.counter = 1;

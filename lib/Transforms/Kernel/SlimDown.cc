@@ -28,7 +28,8 @@ public:
 
   void visitModule(Module &m) {
     buildStartingPoint(m);
-    buildTargetArgs(m);
+    buildKrefTargetArgs(m);
+    addTargetArgsRelatedToReturnValue(m);
   }
 
   bool visitCallInst(CallInst &call) {
@@ -176,7 +177,7 @@ private:
     }
   }
 
-  void buildTargetArgs(Module &m) {
+  void buildKrefTargetArgs(Module &m) {
     SmallVector<const Argument *> workList;
     DenseSet<const Argument *> visited;
     StringRef fnNames[] = {
@@ -201,6 +202,45 @@ private:
         for (const Argument *arg : underlyingArgs(v)) {
           if (visited.insert(arg).second) {
             workList.push_back(arg);
+          }
+        }
+      }
+    }
+  }
+
+  void addTargetArgsRelatedToReturnValue(const Module &m) {
+    DenseMap<const CallInst *, const Value *> callToArgTie;
+    DenseSet<const Value *> visited;
+    SmallVector<const Value *> workList;
+    for (const Function &f : m) {
+      if (f.isDeclaration())
+        continue;
+      for (const BasicBlock &blk : f) {
+        if (const ReturnInst *ret = dyn_cast<ReturnInst>(blk.getTerminator())) {
+          if (const Value *retVal = ret->getReturnValue()) {
+            workList.push_back(retVal);
+            visited.insert(retVal);
+            if (const Argument *arg =
+                    dyn_cast<Argument>(getUnderlyingObject(retVal))) {
+              for (const CallInst *call : getCalls(arg->getParent())) {
+                callToArgTie[call] = call->getArgOperand(arg->getArgNo());
+              }
+            }
+          }
+        }
+      }
+    }
+
+    while (!workList.empty()) {
+      const Value *v = workList.back();
+      workList.pop_back();
+      const Value *underlying = getUnderlyingObject(v);
+      if (const Argument *arg = dyn_cast<Argument>(underlying)) {
+        targetArgs.insert(arg);
+      } else if (const CallInst *call = dyn_cast<CallInst>(underlying)) {
+        if (const Value *v = callToArgTie.lookup(call)) {
+          if (visited.insert(v).second) {
+            workList.push_back(v);
           }
         }
       }
