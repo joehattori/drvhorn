@@ -1,8 +1,8 @@
 // RUN: set -e
 // RUN: %merge %drvhorn-util %kernel-dir/vmlinux.bc %t-kernel.bc %kernel-dir
 // RUN: %merge %s %t-kernel.bc %t-merged.bc %kernel-dir
-// RUN: %sea kernel --platform-driver=bcm_sf2_driver_sat %t-merged.bc | OutputCheck %s
-// CHECK: ^sat$
+// RUN: %sea kernel --specific-function=bcm_sf2_mdio_register_unsat %t-merged.bc | OutputCheck %s
+// CHECK: ^unsat$
 
 #include <linux/list.h>
 #include <linux/module.h>
@@ -26,11 +26,10 @@
 #include <linux/etherdevice.h>
 #include <linux/platform_data/b53.h>
 
-#include <dsa/bcm_sf2.h>
-#include <dsa/bcm_sf2_regs.h>
-#include <b53/b53_priv.h>
-#include <b53/b53_regs.h>
-
+#include "bcm_sf2.h"
+#include "bcm_sf2_regs.h"
+#include "b53/b53_priv.h"
+#include "b53/b53_regs.h"
 
 static u16 bcm_sf2_reg_rgmii_cntrl(struct bcm_sf2_priv *priv, int port)
 {
@@ -604,30 +603,29 @@ static void bcm_sf2_identify_ports(struct bcm_sf2_priv *priv,
 	}
 }
 
-static int bcm_sf2_mdio_register(struct dsa_switch *ds)
+static int bcm_sf2_mdio_register_unsat(struct dsa_switch *ds)
 {
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	struct device_node *dn, *child;
 	struct phy_device *phydev;
 	struct property *prop;
 	static int index;
-	int err = 0, reg;
+	int err, reg;
 
 	/* Find our integrated MDIO bus node */
 	dn = of_find_compatible_node(NULL, NULL, "brcm,unimac-mdio");
 	priv->master_mii_bus = of_mdio_find_bus(dn);
 	if (!priv->master_mii_bus) {
-		of_node_put(dn);
-		return -EPROBE_DEFER;
+		err = -EPROBE_DEFER;
+		goto err_of_node_put;
 	}
 
-	get_device(&priv->master_mii_bus->dev);
 	priv->master_mii_dn = dn;
 
 	priv->slave_mii_bus = mdiobus_alloc();
 	if (!priv->slave_mii_bus) {
-		of_node_put(dn);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto err_put_master_mii_bus_dev;
 	}
 
 	priv->slave_mii_bus->priv = priv;
@@ -663,32 +661,40 @@ static int bcm_sf2_mdio_register(struct dsa_switch *ds)
 	 * unregister the existing PHY device that was already registered.
 	 */
 	for_each_available_child_of_node(dn, child) {
-		if (of_property_read_u32(child, "reg", &reg) ||
-		    reg >= PHY_MAX_ADDR)
-			continue;
+	  if (of_property_read_u32(child, "reg", &reg) ||
+	      reg >= PHY_MAX_ADDR)
+	  	continue;
 
-		if (!(priv->indir_phy_mask & BIT(reg)))
-			continue;
+	  if (!(priv->indir_phy_mask & BIT(reg)))
+	  	continue;
 
-		prop = of_find_property(child, "phandle", NULL);
-		if (prop)
-			of_remove_property(child, prop);
+	  prop = of_find_property(child, "phandle", NULL);
+	  if (prop)
+	  	of_remove_property(child, prop);
 
-		prop = of_find_property(child, "linux,phandle", NULL);
+	  prop = of_find_property(child, "linux,phandle", NULL);
 		if (prop)
 			of_remove_property(child, prop);
 
 		phydev = of_phy_find_device(child);
-		if (phydev)
+		if (phydev) {
 			phy_device_remove(phydev);
+			phy_device_free(phydev);
+    }
 	}
 
 	err = mdiobus_register(priv->slave_mii_bus);
-	if (err && dn) {
-		mdiobus_free(priv->slave_mii_bus);
-		of_node_put(dn);
-	}
+	if (err && dn)
+		goto err_free_slave_mii_bus;
 
+	return 0;
+
+err_free_slave_mii_bus:
+	mdiobus_free(priv->slave_mii_bus);
+err_put_master_mii_bus_dev:
+	put_device(&priv->master_mii_bus->dev);
+err_of_node_put:
+	of_node_put(dn);
 	return err;
 }
 
@@ -696,6 +702,7 @@ static void bcm_sf2_mdio_unregister(struct bcm_sf2_priv *priv)
 {
 	mdiobus_unregister(priv->slave_mii_bus);
 	mdiobus_free(priv->slave_mii_bus);
+	put_device(&priv->master_mii_bus->dev);
 	of_node_put(priv->master_mii_dn);
 }
 
@@ -1332,8 +1339,9 @@ static const struct of_device_id bcm_sf2_of_match[] = {
 	},
 	{ /* sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, bcm_sf2_of_match);
 
-static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
+static int bcm_sf2_sw_probe(struct platform_device *pdev)
 {
 	const char *reg_names[BCM_SF2_REGS_NUM] = BCM_SF2_REGS_NAME;
 	struct device_node *dn = pdev->dev.of_node;
@@ -1435,7 +1443,9 @@ static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
 	if (IS_ERR(priv->clk))
 		return PTR_ERR(priv->clk);
 
-	clk_prepare_enable(priv->clk);
+	ret = clk_prepare_enable(priv->clk);
+	if (ret)
+		return ret;
 
 	priv->clk_mdiv = devm_clk_get_optional(&pdev->dev, "sw_switch_mdiv");
 	if (IS_ERR(priv->clk_mdiv)) {
@@ -1443,26 +1453,28 @@ static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
 		goto out_clk;
 	}
 
-	clk_prepare_enable(priv->clk_mdiv);
+	ret = clk_prepare_enable(priv->clk_mdiv);
+	if (ret)
+		goto out_clk;
 
 	ret = bcm_sf2_sw_rst(priv);
 	if (ret) {
 		pr_err("unable to software reset switch: %d\n", ret);
 		goto out_clk_mdiv;
 	}
-	
+
 	bcm_sf2_crossbar_setup(priv);
-	
+
 	bcm_sf2_gphy_enable_set(priv->dev->ds, true);
 
-	ret = bcm_sf2_mdio_register(ds);
+	ret = bcm_sf2_mdio_register_unsat(ds);
 	if (ret) {
 		pr_err("failed to register MDIO bus\n");
 		goto out_clk_mdiv;
 	}
 
 	bcm_sf2_gphy_enable_set(priv->dev->ds, false);
-	
+
 	ret = bcm_sf2_cfp_rst(priv);
 	if (ret) {
 		pr_err("failed to reset CFP\n");
@@ -1471,7 +1483,7 @@ static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
 
 	/* Disable all interrupts and request them */
 	bcm_sf2_intr_disable(priv);
-	
+
 	ret = devm_request_irq(&pdev->dev, priv->irq0, bcm_sf2_switch_0_isr, 0,
 			       "switch_0", ds);
 	if (ret < 0) {
@@ -1479,47 +1491,47 @@ static int bcm_sf2_sw_probe_sat(struct platform_device *pdev)
 		goto out_mdio;
 	}
 
-	// ret = devm_request_irq(&pdev->dev, priv->irq1, bcm_sf2_switch_1_isr, 0,
-	// 		       "switch_1", ds);
-	// if (ret < 0) {
-	// 	pr_err("failed to request switch_1 IRQ\n");
-	// 	goto out_mdio;
-	// }
-	//
-	// /* Reset the MIB counters */
-	// reg = core_readl(priv, CORE_GMNCFGCFG);
-	// reg |= RST_MIB_CNT;
-	// core_writel(priv, reg, CORE_GMNCFGCFG);
-	// reg &= ~RST_MIB_CNT;
-	// core_writel(priv, reg, CORE_GMNCFGCFG);
-	//
-	// /* Get the maximum number of ports for this switch */
-	// priv->hw_params.num_ports = core_readl(priv, CORE_IMP0_PRT_ID) + 1;
-	// if (priv->hw_params.num_ports > DSA_MAX_PORTS)
-	// 	priv->hw_params.num_ports = DSA_MAX_PORTS;
-	//
-	// /* Assume a single GPHY setup if we can't read that property */
-	// if (of_property_read_u32(dn, "brcm,num-gphy",
-	// 			 &priv->hw_params.num_gphy))
-	// 	priv->hw_params.num_gphy = 1;
-	//
-	// rev = reg_readl(priv, REG_SWITCH_REVISION);
-	// priv->hw_params.top_rev = (rev >> SWITCH_TOP_REV_SHIFT) &
-	// 				SWITCH_TOP_REV_MASK;
-	// priv->hw_params.core_rev = (rev & SF2_REV_MASK);
-	//
-	// rev = reg_readl(priv, REG_PHY_REVISION);
-	// priv->hw_params.gphy_rev = rev & PHY_REVISION_MASK;
-	//
-	// ret = b53_switch_register(dev);
-	// if (ret)
-	// 	goto out_mdio;
-	//
-	// dev_info(&pdev->dev,
-	// 	 "Starfighter 2 top: %x.%02x, core: %x.%02x, IRQs: %d, %d\n",
-	// 	 priv->hw_params.top_rev >> 8, priv->hw_params.top_rev & 0xff,
-	// 	 priv->hw_params.core_rev >> 8, priv->hw_params.core_rev & 0xff,
-	// 	 priv->irq0, priv->irq1);
+	ret = devm_request_irq(&pdev->dev, priv->irq1, bcm_sf2_switch_1_isr, 0,
+			       "switch_1", ds);
+	if (ret < 0) {
+		pr_err("failed to request switch_1 IRQ\n");
+		goto out_mdio;
+	}
+
+	/* Reset the MIB counters */
+	reg = core_readl(priv, CORE_GMNCFGCFG);
+	reg |= RST_MIB_CNT;
+	core_writel(priv, reg, CORE_GMNCFGCFG);
+	reg &= ~RST_MIB_CNT;
+	core_writel(priv, reg, CORE_GMNCFGCFG);
+
+	/* Get the maximum number of ports for this switch */
+	priv->hw_params.num_ports = core_readl(priv, CORE_IMP0_PRT_ID) + 1;
+	if (priv->hw_params.num_ports > DSA_MAX_PORTS)
+		priv->hw_params.num_ports = DSA_MAX_PORTS;
+
+	/* Assume a single GPHY setup if we can't read that property */
+	if (of_property_read_u32(dn, "brcm,num-gphy",
+				 &priv->hw_params.num_gphy))
+		priv->hw_params.num_gphy = 1;
+
+	rev = reg_readl(priv, REG_SWITCH_REVISION);
+	priv->hw_params.top_rev = (rev >> SWITCH_TOP_REV_SHIFT) &
+					SWITCH_TOP_REV_MASK;
+	priv->hw_params.core_rev = (rev & SF2_REV_MASK);
+
+	rev = reg_readl(priv, REG_PHY_REVISION);
+	priv->hw_params.gphy_rev = rev & PHY_REVISION_MASK;
+
+	ret = b53_switch_register(dev);
+	if (ret)
+		goto out_mdio;
+
+	dev_info(&pdev->dev,
+		 "Starfighter 2 top: %x.%02x, core: %x.%02x, IRQs: %d, %d\n",
+		 priv->hw_params.top_rev >> 8, priv->hw_params.top_rev & 0xff,
+		 priv->hw_params.core_rev >> 8, priv->hw_params.core_rev & 0xff,
+		 priv->irq0, priv->irq1);
 
 	return 0;
 
@@ -1532,6 +1544,81 @@ out_clk:
 	return ret;
 }
 
-struct platform_driver bcm_sf2_driver_sat = {
-  .probe = bcm_sf2_sw_probe_sat,
+static int bcm_sf2_sw_remove(struct platform_device *pdev)
+{
+	struct bcm_sf2_priv *priv = platform_get_drvdata(pdev);
+
+	if (!priv)
+		return 0;
+
+	priv->wol_ports_mask = 0;
+	/* Disable interrupts */
+	bcm_sf2_intr_disable(priv);
+	dsa_unregister_switch(priv->dev->ds);
+	bcm_sf2_cfp_exit(priv->dev->ds);
+	bcm_sf2_mdio_unregister(priv);
+	clk_disable_unprepare(priv->clk_mdiv);
+	clk_disable_unprepare(priv->clk);
+	if (priv->type == BCM7278_DEVICE_ID)
+		reset_control_assert(priv->rcdev);
+
+	return 0;
+}
+
+static void bcm_sf2_sw_shutdown(struct platform_device *pdev)
+{
+	struct bcm_sf2_priv *priv = platform_get_drvdata(pdev);
+
+	if (!priv)
+		return;
+
+	/* For a kernel about to be kexec'd we want to keep the GPHY on for a
+	 * successful MDIO bus scan to occur. If we did turn off the GPHY
+	 * before (e.g: port_disable), this will also power it back on.
+	 *
+	 * Do not rely on kexec_in_progress, just power the PHY on.
+	 */
+	if (priv->hw_params.num_gphy == 1)
+		bcm_sf2_gphy_enable_set(priv->dev->ds, true);
+
+	dsa_switch_shutdown(priv->dev->ds);
+
+	platform_set_drvdata(pdev, NULL);
+}
+
+#ifdef CONFIG_PM_SLEEP
+static int bcm_sf2_suspend(struct device *dev)
+{
+	struct bcm_sf2_priv *priv = dev_get_drvdata(dev);
+
+	return dsa_switch_suspend(priv->dev->ds);
+}
+
+static int bcm_sf2_resume(struct device *dev)
+{
+	struct bcm_sf2_priv *priv = dev_get_drvdata(dev);
+
+	return dsa_switch_resume(priv->dev->ds);
+}
+#endif /* CONFIG_PM_SLEEP */
+
+static SIMPLE_DEV_PM_OPS(bcm_sf2_pm_ops,
+			 bcm_sf2_suspend, bcm_sf2_resume);
+
+
+static struct platform_driver bcm_sf2_driver = {
+	.probe	= bcm_sf2_sw_probe,
+	.remove	= bcm_sf2_sw_remove,
+	.shutdown = bcm_sf2_sw_shutdown,
+	.driver = {
+		.name = "brcm-sf2",
+		.of_match_table = bcm_sf2_of_match,
+		.pm = &bcm_sf2_pm_ops,
+	},
 };
+module_platform_driver(bcm_sf2_driver);
+
+MODULE_AUTHOR("Broadcom Corporation");
+MODULE_DESCRIPTION("Driver for Broadcom Starfighter 2 ethernet switch chip");
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:brcm-sf2");

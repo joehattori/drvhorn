@@ -11,9 +11,5 @@ export WLLVM_OBJCOPY=/usr/bin/llvm-objcopy-14
 
 pushd build
 ../scripts/build-seahorn.sh
-SEAHORN=$PWD/run/bin/sea lit \
-  ../test/kernel/dvb_dev \
-  ../test/kernel/simple \
-  ../test/kernel/tpm_bios_measurements \
-  ../test/kernel/qca8k-8xxx
+SEAHORN=$PWD/run/bin/sea lit ../test/kernel/
 popd
