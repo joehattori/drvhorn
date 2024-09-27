@@ -15,8 +15,6 @@
 #include "seahorn/Analysis/SeaBuiltinsInfo.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
-#include <queue>
-
 #define COMPILER_USED_NAME "llvm.compiler.used"
 #define DEVICE_GETTER_PREFIX "drvhorn.embedded_device.getter."
 
