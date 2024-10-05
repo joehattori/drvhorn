@@ -11,7 +11,7 @@ using namespace llvm;
 
 namespace seahorn {
 
-static unsigned iPrivateGEPIndex = 41;
+static unsigned iPrivateInodeGEPIndex = 47;
 static unsigned fileOpOpenIndex = 13;
 
 class FileOperations : public ModulePass {
@@ -62,25 +62,27 @@ private:
     IRBuilder<> b(entry);
     Type *i32Ty = Type::getInt32Ty(m.getContext());
 
-    Type *inodePtrType = open->getArg(0)->getType();
+    Argument *inodeArg = open->getArg(0);
+    Type *inodePtrType = inodeArg->getType();
     Type *inodeType = inodePtrType->getPointerElementType();
-    const DenseMap<uint64_t, Type *> &fields =
-        iPrivateFields(open, inodePtrType);
+    const DenseMap<uint64_t, Type *> &fields = iPrivateFields(inodeArg);
     Value *inode = allocType(m, b, inodeType);
     size_t byteSize = getIPrivateSize(m, fields);
     Value *iPrivate = buildIPrivate(m, b, inodeType, inode, byteSize);
     populateFields(m, b, iPrivate, fields);
-    SmallVector<Value *, 8> devicePtrs =
-        embeddedStructDevicePtrs(m, b, iPrivate, fields);
-    switch (devicePtrs.size()) {
+    Function *setupKref = m.getFunction("drvhorn.setup_kref");
+    Type *krefType = setupKref->getArg(0)->getType()->getPointerElementType();
+    SmallVector<Value *, 8> krefPtrs =
+        embeddedKrefPtrs(m, b, iPrivate, fields, krefType);
+    switch (krefPtrs.size()) {
     case 0:
-      errs() << "No struct device found\n";
+      errs() << "No kref found\n";
       break;
     case 1:
-      callSetupKref(m, b, devicePtrs[0]);
+      callSetupKref(m, b, krefPtrs[0], setupKref, krefType);
       break;
     default:
-      errs() << "TODO: multiple struct device\n";
+      errs() << "TODO: multiple kref\n";
       return;
     }
 
@@ -91,22 +93,13 @@ private:
     b.CreateCondBr(notZero, fail, ret);
   }
 
-  void callSetupKref(Module &m, IRBuilder<> &b, Value *devicePtr) {
-    LLVMContext &ctx = m.getContext();
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Function *setupKref = m.getFunction("drvhorn.setup_kref");
-    PointerType *krefPtrType =
-        StructType::getTypeByName(m.getContext(), "struct.kref")
-            ->getPointerTo();
+  void callSetupKref(Module &m, IRBuilder<> &b, Value *krefPtr,
+                     Function *setupKref, Type *krefType) {
     GlobalVariable *globalKref = new GlobalVariable(
         m, setupKref->getArg(1)->getType()->getPointerElementType(), false,
         GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(krefPtrType), "drvhorn.kref.struct.device");
-    Value *krefPtr =
-        b.CreateGEP(devicePtr->getType()->getPointerElementType(), devicePtr,
-                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-                     ConstantInt::get(i32Ty, 6)});
+        ConstantPointerNull::get(krefType->getPointerTo()),
+        "drvhorn.kref.inode_private");
     if (setupKref->getArg(0)->getType() != krefPtr->getType())
       krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
     b.CreateCall(setupKref, {krefPtr, globalKref});
@@ -130,66 +123,59 @@ private:
     ReturnInst::Create(ctx, ConstantInt::get(i32Ty, 0), ret);
   }
 
-  DenseMap<uint64_t, Type *> iPrivateFields(const Function *fn,
-                                            const Type *inodePtrType) {
-    const Instruction *iPrivate = iPrivatePtr(fn, inodePtrType);
-    DenseMap<uint64_t, Type *> fields;
-    if (!iPrivate) {
-      errs() << "No i_private GEP found\n";
-      return fields;
-    }
-    for (const User *u : iPrivate->users()) {
-      collectIPrivateField(u, 0, iPrivate, fields);
-    }
-    return fields;
-  }
-
-  void collectIPrivateField(const User *user, uint64_t currentIndex,
-                            const Instruction *iPrivate,
-                            DenseMap<uint64_t, Type *> &fields) {
-    if (const GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(user)) {
-      if (gep->getNumIndices() != 1 || gep->getPointerOperand() != iPrivate) {
-        errs() << "TODO: handle this GEP in " << __func__ << *gep << '\n';
-        return;
-      }
-      const ConstantInt *idx = dyn_cast<ConstantInt>(gep->getOperand(1));
-      if (!idx)
-        return;
-      uint64_t intIdx = idx->getZExtValue();
-      for (const User *user : gep->users()) {
-        collectIPrivateField(user, intIdx, gep, fields);
-      }
-    } else if (const BitCastInst *bitcast = dyn_cast<BitCastInst>(user)) {
-      if (bitcast->getOperand(0) == iPrivate &&
-          bitcast->getDestTy()->isPointerTy())
-        fields[currentIndex] = bitcast->getDestTy()->getPointerElementType();
-    }
-  }
-
-  const Instruction *iPrivatePtr(const Function *fn, const Type *inodePtrType) {
-    for (const Instruction &inst : instructions(fn)) {
-      if (const GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(&inst)) {
-        if (isIPrivateGEP(gep, inodePtrType)) {
-          for (const User *user : gep->users()) {
-            if (const LoadInst *load = dyn_cast<LoadInst>(user)) {
-              if (load->getPointerOperand() == gep)
-                return load;
-            }
-          }
+  SmallVector<const Value *> getIPrivatePtrs(const Argument *arg) {
+    SmallVector<const GEPOperator *> geps;
+    for (const User *user : arg->users()) {
+      if (const GEPOperator *gep = dyn_cast<GEPOperator>(user)) {
+        if (gep->getNumIndices() != 2)
+          continue;
+        ConstantInt *idx = dyn_cast<ConstantInt>(gep->getOperand(2));
+        if (!idx)
+          continue;
+        if (idx->getZExtValue() == iPrivateInodeGEPIndex) {
+          geps.push_back(gep);
         }
+      }
+    }
+    SmallVector<const Value *> res;
+    for (const GEPOperator *gep : geps) {
+      for (const User *user : gep->users()) {
+        if (const LoadInst *load = dyn_cast<LoadInst>(user)) {
+          res.push_back(load);
+        }
+      }
+    }
+    return res;
+  }
+
+  Type *getActualIPrivateFieldType(const GEPOperator *fieldPtr) {
+    for (const User *user : fieldPtr->users()) {
+      if (const BitCastOperator *bitcast = dyn_cast<BitCastOperator>(user)) {
+        return bitcast->getDestTy()->getPointerElementType();
       }
     }
     return nullptr;
   }
 
-  bool isIPrivateGEP(const GetElementPtrInst *gep, const Type *inodePtrType) {
-    if (gep->getNumIndices() != 2)
-      return false;
-    ConstantInt *idx = dyn_cast<ConstantInt>(gep->getOperand(2));
-    if (!idx)
-      return false;
-    return gep->getPointerOperandType() == inodePtrType &&
-           idx->getZExtValue() == iPrivateGEPIndex;
+  DenseMap<uint64_t, Type *> iPrivateFields(const Argument *inodeArg) {
+    const SmallVector<const Value *> &iPrivatePtrs = getIPrivatePtrs(inodeArg);
+    DenseMap<uint64_t, Type *> fields;
+    for (const Value *iPrivatePtr : iPrivatePtrs) {
+      for (const User *user : iPrivatePtr->users()) {
+        if (const BitCastOperator *bitcast = dyn_cast<BitCastOperator>(user)) {
+          // if bitcasted before GEP, the dest type should be the type at the
+          // 0th index.
+          fields[0] = bitcast->getDestTy()->getPointerElementType();
+        } else if (const GEPOperator *gep = dyn_cast<GEPOperator>(user)) {
+          if (gep->getNumIndices() != 1)
+            continue;
+          ConstantInt *idx = dyn_cast<ConstantInt>(gep->getOperand(1));
+          uint64_t fieldIdx = idx->getZExtValue();
+          fields[fieldIdx] = getActualIPrivateFieldType(gep);
+        }
+      }
+    }
+    return fields;
   }
 
   Value *allocType(Module &m, IRBuilder<> &b, Type *type) {
@@ -238,7 +224,7 @@ private:
     Type *i32Type = Type::getInt32Ty(m.getContext());
     Type *i64Type = Type::getInt64Ty(m.getContext());
     Constant *zero = ConstantInt::get(i64Type, 0);
-    Constant *iPrivateOffset = ConstantInt::get(i32Type, iPrivateGEPIndex);
+    Constant *iPrivateOffset = ConstantInt::get(i32Type, iPrivateInodeGEPIndex);
     Value *iPrivateGEP =
         b.CreateGEP(inodeType, inodePtr, {zero, iPrivateOffset});
     Value *iPrivatePtr =
@@ -248,15 +234,9 @@ private:
   }
 
   SmallVector<Value *, 8>
-  embeddedStructDevicePtrs(Module &m, IRBuilder<> &b, Value *iPrivate,
-                           const DenseMap<uint64_t, Type *> &fields) {
+  embeddedKrefPtrs(Module &m, IRBuilder<> &b, Value *iPrivate,
+                   const DenseMap<uint64_t, Type *> &fields, Type *krefType) {
     SmallVector<Value *, 8> devicePtrs;
-    StructType *deviceType =
-        StructType::getTypeByName(m.getContext(), "struct.device");
-    if (!deviceType) {
-      errs() << "`struct device` type not found?\n";
-      return {};
-    }
     LLVMContext &ctx = m.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
@@ -273,7 +253,7 @@ private:
         Value *fieldValue = b.CreateLoad(fieldType, fieldPtr);
 
         SmallVector<uint64_t, 8> indices =
-            indicesToDeviceType(structType, deviceType);
+            indicesToKrefType(structType, krefType);
         if (indices.empty())
           continue;
         SmallVector<Value *, 8> gepIndices;
@@ -289,18 +269,17 @@ private:
     return devicePtrs;
   }
 
-  SmallVector<uint64_t, 8> indicesToDeviceType(const StructType *type,
-                                               StructType *deviceType) {
+  SmallVector<uint64_t, 8> indicesToKrefType(const StructType *type,
+                                             Type *krefType) {
     for (size_t i = 0; i < type->getNumElements(); i++) {
       const StructType *fieldType =
           dyn_cast<StructType>(type->getElementType(i));
       if (!fieldType)
         continue;
-      if (equivTypes(fieldType, deviceType)) {
+      if (equivTypes(fieldType, krefType)) {
         return {i};
       }
-      SmallVector<uint64_t, 8> indices =
-          indicesToDeviceType(fieldType, deviceType);
+      SmallVector<uint64_t, 8> indices = indicesToKrefType(fieldType, krefType);
       if (!indices.empty()) {
         indices.push_back(i);
         return indices;

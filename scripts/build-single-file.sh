@@ -7,7 +7,7 @@ OUT=$2
 
 KERNEL_DIR=${KERNEL_DIR:-./kernel}
 
-LLVM_COMPILER=clang WLLVM_OBJCOPY=llvm-objcopy wllvm \
+clang-14 \
   --target=x86_64-unknown-linux-gnu \
   -I${KERNEL_DIR}/arch/x86/include \
   -I${KERNEL_DIR}/arch/x86/include/generated \
@@ -29,5 +29,6 @@ LLVM_COMPILER=clang WLLVM_OBJCOPY=llvm-objcopy wllvm \
   -DKBUILD_MODNAME=seahorn \
   -D__KBUILD_MODNAME=seahorn \
   -fshort-wchar \
+  -emit-llvm \
   -c $FILE \
-  -o $OUT
+  -o $OUT.bc

@@ -356,11 +356,16 @@ private:
     }
   }
 
+  Type *getKrefTy(Module &m) {
+    Function *krefInit = m.getFunction("kref_init");
+    return krefInit->getArg(0)->getType()->getPointerElementType();
+  }
+
   Function *buildKrefInit(Module &m) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    StructType *krefTy = StructType::getTypeByName(ctx, "struct.kref");
+    Type *krefTy = getKrefTy(m);
     FunctionType *krefInitTy = FunctionType::get(
         Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
     Function *krefInit =
@@ -382,7 +387,7 @@ private:
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    StructType *krefTy = StructType::getTypeByName(ctx, "struct.kref");
+    Type *krefTy = getKrefTy(m);
     FunctionType *krefGetTy = FunctionType::get(
         Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
     Function *krefGet =
@@ -405,7 +410,7 @@ private:
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    StructType *krefTy = StructType::getTypeByName(ctx, "struct.kref");
+    Type *krefTy = getKrefTy(m);
     FunctionType *krefPutTy =
         FunctionType::get(i32Ty, {krefTy->getPointerTo()}, false);
     Function *krefPut =
@@ -1521,23 +1526,11 @@ private:
 
   void handleCpuid(Module &M) {
     std::vector<CallInst *> calls = getTargetAsmCalls(M, CPUID, false);
-    LLVMContext &ctx = M.getContext();
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    FunctionCallee ndf = getNondetFn(i32Ty, M);
     for (CallInst *call : calls) {
-      IRBuilder<> B(call);
-      Value *eax = B.CreateCall(ndf);
-      Value *ebx = B.CreateCall(ndf);
-      Value *ecx = B.CreateCall(ndf);
-      Value *edx = B.CreateCall(ndf);
-
-      Type *cpuidRetType = call->getType();
-      Value *empty = UndefValue::get(cpuidRetType);
-      Value *setEax = B.CreateInsertValue(empty, eax, {0});
-      Value *setEbx = B.CreateInsertValue(setEax, ebx, {1});
-      Value *setEcx = B.CreateInsertValue(setEbx, ecx, {2});
-      Value *setEdx = B.CreateInsertValue(setEcx, edx, {3});
-      call->replaceAllUsesWith(setEdx);
+      FunctionCallee ndf = getNondetFn(call->getType(), M);
+      IRBuilder<> b(call);
+      Value *ndval = b.CreateCall(ndf);
+      call->replaceAllUsesWith(ndval);
       call->eraseFromParent();
     }
   }

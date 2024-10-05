@@ -6,9 +6,9 @@ INPUT=$1
 BASE=$2
 OUT=$3
 KERNEL_DIR=${4:-./kernel}
-OBJNAME=$(mktemp /tmp/seahorn.XXXX.o)
+OBJNAME=$(mktemp /tmp/seahorn.XXXX.bc)
 
-wllvm \
+clang-14 \
   --target=x86_64-unknown-linux-gnu \
   -I${KERNEL_DIR}/arch/x86/include \
   -I${KERNEL_DIR}/arch/x86/include/generated \
@@ -35,8 +35,7 @@ wllvm \
   -DKBUILD_MODNAME=\"seahorn\" \
   -D__KBUILD_MODNAME=\"seahorn\" \
   -fshort-wchar \
-  -fno-inline-functions \
+  -emit-llvm \
   -c ${INPUT} \
   -o ${OBJNAME}
-extract-bc ${OBJNAME}
-llvm-link-14 ${BASE} ${OBJNAME}.bc -o ${OUT}
+llvm-link-14 ${BASE} ${OBJNAME} -o ${OUT}

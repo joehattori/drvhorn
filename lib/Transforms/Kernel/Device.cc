@@ -128,24 +128,48 @@ private:
         std::exit(1);
       }
       StructType *t = nullptr;
-      if (gv->getName().equals("mdio_bus_class")) {
-        t = StructType::getTypeByName(ctx, "struct.mii_bus");
-      } else if (gv->getName().equals("power_supply_class")) {
-        t = StructType::getTypeByName(ctx, "struct.power_supply");
-      } else if (gv->getName().equals("net_class")) {
-        t = StructType::getTypeByName(ctx, "struct.net_device");
-      } else if (gv->getName().equals("mdio_bus_type")) {
-        t = StructType::getTypeByName(ctx, "struct.phy_device");
-      } else if (gv->getName().equals("platform_bus_type")) {
-        t = StructType::getTypeByName(ctx, "struct.platform_device");
-      } else if (gv->getName().equals("acpi_bus_type")) {
-        t = StructType::getTypeByName(ctx, "struct.acpi_device");
-      } else {
+      std::pair<StringRef, StringRef> classToDevType[] = {
+          {"mdio_bus_class", "struct.mii_bus"},
+          {"power_supply_class", "struct.power_supply"},
+          {"net_class", "struct.net_device"},
+          {"mdio_bus_type", "struct.phy_device"},
+          {"platform_bus_type", "struct.platform_device"},
+          {"acpi_bus_type", "struct.acpi_device"},
+          {"tty_class", "struct.device"},
+          {"backlight_class", "struct.backlight_device"},
+          {"shost_class", "struct.Scsi_Host"},
+          {"rtc_class", "struct.rtc_device"},
+          {"block_class", "struct.block_device"},
+          {"leds_class", "struct.device"},
+          {"ptp_class", "struct.ptp_clock"},
+          {"pci_bus_type", "struct.pci_dev"},
+          {"mipi_dsi_bus_type", "struct.mipi_dsi_device"},
+          {"auxiliary_bus_type", "struct.auxiliary_device"},
+          {"scsi_bus_type", "struct.scsi_device"},
+          {"i2c_bus_type", "struct.i2c_client"},
+          {"usb_bus_type", "struct.usb_device"},
+          {"nvmem_bus_type", "struct.nvmem_device"},
+      };
+      for (std::pair<StringRef, StringRef> p : classToDevType) {
+        if (gv->getName().equals(p.first)) {
+          t = StructType::getTypeByName(ctx, p.second);
+          break;
+        }
+      }
+      if (!t) {
         errs() << "unknown class or bus " << *gv << '\n';
         std::exit(1);
       }
-      if (structTypeReplacer.count(t))
-        return structTypeReplacer[t];
+
+      if (Function *f = structTypeReplacer.lookup(t))
+        return f;
+
+      if (t->getName().equals("struct.device")) {
+        Function *f = rawDeviceGetter(m, t);
+        structTypeReplacer[t] = f;
+        return f;
+      }
+
       Optional<SmallVector<size_t>> devIndices = getEmbeddedDeviceIndices(t);
       if (!devIndices.hasValue()) {
         errs() << "surroundingDevType " << *t << " does not embed a device\n";
@@ -174,16 +198,55 @@ private:
     return {};
   }
 
+  Function *rawDeviceGetter(Module &m, StructType *devType) {
+    LLVMContext &ctx = m.getContext();
+    Function *krefSetup = m.getFunction("drvhorn.setup_kref");
+    PointerType *krefPtrType =
+        cast<PointerType>(krefSetup->getArg(0)->getType());
+    GlobalVariable *globalKref = new GlobalVariable(
+        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        ConstantPointerNull::get(krefPtrType), "drvhorn.kref.raw_device");
+    PointerType *devPtrType = devType->getPointerTo();
+    Function *getter =
+        Function::Create(FunctionType::get(devPtrType, false),
+                         GlobalValue::LinkageTypes::ExternalLinkage,
+                         "drvhorn.device_getter.raw", &m);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", getter);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", getter);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", getter);
+    IRBuilder<> b(entry);
+    Value *ndCond = b.CreateCall(m.getFunction("nd_bool"));
+    b.CreateCondBr(ndCond, body, ret);
+
+    b.SetInsertPoint(body);
+    Value *devPtr = b.CreateAlloca(devType);
+    Value *krefPtr = b.CreateGEP(devType, devPtr,
+                                 {ConstantInt::get(Type::getInt64Ty(ctx), 0),
+                                  ConstantInt::get(Type::getInt32Ty(ctx), 0),
+                                  ConstantInt::get(Type::getInt32Ty(ctx), 6)});
+    callWithNecessaryBitCast(krefSetup, {krefPtr, globalKref}, b);
+    callWithNecessaryBitCast(m.getFunction("get_device"), {devPtr}, b);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *phi = b.CreatePHI(devPtrType, 2);
+    phi->addIncoming(ConstantPointerNull::get(devPtrType), entry);
+    phi->addIncoming(devPtr, body);
+    b.CreateRet(phi);
+    return getter;
+  }
+
   Function *embeddedDeviceGetter(Module &m, StructType *surroundingDevType,
                                  ArrayRef<size_t> devIndices) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Function *krefSetup = m.getFunction("drvhorn.setup_kref");
     PointerType *krefPtrType =
-        StructType::getTypeByName(ctx, "struct.kref")->getPointerTo();
+        cast<PointerType>(krefSetup->getArg(0)->getType());
 
     std::string suffix = surroundingDevType->getName().str();
-    std::string funcName = "drvhorn.embedded_device.getter." + suffix;
+    std::string funcName = "drvhorn.device_getter.embedded." + suffix;
 
     GlobalVariable *globalKref = new GlobalVariable(
         m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
@@ -219,8 +282,7 @@ private:
         b.CreateGEP(devPtr->getType()->getPointerElementType(), devPtr,
                     {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
                      ConstantInt::get(i32Ty, 6)});
-    callWithNecessaryBitCast(m.getFunction("drvhorn.setup_kref"),
-                             {krefPtr, globalKref}, b);
+    callWithNecessaryBitCast(krefSetup, {krefPtr, globalKref}, b);
     callWithNecessaryBitCast(m.getFunction("get_device"), {devPtr}, b);
     b.CreateBr(ret);
 
@@ -273,7 +335,10 @@ private:
   }
 
   void killDeviceNodeNotify(Module &m) {
-    for (CallInst *call : getCalls(m.getFunction("of_property_notify"))) {
+    Function *f = m.getFunction("of_property_notify");
+    if (!f)
+      return;
+    for (CallInst *call : getCalls(f)) {
       Value *zero = ConstantInt::get(call->getType(), 0);
       call->replaceAllUsesWith(zero);
       call->eraseFromParent();

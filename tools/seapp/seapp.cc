@@ -457,6 +457,9 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
     } else if (!DsaSwitchOps.empty()) {
       pm_wrapper.add(seahorn::createDsaSwitchOpsPass(DsaSwitchOps));
+    } else {
+      llvm::errs() << "Unknown kernel target\n";
+      return 1;
     }
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());

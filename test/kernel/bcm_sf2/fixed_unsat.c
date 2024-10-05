@@ -684,7 +684,7 @@ static int bcm_sf2_mdio_register_unsat(struct dsa_switch *ds)
 	}
 
 	err = mdiobus_register(priv->slave_mii_bus);
-	if (err && dn)
+	if (err)
 		goto err_free_slave_mii_bus;
 
 	return 0;
@@ -1341,7 +1341,7 @@ static const struct of_device_id bcm_sf2_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, bcm_sf2_of_match);
 
-static int bcm_sf2_sw_probe(struct platform_device *pdev)
+static int bcm_sf2_sw_probe_unsat(struct platform_device *pdev)
 {
 	const char *reg_names[BCM_SF2_REGS_NUM] = BCM_SF2_REGS_NAME;
 	struct device_node *dn = pdev->dev.of_node;
@@ -1606,8 +1606,8 @@ static SIMPLE_DEV_PM_OPS(bcm_sf2_pm_ops,
 			 bcm_sf2_suspend, bcm_sf2_resume);
 
 
-static struct platform_driver bcm_sf2_driver = {
-	.probe	= bcm_sf2_sw_probe,
+struct platform_driver bcm_sf2_driver_unsat = {
+	.probe	= bcm_sf2_sw_probe_unsat,
 	.remove	= bcm_sf2_sw_remove,
 	.shutdown = bcm_sf2_sw_shutdown,
 	.driver = {
@@ -1616,7 +1616,7 @@ static struct platform_driver bcm_sf2_driver = {
 		.pm = &bcm_sf2_pm_ops,
 	},
 };
-module_platform_driver(bcm_sf2_driver);
+module_platform_driver(bcm_sf2_driver_unsat);
 
 MODULE_AUTHOR("Broadcom Corporation");
 MODULE_DESCRIPTION("Driver for Broadcom Starfighter 2 ethernet switch chip");

@@ -16,7 +16,7 @@
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 #define COMPILER_USED_NAME "llvm.compiler.used"
-#define DEVICE_GETTER_PREFIX "drvhorn.embedded_device.getter."
+#define DEVICE_GETTER_PREFIX "drvhorn.device_getter."
 
 using namespace llvm;
 
@@ -259,9 +259,7 @@ public:
 
   bool runOnModule(Module &m) override {
     updateLinkage(m);
-    runDCEPasses(m);
     removeCompilerUsed(m);
-    removeObviousGetPutPairs(m);
     runDCEPasses(m);
 
     slimDownOnlyReachables(m);
@@ -287,46 +285,6 @@ private:
       compilerUsed->eraseFromParent();
       // llvm.compiler.used seems to be required, so insert an empty value
       M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
-    }
-  }
-
-  void removeObviousGetPutPairs(Module &m) {
-    // remove obvious get/put pairs.
-    // If a pair resides in the same basic block, we can remove them.
-    std::pair<StringRef, StringRef> pairs[] = {
-        {"kobject_get", "kobject_put"},
-        {"get_device", "put_device"},
-        {"of_node_get", "of_node_put"},
-    };
-    for (std::pair<StringRef, StringRef> &p : pairs) {
-      for (Function &f : m) {
-        for (BasicBlock &blk : f) {
-          CallInst *getter = nullptr;
-          CallInst *putter = nullptr;
-          Value *op = nullptr;
-          for (Instruction &inst : blk) {
-            if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-              Function *callee = extractCalledFunction(call);
-              if (!getter) {
-                if (callee && callee->getName().equals(p.first)) {
-                  getter = call;
-                  op = call->getArgOperand(0);
-                }
-              } else {
-                if (callee && callee->getName().equals(p.second) &&
-                    call->getArgOperand(0) == op)
-                  putter = call;
-              }
-            }
-          }
-          if (putter) {
-            getter->replaceAllUsesWith(op);
-            putter->replaceAllUsesWith(op);
-            getter->eraseFromParent();
-            putter->eraseFromParent();
-          }
-        }
-      }
     }
   }
 

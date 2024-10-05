@@ -70,7 +70,7 @@ private:
     Type *pdevType = pdev->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     PointerType *krefPtrType =
-        StructType::getTypeByName(ctx, "struct.kref")->getPointerTo();
+        cast<PointerType>(setupKref->getArg(0)->getType());
     StringRef kobjName = "drvhorn.kref.struct.platform_device";
     Value *globalKref = m.getGlobalVariable(kobjName, true);
     if (!globalKref) {

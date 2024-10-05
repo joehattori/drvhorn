@@ -1,0 +1,343 @@
+diff --git a/Makefile b/Makefile
+index 5c418efbe89b..62a63881a405 100644
+--- a/Makefile
++++ b/Makefile
+@@ -488,6 +488,7 @@ OBJCOPY		= $(LLVM_PREFIX)llvm-objcopy$(LLVM_SUFFIX)
+ OBJDUMP		= $(LLVM_PREFIX)llvm-objdump$(LLVM_SUFFIX)
+ READELF		= $(LLVM_PREFIX)llvm-readelf$(LLVM_SUFFIX)
+ STRIP		= $(LLVM_PREFIX)llvm-strip$(LLVM_SUFFIX)
++LINK		= $(LLVM_PREFIX)llvm-link$(LLVM_SUFFIX)
+ else
+ CC		= $(CROSS_COMPILE)gcc
+ LD		= $(CROSS_COMPILE)ld
+@@ -615,6 +616,7 @@ export KBUILD_AFLAGS AFLAGS_KERNEL AFLAGS_MODULE
+ export KBUILD_AFLAGS_MODULE KBUILD_CFLAGS_MODULE KBUILD_RUSTFLAGS_MODULE KBUILD_LDFLAGS_MODULE
+ export KBUILD_AFLAGS_KERNEL KBUILD_CFLAGS_KERNEL KBUILD_RUSTFLAGS_KERNEL
+ export PAHOLE_FLAGS
++export LINK
+ 
+ # Files to ignore in find ... statements
+ 
+@@ -752,7 +754,7 @@ endif # KBUILD_EXTMOD
+ # command line.
+ # This allow a user to issue only 'make' to build a kernel including modules
+ # Defaults to vmlinux, but the arch makefile usually adds further targets
+-all: vmlinux
++all: vmlinux vmlinux.bc
+ 
+ CFLAGS_GCOV	:= -fprofile-arcs -ftest-coverage
+ ifdef CONFIG_CC_IS_GCC
+@@ -1141,6 +1143,17 @@ targets += vmlinux.a
+ vmlinux.a: $(KBUILD_VMLINUX_OBJS) scripts/head-object-list.txt FORCE
+ 	$(call if_changed,ar_vmlinux.a)
+ 
++KBUILD_VMLINUX_BC := $(KBUILD_VMLINUX_OBJS:.a=.bc)
++
++quiet_cmd_link_vmlinux.bc = AR      $@
++      cmd_link_vmlinux.bc = \
++	rm -f $@; \
++	$(LINK) -o $@ $(KBUILD_VMLINUX_BC)
++
++targets += vmlinux.bc
++vmlinux.bc: $(KBUILD_VMLINUX_BC) FORCE
++	$(call if_changed,link_vmlinux.bc)
++
+ PHONY += vmlinux_o
+ vmlinux_o: vmlinux.a $(KBUILD_VMLINUX_LIBS)
+ 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.vmlinux_o
+diff --git a/drivers/firmware/efi/libstub/Makefile b/drivers/firmware/efi/libstub/Makefile
+index a1157c2a7170..7cecf857f6b3 100644
+--- a/drivers/firmware/efi/libstub/Makefile
++++ b/drivers/firmware/efi/libstub/Makefile
+@@ -82,6 +82,9 @@ lib-$(CONFIG_EFI_PARAMS_FROM_FDT) += fdt.o \
+ $(obj)/lib-%.o: $(srctree)/lib/%.c FORCE
+ 	$(call if_changed_rule,cc_o_c)
+ 
++$(obj)/lib-%.bc: $(srctree)/lib/%.c FORCE
++	$(call if_changed,cc_bc_c)
++
+ lib-$(CONFIG_EFI_GENERIC_STUB)	+= efi-stub.o string.o intrinsics.o systable.o \
+ 				   screen_info.o efi-stub-entry.o
+ 
+@@ -161,6 +164,9 @@ STUBCOPY_RELOC-$(CONFIG_LOONGARCH)	:= R_LARCH_MARK_LA
+ $(obj)/%.stub.o: $(obj)/%.o FORCE
+ 	$(call if_changed,stubcopy)
+ 
++$(obj)/%.stub.bc: $(obj)/%.bc FORCE
++	$(call if_changed,bc_copy)
++
+ #
+ # Strip debug sections and some other sections that may legally contain
+ # absolute relocations, so that we can inspect the remaining sections for
+@@ -175,3 +181,6 @@ quiet_cmd_stubcopy = STUBCPY $@
+ 		/bin/false;						\
+ 	fi;								\
+ 	$(OBJCOPY) $(STUBCOPY_FLAGS-y) $< $@
++
++quiet_cmd_bc_copy = STUBCPY $@
++      cmd_bc_copy = cp $< $@
+diff --git a/include/linux/kref.h b/include/linux/kref.h
+index d32e21a2538c..9e87080c9bd0 100644
+--- a/include/linux/kref.h
++++ b/include/linux/kref.h
+@@ -15,6 +15,7 @@
+ 
+ #include <linux/spinlock.h>
+ #include <linux/refcount.h>
++#include <linux/compiler_attributes.h>
+ 
+ struct kref {
+ 	refcount_t refcount;
+@@ -26,12 +27,12 @@ struct kref {
+  * kref_init - initialize object.
+  * @kref: object in question.
+  */
+-static inline void kref_init(struct kref *kref)
++static noinline __maybe_unused void kref_init(struct kref *kref)
+ {
+ 	refcount_set(&kref->refcount, 1);
+ }
+ 
+-static inline unsigned int kref_read(const struct kref *kref)
++static noinline __maybe_unused unsigned int kref_read(const struct kref *kref)
+ {
+ 	return refcount_read(&kref->refcount);
+ }
+@@ -40,7 +41,7 @@ static inline unsigned int kref_read(const struct kref *kref)
+  * kref_get - increment refcount for object.
+  * @kref: object.
+  */
+-static inline void kref_get(struct kref *kref)
++static noinline __maybe_unused void kref_get(struct kref *kref)
+ {
+ 	refcount_inc(&kref->refcount);
+ }
+@@ -59,7 +60,7 @@ static inline void kref_get(struct kref *kref)
+  * memory.  Only use the return value if you want to see if the kref is now
+  * gone, not present.
+  */
+-static inline int kref_put(struct kref *kref, void (*release)(struct kref *kref))
++static noinline __maybe_unused int kref_put(struct kref *kref, void (*release)(struct kref *kref))
+ {
+ 	if (refcount_dec_and_test(&kref->refcount)) {
+ 		release(kref);
+@@ -68,7 +69,7 @@ static inline int kref_put(struct kref *kref, void (*release)(struct kref *kref)
+ 	return 0;
+ }
+ 
+-static inline int kref_put_mutex(struct kref *kref,
++static noinline __maybe_unused int kref_put_mutex(struct kref *kref,
+ 				 void (*release)(struct kref *kref),
+ 				 struct mutex *lock)
+ {
+@@ -79,7 +80,7 @@ static inline int kref_put_mutex(struct kref *kref,
+ 	return 0;
+ }
+ 
+-static inline int kref_put_lock(struct kref *kref,
++static noinline __maybe_unused int kref_put_lock(struct kref *kref,
+ 				void (*release)(struct kref *kref),
+ 				spinlock_t *lock)
+ {
+@@ -106,7 +107,7 @@ static inline int kref_put_lock(struct kref *kref,
+  * locking in the kref_put path can be deferred to the actual removal from
+  * the lookup structure and RCU lookups become trivial.
+  */
+-static inline int __must_check kref_get_unless_zero(struct kref *kref)
++static noinline __maybe_unused int __must_check kref_get_unless_zero(struct kref *kref)
+ {
+ 	return refcount_inc_not_zero(&kref->refcount);
+ }
+diff --git a/lib/Makefile b/lib/Makefile
+index 740109b6e2c8..6484c7fecb55 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -301,6 +301,7 @@ obj-$(CONFIG_BOOT_CONFIG) += bootconfig.o
+ obj-$(CONFIG_BOOT_CONFIG_EMBED) += bootconfig-data.o
+ 
+ $(obj)/bootconfig-data.o: $(obj)/default.bconf
++$(obj)/bootconfig-data.bc: $(obj)/default.bconf
+ 
+ targets += default.bconf
+ filechk_defbconf = cat $(or $(real-prereqs), /dev/null)
+@@ -323,6 +324,7 @@ clean-files	:= crc32table.h
+ clean-files	+= crc64table.h
+ 
+ $(obj)/crc32.o: $(obj)/crc32table.h
++$(obj)/crc32.bc: $(obj)/crc32table.h
+ 
+ quiet_cmd_crc32 = GEN     $@
+       cmd_crc32 = $< > $@
+@@ -331,6 +333,7 @@ $(obj)/crc32table.h: $(obj)/gen_crc32table
+ 	$(call cmd,crc32)
+ 
+ $(obj)/crc64.o: $(obj)/crc64table.h
++$(obj)/crc64.bc: $(obj)/crc64table.h
+ 
+ quiet_cmd_crc64 = GEN     $@
+       cmd_crc64 = $< > $@
+@@ -344,6 +347,7 @@ $(obj)/crc64table.h: $(obj)/gen_crc64table
+ obj-$(CONFIG_OID_REGISTRY) += oid_registry.o
+ 
+ $(obj)/oid_registry.o: $(obj)/oid_registry_data.c
++$(obj)/oid_registry.bc: $(obj)/oid_registry_data.c
+ 
+ $(obj)/oid_registry_data.c: $(srctree)/include/linux/oid_registry.h \
+ 			    $(src)/build_OID_registry
+diff --git a/scripts/Makefile.build b/scripts/Makefile.build
+index 82e3fb19fdaf..41731e0a3878 100644
+--- a/scripts/Makefile.build
++++ b/scripts/Makefile.build
+@@ -33,6 +33,9 @@ ldflags-y  :=
+ subdir-asflags-y :=
+ subdir-ccflags-y :=
+ 
++bc-y :=
++lib-bc-y :=
++
+ # Read auto.conf if it exists, otherwise ignore
+ -include include/config/auto.conf
+ 
+@@ -70,16 +73,19 @@ endif
+ 
+ # subdir-builtin and subdir-modorder may contain duplications. Use $(sort ...)
+ subdir-builtin := $(sort $(filter %/built-in.a, $(real-obj-y)))
++subdir-builtin-bc := $(sort $(filter %/built-in.bc, $(real-bc-y)))
+ subdir-modorder := $(sort $(filter %/modules.order, $(obj-m)))
+ 
+ targets-for-builtin := $(extra-y)
+ 
+ ifneq ($(strip $(lib-y) $(lib-m) $(lib-)),)
+ targets-for-builtin += $(obj)/lib.a
++targets-for-builtin += $(obj)/lib.bc
+ endif
+ 
+ ifdef need-builtin
+ targets-for-builtin += $(obj)/built-in.a
++targets-for-builtin += $(obj)/built-in.bc
+ endif
+ 
+ targets-for-modules := $(foreach x, o mod, \
+@@ -160,6 +166,11 @@ quiet_cmd_cc_o_c = CC $(quiet_modtag)  $@
+ 		$(cmd_ld_single_m) \
+ 		$(cmd_objtool)
+ 
++quiet_cmd_cc_bc_c = CC $(quiet_modtag)  $@
++      cmd_cc_bc_c = $(CC) $(c_flags) -emit-llvm -c -o $@ $< \
++		$(cmd_ld_single_m) \
++		$(cmd_objtool)
++
+ ifdef CONFIG_MODVERSIONS
+ # When module versioning is enabled the following steps are executed:
+ # o compile a <file>.o from <file>.c
+@@ -243,6 +254,9 @@ $(obj)/%.o: $(src)/%.c $(recordmcount_source) FORCE
+ 	$(call if_changed_rule,cc_o_c)
+ 	$(call cmd,force_checksrc)
+ 
++$(obj)/%.bc: $(src)/%.c $(recordmcount_source) FORCE
++	$(call if_changed,cc_bc_c)
++
+ # To make this rule robust against "Argument list too long" error,
+ # ensure to add $(obj)/ prefix by a shell command.
+ cmd_mod = printf '%s\n' $(call real-search, $*.o, .o, -objs -y -m) | \
+@@ -347,6 +361,10 @@ $(obj)/%.s: $(src)/%.S FORCE
+ quiet_cmd_as_o_S = AS $(quiet_modtag)  $@
+       cmd_as_o_S = $(CC) $(a_flags) -c -o $@ $< $(cmd_objtool)
+ 
++# Abandon .S files.
++quiet_cmd_as_bc_S = AS $(quiet_modtag)  $@
++      cmd_as_bc_S = echo "" > $@
++
+ ifdef CONFIG_ASM_MODVERSIONS
+ 
+ # versioning matches the C process described above, with difference that
+@@ -359,9 +377,13 @@ endif
+ $(obj)/%.o: $(src)/%.S FORCE
+ 	$(call if_changed_rule,as_o_S)
+ 
++$(obj)/%.bc: $(src)/%.S FORCE
++	$(call if_changed,as_bc_S)
++
+ targets += $(filter-out $(subdir-builtin), $(real-obj-y))
++targets += $(filter-out $(subdir-builtin-bc), $(real-bc-y))
+ targets += $(filter-out $(subdir-modorder), $(real-obj-m))
+-targets += $(real-dtb-y) $(lib-y) $(always-y)
++targets += $(real-dtb-y) $(lib-y) $(lib-bc-y) $(always-y)
+ 
+ # Linker scripts preprocessor (.lds.S -> .lds)
+ # ---------------------------------------------------------------------------
+@@ -386,6 +408,7 @@ $(obj)/%.asn1.c $(obj)/%.asn1.h: $(src)/%.asn1 $(objtree)/scripts/asn1_compiler
+ 
+ # To build objects in subdirs, we need to descend into the directories
+ $(subdir-builtin): $(obj)/%/built-in.a: $(obj)/% ;
++$(subdir-builtin-bc): $(obj)/%/built-in.bc: $(obj)/% ;
+ $(subdir-modorder): $(obj)/%/modules.order: $(obj)/% ;
+ 
+ #
+@@ -399,9 +422,16 @@ quiet_cmd_ar_builtin = AR      $@
+ 	$(if $(real-prereqs), printf "$(obj)/%s " $(patsubst $(obj)/%,%,$(real-prereqs)) | xargs) \
+ 	$(AR) cDPrST $@
+ 
++quiet_cmd_link_builtin = AR      $@
++      cmd_link_builtin = rm -f $@; \
++	$(if $(real-prereqs), printf "$(obj)/%s " $(patsubst $(obj)/%,%,$(real-prereqs)) | xargs $(LINK) -o $@, echo "" > $@)
++
+ $(obj)/built-in.a: $(real-obj-y) FORCE
+ 	$(call if_changed,ar_builtin)
+ 
++$(obj)/built-in.bc: $(real-bc-y) FORCE
++	$(call if_changed,link_builtin)
++
+ #
+ # Rule to create modules.order file
+ #
+@@ -424,6 +454,9 @@ $(obj)/modules.order: $(obj-m) FORCE
+ $(obj)/lib.a: $(lib-y) FORCE
+ 	$(call if_changed,ar)
+ 
++$(obj)/lib.bc: $(lib-bc-y) FORCE
++	$(call if_changed,link)
++
+ quiet_cmd_ld_multi_m = LD [M]  $@
+       cmd_ld_multi_m = $(LD) $(ld_flags) -r -o $@ @$(patsubst %.o,%.mod,$@) $(cmd_objtool)
+ 
+diff --git a/scripts/Makefile.lib b/scripts/Makefile.lib
+index 68d0134bdbf9..ce7a77f00c04 100644
+--- a/scripts/Makefile.lib
++++ b/scripts/Makefile.lib
+@@ -104,6 +104,10 @@ real-dtb-y	:= $(addprefix $(obj)/, $(real-dtb-y))
+ subdir-ym	:= $(addprefix $(obj)/,$(subdir-ym))
+ endif
+ 
++bc-y := $(patsubst %.a,%.bc,$(patsubst %.o,%.bc,$(obj-y)))
++lib-bc-y := $(patsubst %.a,%.bc,$(patsubst %.o,%.bc,$(lib-y)))
++real-bc-y := $(patsubst %.a,%.bc,$(patsubst %.o,%.bc,$(real-obj-y)))
++
+ # Finds the multi-part object the current object will be linked into.
+ # If the object belongs to two or more multi-part objects, list them all.
+ modname-multi = $(sort $(foreach m,$(multi-obj-ym),\
+@@ -325,6 +329,10 @@ quiet_cmd_ld = LD      $@
+ quiet_cmd_ar = AR      $@
+       cmd_ar = rm -f $@; $(AR) cDPrsT $@ $(real-prereqs)
+ 
++quiet_cmd_link = AR      $@
++      cmd_link = rm -f $@; \
++      $(if $(real-prereqs), $(LINK) -o $@ $(real-prereqs), echo "" > $(@))
++
+ # Objcopy
+ # ---------------------------------------------------------------------------
+ 
+diff --git a/scripts/Makefile.modfinal b/scripts/Makefile.modfinal
+index b3a6aa8fbe8c..87c78056fbab 100644
+--- a/scripts/Makefile.modfinal
++++ b/scripts/Makefile.modfinal
+@@ -25,6 +25,9 @@ part-of-module = y
+ quiet_cmd_cc_o_c = CC [M]  $@
+       cmd_cc_o_c = $(CC) $(filter-out $(CC_FLAGS_CFI) $(CFLAGS_GCOV), $(c_flags)) -c -o $@ $<
+ 
++quiet_cmd_cc_bc_c = CC [M]  $@
++      cmd_cc_bc_c = $(CC) $(filter-out $(CC_FLAGS_CFI) $(CFLAGS_GCOV), $(c_flags)) -emit-llvm -c -o $@ $<
++
+ %.mod.o: %.mod.c FORCE
+ 	$(call if_changed_dep,cc_o_c)
+ 

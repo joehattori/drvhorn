@@ -41,12 +41,13 @@ public:
   InitGlobalKrefs() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    StructType *krefType =
-        StructType::getTypeByName(m.getContext(), "struct.kref");
+    LLVMContext &ctx = m.getContext();
+    Function *checker = m.getFunction("drvhorn.assert_kref");
+    StructType *krefType = cast<StructType>(
+        checker->getArg(0)->getType()->getPointerElementType());
 
     bool changed = false;
 
-    LLVMContext &ctx = m.getContext();
     Function *prelude = Function::Create(
         FunctionType::get(Type::getVoidTy(ctx), false),
         GlobalValue::LinkageTypes::PrivateLinkage, "drvhorn.prelude", m);
@@ -84,7 +85,6 @@ public:
 
     Function *main = m.getFunction("main");
     callPreludeInMain(main, prelude);
-    Function *checker = m.getFunction("drvhorn.assert_kref");
     insertKrefAssertions(main, checker);
     return changed;
   }
