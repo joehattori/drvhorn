@@ -314,6 +314,8 @@ class Seapp(sea.LimitedCmd):
                          default=None, metavar='str')
 
         # kernel options
+        ap.add_argument ('--list-ops', dest='list_ops', help='List device driver operations',
+                         type=str, metavar='str,..')
         ap.add_argument ('--specific-function', dest='specific_function', help='Specify a specific function name to verify',
                          type=str, metavar='str,..')
         ap.add_argument ('--acpi-driver', dest='acpi_driver', help='Specify a ACPI driver to validate',
@@ -496,6 +498,9 @@ class Seapp(sea.LimitedCmd):
 
             if args.specific_function:
                 argv.append ('--specific-function={0}'.format (args.specific_function))
+
+            if args.list_ops:
+                argv.append ('--list-ops={0}'.format (args.list_ops))
 
             if args.acpi_driver:
                 argv.append ('--acpi-driver={0}'.format (args.acpi_driver))
@@ -1750,3 +1755,5 @@ Kernel = sea.SeqCmd('kernel', 'Linux kernel verification: alias for pp|ms|opt|ho
 ExeKernel = sea.SeqCmd ('exe-kernel', 'alias for clang|pp --strip-extern|pp --internalize|wmem|rmtf|linkrt',
                   [Seapp(strip_extern=True, keep_lib_fn=True, kernel=True),
                    Seapp(internalize=True), WrapMem(), RemoveTargetFeatures(), LinkRt()])
+KernelAnalysis = sea.SeqCmd('kernel-analysis', 'list device driver operations in the kernel.',
+                [Seapp(kernel=True)])

@@ -310,12 +310,16 @@ static llvm::cl::opt<std::string>
 
 static llvm::cl::opt<std::string>
     DsaSwitchOps("dsa-switch-ops", llvm::cl::desc("Target DSA Switch Ops"),
-                   llvm::cl::init(""));
+                 llvm::cl::init(""));
 
 static llvm::cl::opt<std::string>
     SpecificFunction("specific-function",
                      llvm::cl::desc("Specific function name"),
                      llvm::cl::init(""));
+
+static llvm::cl::list<std::string>
+    ListOps("list-ops", llvm::cl::desc("ssList device driver operations"),
+            llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated);
 
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
@@ -443,6 +447,12 @@ int main(int argc, char **argv) {
   }
 
   if (Kernel) {
+    if (!ListOps.empty()) {
+      pm_wrapper.add(seahorn::createListOpsPass(ListOps));
+      pm_wrapper.run(*module.get());
+      return 0;
+    }
+
     pm_wrapper.add(seahorn::createKernelSetupPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createHandleDevicesPass());

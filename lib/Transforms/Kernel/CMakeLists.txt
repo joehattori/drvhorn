@@ -13,4 +13,5 @@ add_llvm_library(SeaTransformsKernel DISABLE_LLVM_LINK_LLVM_DYLIB
   DsaSwitchOps.cc
   InitGlobalKrefs.cc
   SpecificFunction.cc
+  ListOps.cc
   )
