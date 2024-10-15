@@ -49,7 +49,7 @@ def main (argv):
             sea.commands.Spf,
             sea.commands.Kernel,
             sea.commands.ExeKernel,
-            sea.commands.KernelAnalysis,
+            sea.commands.ListKernelOps,
             sea.yama.Yama(),
             sea.cex.CexGen(),
             sea.cex.SeaExeCex(),

@@ -15,16 +15,96 @@ llvm::StringRef getStructName(llvm::StringRef name) {
   return name.substr(0, q);
 }
 
-bool equivTypes(const llvm::Type *t1, const llvm::Type *t2) {
-  if (t1 == t2)
-    return true;
-  const llvm::StructType *st1 = llvm::dyn_cast<llvm::StructType>(t1);
-  const llvm::StructType *st2 = llvm::dyn_cast<llvm::StructType>(t2);
-  if (!st1 || !st2 || !st1->hasName() || !st2->hasName())
+static bool equivTypes(const llvm::Type *t1, const llvm::Type *t2,
+                       llvm::DenseSet<const llvm::Type *> &visited);
+
+static bool equivTypes(const llvm::ArrayType *at1, const llvm::ArrayType *at2,
+                       llvm::DenseSet<const llvm::Type *> &visited) {
+  return at1->getNumElements() == at2->getNumElements() &&
+         equivTypes(at1->getElementType(), at2->getElementType(), visited);
+}
+
+static bool equivTypes(const llvm::FunctionType *ft1,
+                       const llvm::FunctionType *ft2,
+                       llvm::DenseSet<const llvm::Type *> &visited) {
+  if (ft1->getNumParams() != ft2->getNumParams())
     return false;
+  if (!equivTypes(ft1->getReturnType(), ft2->getReturnType(), visited))
+    return false;
+  for (unsigned i = 0; i < ft1->getNumParams(); i++) {
+    if (!equivTypes(ft1->getParamType(i), ft2->getParamType(i), visited))
+      return false;
+  }
+  return true;
+}
+
+static bool equivTypes(const llvm::IntegerType *it1,
+                       const llvm::IntegerType *it2) {
+  return it1->getBitWidth() == it2->getBitWidth();
+}
+
+static bool equivTypes(const llvm::PointerType *pt1,
+                       const llvm::PointerType *pt2,
+                       llvm::DenseSet<const llvm::Type *> &visited) {
+  return equivTypes(pt1->getElementType(), pt2->getElementType(), visited);
+}
+
+static bool equivTypes(const llvm::StructType *st1, const llvm::StructType *st2,
+                       llvm::DenseSet<const llvm::Type *> &visited) {
+  if (!st1->hasName() || !st2->hasName()) {
+    if (st1->getNumElements() != st2->getNumElements())
+      return false;
+    for (unsigned i = 0; i < st1->getNumElements(); i++) {
+      if (!equivTypes(st1->getElementType(i), st2->getElementType(i), visited))
+        return false;
+    }
+    return true;
+  }
   llvm::StringRef p1 = getStructName(st1->getName());
   llvm::StringRef p2 = getStructName(st2->getName());
   return p1 == p2;
+}
+
+static bool equivTypes(const llvm::VectorType *vt1, const llvm::VectorType *vt2,
+                       llvm::DenseSet<const llvm::Type *> &visited) {
+  return vt1->getElementCount() == vt2->getElementCount() &&
+         equivTypes(vt1->getElementType(), vt2->getElementType(), visited);
+}
+
+static bool equivTypes(const llvm::Type *t1, const llvm::Type *t2,
+                       llvm::DenseSet<const llvm::Type *> &visited) {
+  if (!visited.insert(t1).second)
+    return true;
+  if (llvm::isa<llvm::ArrayType>(t1) && llvm::isa<llvm::ArrayType>(t2)) {
+    return equivTypes(llvm::cast<llvm::ArrayType>(t1),
+                      llvm::cast<llvm::ArrayType>(t2), visited);
+  }
+  if (llvm::isa<llvm::FunctionType>(t1) && llvm::isa<llvm::FunctionType>(t2)) {
+    return equivTypes(llvm::cast<llvm::FunctionType>(t1),
+                      llvm::cast<llvm::FunctionType>(t2), visited);
+  }
+  if (llvm::isa<llvm::IntegerType>(t1) && llvm::isa<llvm::IntegerType>(t2)) {
+    return equivTypes(llvm::cast<llvm::IntegerType>(t1),
+                      llvm::cast<llvm::IntegerType>(t2));
+  }
+  if (llvm::isa<llvm::PointerType>(t1) && llvm::isa<llvm::PointerType>(t2)) {
+    return equivTypes(llvm::cast<llvm::PointerType>(t1),
+                      llvm::cast<llvm::PointerType>(t2), visited);
+  }
+  if (llvm::isa<llvm::StructType>(t1) && llvm::isa<llvm::StructType>(t2)) {
+    return equivTypes(llvm::cast<llvm::StructType>(t1),
+                      llvm::cast<llvm::StructType>(t2), visited);
+  }
+  if (llvm::isa<llvm::VectorType>(t1) && llvm::isa<llvm::VectorType>(t2)) {
+    return equivTypes(llvm::cast<llvm::VectorType>(t1),
+                      llvm::cast<llvm::VectorType>(t2), visited);
+  }
+  return false;
+}
+
+bool equivTypes(const llvm::Type *t1, const llvm::Type *t2) {
+  llvm::DenseSet<const llvm::Type *> visited;
+  return equivTypes(t1, t2, visited);
 }
 
 const llvm::Function *extractCalledFunction(const llvm::CallInst *call) {

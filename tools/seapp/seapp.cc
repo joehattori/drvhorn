@@ -31,7 +31,6 @@
 #include "llvm/Transforms/IPO.h"
 
 #include "llvm/IR/Verifier.h"
-#include <llvm-14/llvm/Transforms/Scalar.h>
 
 #include "seahorn/InitializePasses.hh"
 #include "seahorn/Passes.hh"
@@ -473,6 +472,7 @@ int main(int argc, char **argv) {
     }
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(seahorn::createHandleInlineAsmPass());
     pm_wrapper.add(seahorn::createInitGlobalKrefsPass());
     pm_wrapper.add(seahorn::createAssumeNonNullPass());
     pm_wrapper.add(seahorn::createIntoBinaryPass());

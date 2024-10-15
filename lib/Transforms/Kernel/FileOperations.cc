@@ -11,7 +11,7 @@ using namespace llvm;
 
 namespace seahorn {
 
-static unsigned iPrivateInodeGEPIndex = 47;
+static unsigned iPrivateInodeGEPIndex = 53;
 static unsigned fileOpOpenIndex = 13;
 
 class FileOperations : public ModulePass {

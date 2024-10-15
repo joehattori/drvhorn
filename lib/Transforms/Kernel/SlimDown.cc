@@ -22,112 +22,168 @@ using namespace llvm;
 
 namespace seahorn {
 
-struct Visitor : public InstVisitor<Visitor, bool> {
+struct Filter : public InstVisitor<Filter, bool> {
 public:
-  bool isTarget(const Instruction *inst) const {
-    if (const StoreInst *store = dyn_cast<StoreInst>(inst)) {
-      const Value *v = getUnderlyingObject(store->getPointerOperand());
-      return loadedUnderlyingPtrs.count(v) ||
-             targetArgs.count(dyn_cast<Argument>(v));
-    } else {
-      return targets.count(inst);
-    }
-  }
-
-  void visitModule(Module &m) {
+  Filter(Module &m) {
     buildStartingPoint(m);
-    buildKrefTargetArgs(m);
-    addTargetArgsRelatedToReturnValue(m);
+    buildTargetArgs(m);
+
+    for (Function &f : m) {
+      // First, track return insts.
+      for (BasicBlock &blk : f) {
+        if (ReturnInst *ret = dyn_cast<ReturnInst>(blk.getTerminator())) {
+          visitReturnInst(*ret);
+          recordUnderlyingObjectOfRetVal(ret);
+        }
+      }
+      // store and some calls cannot be tracked from ret.
+      for (Instruction &inst : instructions(f)) {
+        if (StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+          visitStoreInst(*store);
+        } else if (CallInst *call = dyn_cast<CallInst>(&inst)) {
+          visitCallInst(*call);
+        }
+      }
+    }
   }
 
-  bool visitCallInst(CallInst &call) {
-    Function *f = extractCalledFunction(call);
-    if (!f) {
-      cache[&call] = false;
-      return false;
-    }
-    bool isTarget = startingPoints.count(&call);
-    for (Argument &arg : f->args()) {
-      isTarget |= targetArgs.count(&arg);
-    }
-    if (isTarget) {
-      targets.insert(&call);
-    }
-    cache[&call] = isTarget;
-    return isTarget;
+  bool isTarget(const Instruction *inst) {
+    if (inst->isTerminator())
+      return true;
+    return targets.count(inst);
   }
 
-  bool visitLoadInst(LoadInst &load) {
-    Value *addr = load.getPointerOperand();
-    bool isTarget = visitValue(addr);
-    if (isTarget) {
-      targets.insert(&load);
-      loadedUnderlyingPtrs.insert(getUnderlyingObject(addr));
+  bool visitReturnInst(ReturnInst &ret) {
+    acceptInst(&ret);
+    if (Value *retVal = ret.getReturnValue()) {
+      visitValue(retVal);
     }
-    cache[&load] = isTarget;
-    return isTarget;
-  }
-
-  bool visitPHINode(PHINode &phi) {
-    cache[&phi] = true;
-    for (Value *v : phi.incoming_values()) {
-      visitValue(v);
-    }
-    targets.insert(&phi);
     return true;
   }
 
-  bool visitTerminator(Instruction &inst) {
-    cache[&inst] = true;
-    for (Value *v : inst.operands()) {
+  bool visitLoadInst(LoadInst &load) {
+    bool isTarget = visitValue(load.getPointerOperand());
+    if (isTarget) {
+      acceptInst(&load);
+      underlyingLoadedPtrs.insert(
+          getUnderlyingObject(load.getPointerOperand()));
+    }
+    return isTarget;
+  }
+
+  bool visitStoreInst(StoreInst &store) {
+    bool isTarget = isStoreTarget(&store);
+    if (isTarget) {
+      acceptInst(&store);
+      visitValue(store.getValueOperand());
+      visitValue(store.getPointerOperand());
+    }
+    return isTarget;
+  }
+
+  bool visitPtrToIntInst(PtrToIntInst &ptrToInt) {
+    // ignore ptrtoint
+    return false;
+  }
+
+  bool visitCallInst(CallInst &call) {
+    bool isTarget = startingPoints.count(&call);
+    if (Function *f = extractCalledFunction(call)) {
+      for (Argument &arg : f->args()) {
+        isTarget |= targetArgs.count(&arg);
+      }
+    }
+    if (isTarget) {
+      acceptInst(&call);
+      for (Value *v : call.operands()) {
+        visitValue(v);
+      }
+    }
+    return isTarget;
+  }
+
+  bool visitBranchInst(BranchInst &br) {
+    acceptInst(&br);
+    if (br.isConditional()) {
+      visitValue(br.getCondition());
+    }
+    return true;
+  }
+
+  bool visitPHINode(PHINode &phi) {
+    for (Value *v : phi.incoming_values()) {
       visitValue(v);
     }
-    targets.insert(&inst);
+    acceptInst(&phi);
     return true;
   }
 
   bool visitInstruction(Instruction &inst) {
-    bool isTarget = false;
-    for (Value *v : inst.operands()) {
-      isTarget |= visitValue(v);
-    }
+    bool isTarget =
+        all_of(inst.operands(), [this](Value *v) { return visitValue(v); });
     if (isTarget) {
-      targets.insert(&inst);
+      acceptInst(&inst);
     }
-    cache[&inst] = isTarget;
     return isTarget;
   }
 
 private:
-  DenseMap<const Value *, bool> cache;
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
   DenseSet<const Instruction *> targets;
-  DenseSet<const Value *> loadedUnderlyingPtrs;
+  DenseSet<const Value *> underlyingLoadedPtrs;
+  DenseSet<const Value *> underlyingRetPtrs;
+  DenseSet<const Value *> underlyingTargetArgsPtrs;
+  DenseMap<const Value *, bool> cache;
 
-  bool visitValue(Value *v) {
-    if (Argument *arg = dyn_cast<Argument>(v))
+  bool visitValue(Value *val) {
+    if (cache.count(val))
+      return cache[val];
+    cache[val] = false;
+    bool isTarget = false;
+    if (Instruction *inst = dyn_cast<Instruction>(val)) {
+      isTarget = visit(*inst);
+    } else if (BasicBlock *blk = dyn_cast<BasicBlock>(val)) {
+      isTarget = visit(*blk->getTerminator());
+    } else if (isa<Constant, Argument>(val)) {
+      isTarget = true;
+    } else if (Operator *op = dyn_cast<Operator>(val)) {
+      isTarget = visitOperator(op);
+    }
+    cache[val] = isTarget;
+    return isTarget;
+  }
+
+  bool visitOperator(Operator *op) {
+    if (isa<BitCastOperator, GEPOperator>(op))
+      return visitValue(op->getOperand(0));
+    return false;
+  }
+
+  void acceptInst(Instruction *inst) {
+    targets.insert(inst);
+    for (BasicBlock *blk : predecessors(inst->getParent())) {
+      visitValue(blk->getTerminator());
+    }
+  }
+
+  bool isStoreTarget(const StoreInst *store) {
+    const Value *v = getUnderlyingObject(store->getPointerOperand());
+    if (const Argument *arg = dyn_cast<Argument>(v)) {
       return targetArgs.count(arg);
-    if (isa<Constant>(v))
-      return true;
-    if (isa<BasicBlock, MetadataAsValue, InlineAsm>(v))
-      return false;
-    if (cache.count(v))
-      return cache[v];
+    }
+    return underlyingLoadedPtrs.count(v) || underlyingRetPtrs.count(v) ||
+           underlyingTargetArgsPtrs.count(v);
+  }
 
-    cache[v] = false;
-    if (Instruction *inst = dyn_cast<Instruction>(v)) {
-      return cache[v] = visit(*inst);
-    } else if (Operator *op = dyn_cast<Operator>(v)) {
-      for (Value *v : op->operands()) {
-        if (visitValue(v)) {
-          return cache[op] = true;
-        }
+  void recordUnderlyingObjectOfRetVal(ReturnInst *ret) {
+    Value *retVal = ret->getReturnValue();
+    if (retVal->getType()->isPointerTy()) {
+      SmallVector<const Value *> objects;
+      getUnderlyingObjects(retVal, objects, nullptr, 0);
+      for (const Value *v : objects) {
+        underlyingRetPtrs.insert(v);
       }
-      return false;
-    } else {
-      errs() << "TODO: isValueTarget " << *v << '\n';
-      std::exit(1);
     }
   }
 
@@ -155,6 +211,23 @@ private:
     for (const Function &f : m) {
       if (f.getName().startswith(DEVICE_GETTER_PREFIX)) {
         recordCallers(&f);
+      }
+    }
+  }
+
+  void buildTargetArgs(Module &m) {
+    buildKrefTargetArgs(m);
+    addTargetArgsRelatedToReturnValue(m);
+    for (const Argument *arg : targetArgs) {
+      const Function *f = arg->getParent();
+      for (const CallInst *call : getCalls(f)) {
+        if (const Value *v = call->getArgOperand(arg->getArgNo())) {
+          SmallVector<const Value *> objs;
+          getUnderlyingObjects(v, objs, nullptr, 0);
+          for (const Value *obj : objs) {
+            underlyingTargetArgsPtrs.insert(obj);
+          }
+        }
       }
     }
   }
@@ -230,22 +303,13 @@ private:
   }
 
   SmallVector<const Argument *> underlyingArgs(const Value *v) {
+    SmallVector<const Value *> objects;
+    getUnderlyingObjects(v, objects, nullptr, 0);
+
     SmallVector<const Argument *> ret;
-    SmallVector<const Value *> workList;
-    DenseSet<const Value *> visited;
-    workList.push_back(getUnderlyingObject(v));
-    while (!workList.empty()) {
-      const Value *v = workList.back();
-      workList.pop_back();
-      if (const Argument *arg = dyn_cast<Argument>(v)) {
+    for (const Value *v : objects) {
+      if (const Argument *arg = dyn_cast<Argument>(v))
         ret.push_back(arg);
-      } else if (const PHINode *phi = dyn_cast<PHINode>(v)) {
-        for (const Value *v : phi->incoming_values()) {
-          if (visited.insert(v).second) {
-            workList.push_back(v);
-          }
-        }
-      }
     }
     return ret;
   }
@@ -258,13 +322,15 @@ public:
   SlimDown() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
+    m.setModuleInlineAsm("");
     updateLinkage(m);
     removeCompilerUsed(m);
     runDCEPasses(m);
 
-    slimDownOnlyReachables(m);
+    sliceModule(m);
     runDCEPasses(m, true);
     removeNotCalledFunctions(m);
+    ignoreSomeFunctions(m);
     runDCEPasses(m, true);
     return true;
   }
@@ -324,6 +390,15 @@ private:
     }
   }
 
+  bool isPointerToOpaqueType(Type *type) {
+    if (type->isPointerTy())
+      return isPointerToOpaqueType(type->getPointerElementType());
+    if (StructType *structType = dyn_cast<StructType>(type)) {
+      return structType->isOpaque();
+    }
+    return false;
+  }
+
   Value *getReplacement(Instruction *inst,
                         DenseMap<const Type *, Function *> &ndvalfn) {
     Instruction *insertPoint =
@@ -331,9 +406,19 @@ private:
     return nondetValue(inst->getType(), insertPoint, ndvalfn);
   }
 
-  void slimDownOnlyReachables(Module &m) {
-    Visitor visitor;
-    visitor.visit(m);
+  void ignoreSomeFunctions(Module &m) {
+    StringRef names[] = {
+        "slob_free",          "refcount_warn_saturate", "__kobject_del",
+        "kobject_uevent_env", "__mdiobus_register",     "mdiobus_unregister",
+    };
+    for (StringRef name : names) {
+      if (Function *f = m.getFunction(name))
+        f->deleteBody();
+    }
+  }
+
+  void sliceModule(Module &m) {
+    Filter filter(m);
     DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;
     for (Function &f : m) {
@@ -343,7 +428,7 @@ private:
         continue;
       SmallVector<Instruction *> retained;
       for (Instruction &inst : instructions(f)) {
-        if (visitor.isTarget(&inst)) {
+        if (filter.isTarget(&inst)) {
           retained.push_back(&inst);
         } else {
           toRemoveInstructions.insert(&inst);
@@ -408,8 +493,9 @@ private:
   Value *nondetValue(Type *type, Instruction *before,
                      DenseMap<const Type *, Function *> &ndvalfn) {
     IRBuilder<> b(before);
+    Module *m = before->getModule();
     if (!type->isPointerTy()) {
-      Function *nondetFn = getNondetValueFn(type, before->getModule(), ndvalfn);
+      Function *nondetFn = getNondetValueFn(type, m, ndvalfn);
       Value *call = b.CreateCall(nondetFn);
       if (StructType *s = dyn_cast<StructType>(type)) {
         for (unsigned i = 0; i < s->getNumElements(); i++) {
@@ -420,7 +506,6 @@ private:
       return call;
     }
 
-    Module *m = before->getModule();
     Type *elemType = type->getPointerElementType();
     if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
       return makeNewValFn(m, ft, ndvalfn.size());

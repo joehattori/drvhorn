@@ -66,7 +66,8 @@ private:
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    Type *deviceType = dsaSwitchType->getElementType(0)->getPointerElementType();
+    Type *deviceType =
+        dsaSwitchType->getElementType(0)->getPointerElementType();
     Value *devPtr = b.CreateAlloca(deviceType);
     PointerType *krefPtrType = cast<PointerType>(
         setupKref->getArg(1)->getType()->getPointerElementType());

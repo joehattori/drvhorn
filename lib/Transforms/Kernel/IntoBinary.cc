@@ -1,4 +1,5 @@
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -12,6 +13,7 @@
 using namespace llvm;
 
 namespace seahorn {
+
 class IntoBinary : public ModulePass {
 public:
   static char ID;
@@ -167,8 +169,10 @@ private:
       }
     } else if (Instruction *i = dyn_cast<Instruction>(val)) {
       makeInstBinary(i);
+    } else if (isa<Argument>(val)) {
     } else {
-      errs() << "TODO: makeRetBinary " << *val << "\n";
+      errs() << "TODO: makeRetBinary " << *val << " in "
+             << ret->getFunction()->getName() << "\n";
       std::exit(1);
     }
   }

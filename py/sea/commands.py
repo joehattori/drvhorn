@@ -255,12 +255,13 @@ def get_sea_horn_dsa (opts):
 
 class Seapp(sea.LimitedCmd):
     def __init__(self, quiet=False, internalize=False, strip_extern=False,
-                 keep_lib_fn=False, kernel=False):
+                 keep_lib_fn=False, kernel=False, list_ops=False):
         super(Seapp, self).__init__('pp', 'Pre-processing', allow_extra=True)
         self._internalize = internalize
         self._strip_extern = strip_extern
         self._keep_lib_fn = keep_lib_fn
         self._kernel = kernel
+        self._list_ops = list_ops
 
     @property
     def stdout (self):
@@ -314,8 +315,6 @@ class Seapp(sea.LimitedCmd):
                          default=None, metavar='str')
 
         # kernel options
-        ap.add_argument ('--list-ops', dest='list_ops', help='List device driver operations',
-                         type=str, metavar='str,..')
         ap.add_argument ('--specific-function', dest='specific_function', help='Specify a specific function name to verify',
                          type=str, metavar='str,..')
         ap.add_argument ('--acpi-driver', dest='acpi_driver', help='Specify a ACPI driver to validate',
@@ -422,6 +421,9 @@ class Seapp(sea.LimitedCmd):
         if self._kernel:
             argv.append ('--kernel')
 
+        if self._list_ops:
+            argv.append ('--list-ops=file_operations,platform_driver,dsa_switch_ops')
+
         # internalize takes precedence over all other options and must run alone
         if self._strip_extern:
             argv.append ('--only-strip-extern=true')
@@ -498,9 +500,6 @@ class Seapp(sea.LimitedCmd):
 
             if args.specific_function:
                 argv.append ('--specific-function={0}'.format (args.specific_function))
-
-            if args.list_ops:
-                argv.append ('--list-ops={0}'.format (args.list_ops))
 
             if args.acpi_driver:
                 argv.append ('--acpi-driver={0}'.format (args.acpi_driver))
@@ -1755,5 +1754,5 @@ Kernel = sea.SeqCmd('kernel', 'Linux kernel verification: alias for pp|ms|opt|ho
 ExeKernel = sea.SeqCmd ('exe-kernel', 'alias for clang|pp --strip-extern|pp --internalize|wmem|rmtf|linkrt',
                   [Seapp(strip_extern=True, keep_lib_fn=True, kernel=True),
                    Seapp(internalize=True), WrapMem(), RemoveTargetFeatures(), LinkRt()])
-KernelAnalysis = sea.SeqCmd('kernel-analysis', 'list device driver operations in the kernel.',
-                [Seapp(kernel=True)])
+ListKernelOps = sea.SeqCmd('list-kernel-ops', 'list device driver operations in the kernel.',
+                [Seapp(kernel=True, list_ops=True)])

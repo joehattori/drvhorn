@@ -48,6 +48,8 @@ private:
     for (GlobalVariable &gv : m.globals()) {
       Type *ty = gv.getValueType();
       bool isTargetOp = equivTypes(ty, targetType);
+      if (ty->isPointerTy())
+        isTargetOp |= equivTypes(ty->getPointerElementType(), targetType);
       if (isTargetOp) {
         names.push_back(gv.getName());
       }
