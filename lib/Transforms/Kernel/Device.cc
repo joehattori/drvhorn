@@ -21,10 +21,7 @@ public:
     handleDeviceNodeFinders(m);
     handleDeviceFinders(m);
     handleChildNodeFinders(m);
-    stubSomeOfFunctions(m);
-    handleDeviceAdd(m);
-    killDeviceNodeNotify(m);
-    killDeviceDel(m);
+    stubOfFunctions(m);
     return true;
   }
 
@@ -437,7 +434,7 @@ private:
     return b.CreateCall(f, args);
   }
 
-  void stubSomeOfFunctions(Module &m) {
+  void stubOfFunctions(Module &m) {
     StringRef names[] = {
         "of_phandle_iterator_next",
     };
@@ -450,37 +447,6 @@ private:
         newFn = ConstantExpr::getBitCast(newFn, origFn->getType());
       origFn->replaceAllUsesWith(newFn);
       origFn->eraseFromParent();
-    }
-  }
-
-  void handleDeviceAdd(Module &m) {
-    Function *orig = m.getFunction("device_add");
-    Function *replace = m.getFunction("drvhorn.device_add");
-    for (CallInst *call : getCalls(orig)) {
-      IRBuilder<> b(call);
-      Value *devPtr = call->getArgOperand(0);
-      Value *newCall = callWithNecessaryBitCast(replace, {devPtr}, b);
-      call->replaceAllUsesWith(newCall);
-      call->dropAllReferences();
-      call->eraseFromParent();
-    }
-  }
-
-  void killDeviceNodeNotify(Module &m) {
-    Function *f = m.getFunction("of_property_notify");
-    if (!f)
-      return;
-    for (CallInst *call : getCalls(f)) {
-      Value *zero = ConstantInt::get(call->getType(), 0);
-      call->replaceAllUsesWith(zero);
-      call->eraseFromParent();
-    }
-  }
-
-  void killDeviceDel(Module &m) {
-    for (CallInst *call : getCalls(m.getFunction("device_del"))) {
-      call->dropAllReferences();
-      call->eraseFromParent();
     }
   }
 

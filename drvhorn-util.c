@@ -234,22 +234,6 @@ static int __DRVHORN_device_private_init(struct device *dev)
   return 0;
 }
 
-int __DRVHORN_device_add(struct device *dev) {
-  int error = -EINVAL;
-  dev = get_device(dev);
-  if (!dev)
-    goto done;
-  if (!dev->p) {
-    error = __DRVHORN_device_private_init(dev);
-    if (error)
-      goto done;
-  }
-  return 0;
-done:
-  put_device(dev);
-  return error;
-}
-
 int __DRVHORN_of_phandle_iterator_next(struct of_phandle_iterator *it) {
   of_node_put(it->node);
   it->node = NULL;

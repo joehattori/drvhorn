@@ -11,7 +11,6 @@ using namespace llvm;
 
 namespace seahorn {
 
-static unsigned iPrivateInodeGEPIndex = 53;
 static unsigned fileOpOpenIndex = 13;
 
 class FileOperations : public ModulePass {
@@ -65,10 +64,13 @@ private:
     Argument *inodeArg = open->getArg(0);
     Type *inodePtrType = inodeArg->getType();
     Type *inodeType = inodePtrType->getPointerElementType();
-    const DenseMap<uint64_t, Type *> &fields = iPrivateFields(inodeArg);
+    unsigned iPrivateFieldIdx = inodeType->getStructNumElements() - 1;
+    const DenseMap<uint64_t, Type *> &fields =
+        iPrivateFields(inodeArg, iPrivateFieldIdx);
     Value *inode = allocType(m, b, inodeType);
     size_t byteSize = getIPrivateSize(m, fields);
-    Value *iPrivate = buildIPrivate(m, b, inodeType, inode, byteSize);
+    Value *iPrivate =
+        buildIPrivate(m, b, inodeType, inode, byteSize, iPrivateFieldIdx);
     populateFields(m, b, iPrivate, fields);
     Function *setupKref = m.getFunction("drvhorn.setup_kref");
     Type *krefType = setupKref->getArg(0)->getType()->getPointerElementType();
@@ -123,7 +125,8 @@ private:
     ReturnInst::Create(ctx, ConstantInt::get(i32Ty, 0), ret);
   }
 
-  SmallVector<const Value *> getIPrivatePtrs(const Argument *arg) {
+  SmallVector<const Value *> getIPrivatePtrs(const Argument *arg,
+                                             unsigned iPrivateFieldIdx) {
     SmallVector<const GEPOperator *> geps;
     for (const User *user : arg->users()) {
       if (const GEPOperator *gep = dyn_cast<GEPOperator>(user)) {
@@ -132,7 +135,7 @@ private:
         ConstantInt *idx = dyn_cast<ConstantInt>(gep->getOperand(2));
         if (!idx)
           continue;
-        if (idx->getZExtValue() == iPrivateInodeGEPIndex) {
+        if (idx->getZExtValue() == iPrivateFieldIdx) {
           geps.push_back(gep);
         }
       }
@@ -157,8 +160,10 @@ private:
     return nullptr;
   }
 
-  DenseMap<uint64_t, Type *> iPrivateFields(const Argument *inodeArg) {
-    const SmallVector<const Value *> &iPrivatePtrs = getIPrivatePtrs(inodeArg);
+  DenseMap<uint64_t, Type *> iPrivateFields(const Argument *inodeArg,
+                                            unsigned iPrivateFieldIdx) {
+    const SmallVector<const Value *> &iPrivatePtrs =
+        getIPrivatePtrs(inodeArg, iPrivateFieldIdx);
     DenseMap<uint64_t, Type *> fields;
     for (const Value *iPrivatePtr : iPrivatePtrs) {
       for (const User *user : iPrivatePtr->users()) {
@@ -219,12 +224,13 @@ private:
   }
 
   Value *buildIPrivate(Module &m, IRBuilder<> &b, Type *inodeType,
-                       Value *inodePtr, uint64_t byteSize) {
+                       Value *inodePtr, uint64_t byteSize,
+                       unsigned iPrivateFieldIdx) {
     Type *i8Type = Type::getInt8Ty(m.getContext());
     Type *i32Type = Type::getInt32Ty(m.getContext());
     Type *i64Type = Type::getInt64Ty(m.getContext());
     Constant *zero = ConstantInt::get(i64Type, 0);
-    Constant *iPrivateOffset = ConstantInt::get(i32Type, iPrivateInodeGEPIndex);
+    Constant *iPrivateOffset = ConstantInt::get(i32Type, iPrivateFieldIdx);
     Value *iPrivateGEP =
         b.CreateGEP(inodeType, inodePtr, {zero, iPrivateOffset});
     Value *iPrivatePtr =

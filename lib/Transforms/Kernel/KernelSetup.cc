@@ -14,10 +14,6 @@
 #include "seahorn/Support/SeaDebug.h"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
-#include <algorithm>
-#include <optional>
-#include <regex>
-
 using namespace llvm;
 
 namespace seahorn {
@@ -87,22 +83,22 @@ private:
     }
   }
 
-  void stubAllocPages(Module &M) {
+  void stubAllocPages(Module &m) {
     std::string names[] = {
         "__alloc_pages",
     };
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     for (const std::string &name : names) {
       std::string wrapperName = name + "_wrapper";
-      Function *orig = M.getFunction(name);
+      Function *orig = m.getFunction(name);
       if (!orig)
         continue;
       std::string stubName = "__DRVHORN_" + name;
-      Function *stub = M.getFunction(stubName);
+      Function *stub = m.getFunction(stubName);
 
       Function *wrapper = Function::Create(
           orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &M);
+          wrapperName, &m);
       BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
       IRBuilder<> B(block);
       CallInst *call = B.CreateCall(stub);
@@ -235,34 +231,16 @@ private:
     }
   }
 
-  void handleFree(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    Type *voidType = Type::getVoidTy(ctx);
-    Type *voidPtrType = Type::getInt8Ty(ctx)->getPointerTo();
-    FunctionCallee freeFunc =
-        M.getOrInsertFunction("free", voidType, voidPtrType);
+  void handleFree(Module &m) {
     std::string freeFuncNames[] = {
         "kfree",
         "vfree",
         "free_percpu",
     };
     for (const std::string &name : freeFuncNames) {
-      std::string wrapperName = name + "_wrapper";
-      Function *orig = M.getFunction(name);
-      if (!orig)
-        continue;
-
-      Function *wrapper = Function::Create(
-          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &M);
-      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-      IRBuilder<> B(block);
-      Argument *addr = wrapper->getArg(0);
-      CallInst *call = B.CreateCall(freeFunc, {addr});
-      call->setTailCall();
-      B.CreateRetVoid();
-      orig->replaceAllUsesWith(wrapper);
-      orig->eraseFromParent();
+      if (Function *orig = m.getFunction(name)) {
+        orig->deleteBody();
+      }
     }
   }
 

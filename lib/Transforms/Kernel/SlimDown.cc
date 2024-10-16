@@ -62,11 +62,11 @@ public:
   }
 
   bool visitLoadInst(LoadInst &load) {
-    bool isTarget = visitValue(load.getPointerOperand());
+    Value *ptr = load.getPointerOperand();
+    bool isTarget = visitValue(ptr);
     if (isTarget) {
       acceptInst(&load);
-      underlyingLoadedPtrs.insert(
-          getUnderlyingObject(load.getPointerOperand()));
+      underlyingLoadedPtrs.insert(getUnderlyingObject(ptr));
     }
     return isTarget;
   }
@@ -81,10 +81,8 @@ public:
     return isTarget;
   }
 
-  bool visitPtrToIntInst(PtrToIntInst &ptrToInt) {
-    // ignore ptrtoint
-    return false;
-  }
+  // ignore ptrtoint
+  bool visitPtrToIntInst(PtrToIntInst &ptrToInt) { return false; }
 
   bool visitCallInst(CallInst &call) {
     bool isTarget = startingPoints.count(&call);
@@ -103,10 +101,10 @@ public:
   }
 
   bool visitBranchInst(BranchInst &br) {
-    acceptInst(&br);
     if (br.isConditional()) {
       visitValue(br.getCondition());
     }
+    acceptInst(&br);
     return true;
   }
 
@@ -145,13 +143,22 @@ private:
       isTarget = visit(*inst);
     } else if (BasicBlock *blk = dyn_cast<BasicBlock>(val)) {
       isTarget = visit(*blk->getTerminator());
-    } else if (isa<Constant, Argument>(val)) {
-      isTarget = true;
     } else if (Operator *op = dyn_cast<Operator>(val)) {
       isTarget = visitOperator(op);
+    } else if (Constant *c = dyn_cast<Constant>(val)) {
+      isTarget = visitConstant(c);
+    } else if (isa<Argument>(val)) {
+      isTarget = true;
     }
     cache[val] = isTarget;
     return isTarget;
+  }
+
+  bool visitConstant(Constant *c) {
+    if (ConstantExpr *ce = dyn_cast<ConstantExpr>(c)) {
+      return visitValue(ce->getAsInstruction());
+    }
+    return true;
   }
 
   bool visitOperator(Operator *op) {
@@ -217,7 +224,6 @@ private:
 
   void buildTargetArgs(Module &m) {
     buildKrefTargetArgs(m);
-    addTargetArgsRelatedToReturnValue(m);
     for (const Argument *arg : targetArgs) {
       const Function *f = arg->getParent();
       for (const CallInst *call : getCalls(f)) {
@@ -263,45 +269,6 @@ private:
     }
   }
 
-  void addTargetArgsRelatedToReturnValue(const Module &m) {
-    DenseMap<const CallInst *, const Value *> callToArgTie;
-    DenseSet<const Value *> visited;
-    SmallVector<const Value *> workList;
-    for (const Function &f : m) {
-      if (f.isDeclaration())
-        continue;
-      for (const BasicBlock &blk : f) {
-        if (const ReturnInst *ret = dyn_cast<ReturnInst>(blk.getTerminator())) {
-          if (const Value *retVal = ret->getReturnValue()) {
-            workList.push_back(retVal);
-            visited.insert(retVal);
-            if (const Argument *arg =
-                    dyn_cast<Argument>(getUnderlyingObject(retVal))) {
-              for (const CallInst *call : getCalls(arg->getParent())) {
-                callToArgTie[call] = call->getArgOperand(arg->getArgNo());
-              }
-            }
-          }
-        }
-      }
-    }
-
-    while (!workList.empty()) {
-      const Value *v = workList.back();
-      workList.pop_back();
-      const Value *underlying = getUnderlyingObject(v);
-      if (const Argument *arg = dyn_cast<Argument>(underlying)) {
-        targetArgs.insert(arg);
-      } else if (const CallInst *call = dyn_cast<CallInst>(underlying)) {
-        if (const Value *v = callToArgTie.lookup(call)) {
-          if (visited.insert(v).second) {
-            workList.push_back(v);
-          }
-        }
-      }
-    }
-  }
-
   SmallVector<const Argument *> underlyingArgs(const Value *v) {
     SmallVector<const Value *> objects;
     getUnderlyingObjects(v, objects, nullptr, 0);
@@ -323,15 +290,15 @@ public:
 
   bool runOnModule(Module &m) override {
     m.setModuleInlineAsm("");
+    ignoreSomeFunctions(m);
     updateLinkage(m);
     removeCompilerUsed(m);
     runDCEPasses(m);
 
     sliceModule(m);
-    runDCEPasses(m, true);
+    runDCEPasses(m, 10);
     removeNotCalledFunctions(m);
-    ignoreSomeFunctions(m);
-    runDCEPasses(m, true);
+    runDCEPasses(m, 20);
     return true;
   }
 
@@ -343,8 +310,6 @@ public:
   virtual StringRef getPassName() const override { return "SlimDown"; }
 
 private:
-  DenseMap<const Value *, DenseSet<const Value *>> graph;
-
   void removeCompilerUsed(Module &M) {
     if (GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME)) {
       Type *ty = compilerUsed->getType();
@@ -408,8 +373,19 @@ private:
 
   void ignoreSomeFunctions(Module &m) {
     StringRef names[] = {
-        "slob_free",          "refcount_warn_saturate", "__kobject_del",
-        "kobject_uevent_env", "__mdiobus_register",     "mdiobus_unregister",
+        "slob_free",
+        "refcount_warn_saturate",
+        "__kobject_del",
+        "kobject_uevent_env",
+        "__mdiobus_register",
+        "mdiobus_unregister",
+        "device_add",
+        "device_del",
+        "device_register",
+        "__of_mdiobus_register",
+        "of_property_notify",
+        "fwnode_mdiobus_register_phy",
+        "fwnode_mdiobus_phy_device_register",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))
@@ -443,16 +419,15 @@ private:
     }
   }
 
-  void runDCEPasses(Module &m, bool removeArg = false) {
+  void runDCEPasses(Module &m, unsigned limit = 1) {
     legacy::PassManager pm;
     pm.add(createVerifierPass(false));
-    pm.add(createAggressiveDCEPass());
     pm.add(createGlobalDCEPass());
-    if (removeArg)
-      pm.add(createDeadArgEliminationPass());
+    pm.add(createAggressiveDCEPass());
+    pm.add(createDeadArgEliminationPass());
     pm.add(createCFGSimplificationPass());
-    int counter = 0;
-    while (counter++ < 10) {
+    unsigned counter = 0;
+    while (counter++ < limit) {
       removeUnusedNondetCalls(m);
       if (!pm.run(m))
         break;
