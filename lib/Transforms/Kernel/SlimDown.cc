@@ -298,6 +298,8 @@ public:
     sliceModule(m);
     runDCEPasses(m, 10);
     removeNotCalledFunctions(m);
+    runDCEPasses(m, 10);
+    removeUnusedKrefs(m);
     runDCEPasses(m, 20);
     return true;
   }
@@ -382,6 +384,7 @@ private:
         "device_add",
         "device_del",
         "device_register",
+        "device_unregister",
         "__of_mdiobus_register",
         "of_property_notify",
         "fwnode_mdiobus_register_phy",
@@ -415,7 +418,26 @@ private:
       }
     }
     for (Instruction *inst : toRemoveInstructions) {
+      inst->dropAllReferences();
       inst->eraseFromParent();
+    }
+  }
+
+  void removeUnusedKrefs(Module &m) {
+    SmallVector<LoadInst *> krefLoads;
+    for (GlobalVariable *gv : getKrefs(m)) {
+      if (!gv->hasOneUse())
+        continue;
+      // the only user should be LoadInst in main.
+      krefLoads.push_back(cast<LoadInst>(*gv->user_begin()));
+    }
+    for (LoadInst *load : krefLoads) {
+      // the only user should be the kref setup call.
+      CallInst *krefSetup = cast<CallInst>(*load->user_begin());
+      krefSetup->eraseFromParent();
+      load->eraseFromParent();
+      // now the global variables have no users.
+      // should be removed in the next DCE pass execution.
     }
   }
 
