@@ -231,7 +231,14 @@ private:
     ConstantInt *zero = ConstantInt::get(Type::getInt32Ty(ctx), 0);
     for (CallInst *call : getCalls(devmAddAction)) {
       BasicBlock *orig = call->getParent();
-      Function *action = cast<Function>(call->getArgOperand(1));
+      Function *action =
+          dyn_cast<Function>(call->getArgOperand(1)->stripPointerCasts());
+      if (!action) {
+        errs() << "TODO: 1st argument of __devm_add_action in "
+               << call->getFunction()->getName() << " is not Function " << *call
+               << "\n";
+        continue;
+      }
       Value *data = call->getArgOperand(2);
       BasicBlock *next = orig->splitBasicBlock(call, "__devm_add_action.next");
       BranchInst *origBr = cast<BranchInst>(orig->getTerminator());
@@ -246,6 +253,8 @@ private:
       origBr->replaceAllUsesWith(br);
 
       b.SetInsertPoint(execAction);
+      if (data->getType() != action->getArg(0)->getType())
+        data = b.CreateBitCast(data, action->getArg(0)->getType());
       b.CreateCall(action, data);
       b.CreateBr(next);
 
@@ -259,6 +268,8 @@ private:
         clsOrBusToDeviceMap(m);
     LLVMContext &ctx = m.getContext();
     StructType *deviceType = StructType::getTypeByName(ctx, "struct.device");
+    SmallVector<GetElementPtrInst *> containerOfs;
+    DenseMap<CallInst *, Value *> findCallToSurroundingDevPtr;
     for (StringRef name : {"class_find_device", "bus_find_device"}) {
       Function *finder = m.getFunction(name);
       if (!finder)
@@ -271,16 +282,16 @@ private:
         }
         const SmallVector<unsigned> devIndices(
             indicesToStruct(surroundingDevType, deviceType).getValue());
-        const SmallVector<GetElementPtrInst *> &containerOfs =
-            getContainersOfs(call);
-        insertDeviceGetter(m, call, surroundingDevType, devIndices,
-                           containerOfs);
+        findCallToSurroundingDevPtr[call] =
+            insertDeviceGetter(m, call, surroundingDevType, devIndices);
+        collectContainersOfs(call, containerOfs);
       }
     }
+    replaceContainerOfs(containerOfs, findCallToSurroundingDevPtr);
   }
 
-  SmallVector<GetElementPtrInst *> getContainersOfs(CallInst *call) {
-    SmallVector<GetElementPtrInst *> containerOfs;
+  void collectContainersOfs(CallInst *call,
+                            SmallVector<GetElementPtrInst *> &containerOfs) {
     SmallVector<User *> users(call->user_begin(), call->user_end());
     DenseSet<User *> visited;
     while (!users.empty()) {
@@ -297,7 +308,6 @@ private:
         }
       }
     }
-    return containerOfs;
   }
 
   bool isEmbeddedStruct(const StructType *embedded, const StructType *base) {
@@ -497,10 +507,10 @@ private:
     return clsOrBusToDevType.lookup(gv);
   }
 
-  void insertDeviceGetter(Module &m, CallInst *call,
-                          StructType *surroundingDevType,
-                          const SmallVector<unsigned> &devIndices,
-                          ArrayRef<GetElementPtrInst *> containerOfs) {
+  // returns a pointer to the surrounding device.
+  Value *insertDeviceGetter(Module &m, CallInst *call,
+                            StructType *surroundingDevType,
+                            const SmallVector<unsigned> &devIndices) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
@@ -522,6 +532,9 @@ private:
     IRBuilder<> b(term);
     CallInst *ndCond = b.CreateCall(ndBool);
     LoadInst *curIndex = b.CreateLoad(i64Ty, index);
+    Value *surroundingDevPtr =
+        b.CreateInBoundsGEP(storage->getValueType(), storage,
+                            {ConstantInt::get(i64Ty, 0), curIndex});
     Value *withinRange =
         b.CreateICmpULT(curIndex, ConstantInt::get(i64Ty, STORAGE_SIZE));
     Value *cond = b.CreateAnd(ndCond, withinRange);
@@ -529,9 +542,6 @@ private:
     term->eraseFromParent();
 
     b.SetInsertPoint(genBlk);
-    Value *surroundingDevPtr =
-        b.CreateInBoundsGEP(storage->getValueType(), storage,
-                            {ConstantInt::get(i64Ty, 0), curIndex});
     SmallVector<Value *> gepIndices;
     gepIndices.push_back(ConstantInt::get(i64Ty, 0));
     for (unsigned i : devIndices) {
@@ -558,23 +568,51 @@ private:
     callReplacer->addIncoming(Constant::getNullValue(devPtrType), origBlk);
     callReplacer->addIncoming(devPtr, genBlk);
     call->replaceAllUsesWith(callReplacer);
-    // replace pointers that are likely to be container_of
-    Type *containerOfType = surroundingDevPtr->getType();
-    PHINode *containerOfReplacer = b.CreatePHI(containerOfType, 2);
-    Constant *nullContainerOf = Constant::getNullValue(containerOfType);
-    containerOfReplacer->addIncoming(nullContainerOf, origBlk);
-    containerOfReplacer->addIncoming(surroundingDevPtr, genBlk);
-    for (GetElementPtrInst *gep : containerOfs) {
-      ContainerOfVisitor replacer(gep, containerOfReplacer);
+    call->eraseFromParent();
+    return surroundingDevPtr;
+  }
+
+  void replaceContainerOfs(
+      ArrayRef<GetElementPtrInst *> containerOfs,
+      const DenseMap<CallInst *, Value *> &findCallToSurroundingDevPtr) {
+
+    auto replace = [findCallToSurroundingDevPtr](CallInst *call,
+                                                 GetElementPtrInst *gep) {
+      Value *surroundingDevPtr = findCallToSurroundingDevPtr.lookup(call);
+      if (!surroundingDevPtr) {
+        errs() << "replaceContainerOfs: no surroundingDevPtr for " << *call
+               << "\n";
+        std::exit(1);
+      }
+      ContainerOfVisitor replacer(gep, surroundingDevPtr);
       SmallVector<User *> users(gep->user_begin(), gep->user_end());
       for (User *user : users) {
         if (Instruction *inst = dyn_cast<Instruction>(user)) {
           replacer.visit(inst);
         }
       }
+    };
+
+    for (GetElementPtrInst *gep : containerOfs) {
+      Value *v = getUnderlyingObject(gep);
+      if (CallInst *call = dyn_cast<CallInst>(v)) {
+        replace(call, gep);
+      } else if (PHINode *phi = dyn_cast<PHINode>(v)) {
+        for (Value *v : phi->incoming_values()) {
+          if (CallInst *call = dyn_cast<CallInst>(v)) {
+            replace(call, gep);
+          } else if (!isa<Constant>(v)) {
+            errs() << "replaceContainerOfs: unexpected PHINode " << *phi
+                   << "\n";
+            std::exit(1);
+          }
+        }
+      } else {
+        errs() << "replaceContainerOfs: unexpected container_of " << *v << "\n";
+        std::exit(1);
+      }
       gep->eraseFromParent();
     }
-    call->eraseFromParent();
   }
 
   void stubOfFunctions(Module &m) {

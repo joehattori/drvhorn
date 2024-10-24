@@ -396,6 +396,7 @@ int main(int argc, char **argv) {
     ERR << "BROKEN INPUT IR\n";
     return 4;
   }
+  llvm::errs() << "parsed the module\n";
 
   if (!OutputFilename.empty())
     output = std::make_unique<llvm::ToolOutputFile>(
