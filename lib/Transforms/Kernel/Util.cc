@@ -172,23 +172,43 @@ getCalls(const llvm::Function *fn) {
   return res;
 }
 
-llvm::SmallVector<llvm::GlobalVariable *> getKrefs(llvm::Module &m) {
-  llvm::SmallVector<llvm::GlobalVariable *> res;
-  if (llvm::GlobalVariable *g = m.getGlobalVariable("drvhorn.kref_device_node"))
-    res.push_back(g);
-  for (llvm::GlobalVariable &g : m.globals()) {
-    if (g.getName().startswith("drvhorn.kref."))
-      res.push_back(&g);
-  }
-  return res;
+llvm::Function *getOrCreateNdIntFn(llvm::Module &m, unsigned bitwidth) {
+  std::string name = "nd.int" + std::to_string(bitwidth);
+  if (llvm::Function *f = m.getFunction(name))
+    return f;
+  llvm::IntegerType *it = llvm::IntegerType::get(m.getContext(), bitwidth);
+  llvm::FunctionType *ft = llvm::FunctionType::get(it, false);
+  return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, name, &m);
 }
 
-llvm::Function *getOrCreateNdBool(llvm::Module &m) {
-  if (llvm::Function *f = m.getFunction("nd_bool"))
-    return f;
-  llvm::FunctionType *ft =
-      llvm::FunctionType::get(llvm::Type::getInt1Ty(m.getContext()), false);
-  return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "nd_bool",
-                                &m);
+static llvm::Optional<llvm::SmallVector<unsigned>>
+revIndicesToStruct(const llvm::StructType *s, const llvm::Type *target) {
+  for (unsigned i = 0; i < s->getNumElements(); i++) {
+    const llvm::Type *elemType = s->getElementType(i);
+    if (equivTypes(elemType, target))
+      return llvm::SmallVector<unsigned>{i};
+    if (const llvm::StructType *sTy =
+            llvm::dyn_cast<llvm::StructType>(elemType)) {
+      llvm::Optional<llvm::SmallVector<unsigned>> indices =
+          revIndicesToStruct(sTy, target);
+      if (indices.hasValue()) {
+        indices->push_back(i);
+        return indices;
+      }
+    }
+  }
+  return llvm::None;
+}
+
+llvm::Optional<llvm::SmallVector<unsigned>>
+indicesToStruct(const llvm::StructType *s, const llvm::Type *target) {
+  if (equivTypes(s, target)) {
+    return llvm::SmallVector<unsigned>{};
+  }
+  llvm::Optional<llvm::SmallVector<unsigned>> indices =
+      revIndicesToStruct(s, target);
+  if (!indices.hasValue())
+    return llvm::None;
+  return llvm::SmallVector<unsigned>(indices->rbegin(), indices->rend());
 }
 } // namespace seahorn

@@ -295,6 +295,10 @@ static llvm::cl::opt<bool> Kernel("kernel",
                                   llvm::cl::desc("Target the Linux kernel"),
                                   llvm::cl::init(false));
 
+static llvm::cl::opt<bool>
+    KernelDebug("kernel-debug", llvm::cl::desc("Target the Linux kernel"),
+                llvm::cl::init(false));
+
 static llvm::cl::opt<std::string>
     AcpiDriver("acpi-driver", llvm::cl::desc("Target ACPI drivers"),
                llvm::cl::init(""));
@@ -317,8 +321,13 @@ static llvm::cl::opt<std::string>
                      llvm::cl::init(""));
 
 static llvm::cl::list<std::string>
-    ListOps("list-ops", llvm::cl::desc("ssList device driver operations"),
+    ListOps("list-ops", llvm::cl::desc("List device driver operations"),
             llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated);
+
+static llvm::cl::opt<std::string>
+    KernelOutLL("kernel-out-ll",
+                llvm::cl::desc("Output file for the kernel LLVM IR"),
+                llvm::cl::init(""));
 
 // removes extension from filename if there is one
 std::string getFileName(const std::string &str) {
@@ -455,6 +464,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createKernelSetupPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createHandleDevicesPass());
+    pm_wrapper.add(llvm::createVerifierPass(true));
     // TODO: merge these passes into one.
     if (!SpecificFunction.empty()) {
       pm_wrapper.add(seahorn::createSpecificFunctionPass(SpecificFunction));
@@ -474,12 +484,14 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createSlimDownPass());
     pm_wrapper.add(seahorn::createHandleInlineAsmPass());
     pm_wrapper.add(seahorn::createInitGlobalKrefsPass());
+    pm_wrapper.add(seahorn::createAssertKrefsPass());
+    pm_wrapper.add(llvm::createVerifierPass(true));
     pm_wrapper.add(seahorn::createAssumeNonNullPass());
-    pm_wrapper.add(seahorn::createIntoBinaryPass());
+    /*pm_wrapper.add(seahorn::createIntoBinaryPass());*/
     pm_wrapper.add(seahorn::createHandleNondetMallocPass());
     pm_wrapper.add(llvm::createCFGSimplificationPass());
     pm_wrapper.add(llvm::createVerifierPass(true));
-    pm_wrapper.add(seahorn::createKernelDebugPass());
+    pm_wrapper.add(seahorn::createKernelDebugPass(KernelOutLL));
   }
 
   if (RenameNondet)
@@ -710,7 +722,7 @@ int main(int argc, char **argv) {
     pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
 
     // -- request seaopt to inline all functions
-    if (InlineAll || Kernel) {
+    if (InlineAll || Kernel || KernelDebug) {
       pm_wrapper.add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
       pm_wrapper.add(seahorn::createMarkInternalInlinePass());
     } else {
@@ -724,7 +736,8 @@ int main(int argc, char **argv) {
     }
 
     // run inliner pass
-    if (InlineAll || InlineAllocFn || InlineConstructFn || Kernel) {
+    if (InlineAll || InlineAllocFn || InlineConstructFn || Kernel ||
+        KernelDebug) {
       pm_wrapper.add(llvm::createAlwaysInlinerLegacyPass());
       pm_wrapper.add(
           llvm::createGlobalDCEPass()); // kill unused internal global

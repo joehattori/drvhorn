@@ -28,7 +28,7 @@ public:
         nondetFns.push_back(&f);
       }
     }
-    Function *ndBool = getOrCreateNdBool(m);
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
     for (Function *f : nondetFns) {
       for (CallInst *call : getCalls(f)) {
         DenseMap<const User *, bool> visited;

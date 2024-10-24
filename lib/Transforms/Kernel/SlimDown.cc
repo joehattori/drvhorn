@@ -16,7 +16,6 @@
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 #define COMPILER_USED_NAME "llvm.compiler.used"
-#define DEVICE_GETTER_PREFIX "drvhorn.device_getter."
 
 using namespace llvm;
 
@@ -211,14 +210,8 @@ private:
   }
 
   void buildStartingPoint(const Module &m) {
-    if (const Function *getDevNode =
-            m.getFunction("drvhorn.create_device_node")) {
-      recordCallers(getDevNode);
-    }
-    for (const Function &f : m) {
-      if (f.getName().startswith(DEVICE_GETTER_PREFIX)) {
-        recordCallers(&f);
-      }
+    if (const Function *f = m.getFunction("drvhorn.update_index")) {
+      recordCallers(f);
     }
   }
 
@@ -255,8 +248,7 @@ private:
     }
 
     while (!workList.empty()) {
-      const Argument *arg = workList.back();
-      workList.pop_back();
+      const Argument *arg = workList.pop_back_val();
       targetArgs.insert(arg);
       for (const CallInst *call : getCalls(arg->getParent())) {
         const Value *v = call->getArgOperand(arg->getArgNo());
@@ -298,8 +290,6 @@ public:
     sliceModule(m);
     runDCEPasses(m, 10);
     removeNotCalledFunctions(m);
-    runDCEPasses(m, 10);
-    removeUnusedKrefs(m);
     runDCEPasses(m, 20);
     return true;
   }
@@ -312,22 +302,22 @@ public:
   virtual StringRef getPassName() const override { return "SlimDown"; }
 
 private:
-  void removeCompilerUsed(Module &M) {
-    if (GlobalVariable *compilerUsed = M.getNamedGlobal(COMPILER_USED_NAME)) {
+  void removeCompilerUsed(Module &m) {
+    if (GlobalVariable *compilerUsed = m.getNamedGlobal(COMPILER_USED_NAME)) {
       Type *ty = compilerUsed->getType();
       compilerUsed->eraseFromParent();
       // llvm.compiler.used seems to be required, so insert an empty value
-      M.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
+      m.getOrInsertGlobal(COMPILER_USED_NAME, ty->getPointerElementType());
     }
   }
 
   void updateLinkage(Module &m) {
     for (Function &f : m) {
-      if (f.isDeclaration())
-        continue;
-      if (f.getName().equals("main") || f.getName().startswith("__VERIFIER_") ||
-          // might be used in InitGlobalKrefs.cc
-          f.getName().equals("drvhorn.setup_kref") ||
+      if (f.isDeclaration() || f.getName().equals("main") ||
+          f.getName().startswith("__VERIFIER_") ||
+          // might be used later
+          f.getName().equals("drvhorn.assert_kref") ||
+          f.getName().equals("drvhorn.kref_init") ||
           f.getName().equals("drvhorn.malloc"))
         continue;
       f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
@@ -418,26 +408,7 @@ private:
       }
     }
     for (Instruction *inst : toRemoveInstructions) {
-      inst->dropAllReferences();
       inst->eraseFromParent();
-    }
-  }
-
-  void removeUnusedKrefs(Module &m) {
-    SmallVector<LoadInst *> krefLoads;
-    for (GlobalVariable *gv : getKrefs(m)) {
-      if (!gv->hasOneUse())
-        continue;
-      // the only user should be LoadInst in main.
-      krefLoads.push_back(cast<LoadInst>(*gv->user_begin()));
-    }
-    for (LoadInst *load : krefLoads) {
-      // the only user should be the kref setup call.
-      CallInst *krefSetup = cast<CallInst>(*load->user_begin());
-      krefSetup->eraseFromParent();
-      load->eraseFromParent();
-      // now the global variables have no users.
-      // should be removed in the next DCE pass execution.
     }
   }
 
@@ -458,9 +429,11 @@ private:
 
   void removeNotCalledFunctions(Module &m) {
     for (Function &f : m) {
-      if (!f.getName().equals("main") &&
-          // setup_kref might be used later.
-          !f.getName().equals("drvhorn.setup_kref") && getCalls(&f).empty())
+      if (getCalls(&f).empty() && !f.getName().equals("main") &&
+          // functions below might be used later.
+          !f.getName().equals("drvhorn.fail") &&
+          !f.getName().equals("drvhorn.kref_init") &&
+          !f.getName().equals("drvhorn.assert_kref"))
         f.deleteBody();
     }
   }
@@ -476,7 +449,8 @@ private:
             continue;
           }
           if (Function *f = extractCalledFunction(call)) {
-            if (f->isDeclaration() && call->user_empty())
+            if (f->isDeclaration() && call->user_empty() &&
+                !f->getName().equals("drvhorn.fail"))
               toRemove.push_back(call);
           }
         }
@@ -506,6 +480,12 @@ private:
     Type *elemType = type->getPointerElementType();
     if (FunctionType *ft = dyn_cast<FunctionType>(elemType)) {
       return makeNewValFn(m, ft, ndvalfn.size());
+    }
+    if (StructType *st = dyn_cast<StructType>(elemType)) {
+      if (st->isOpaque()) {
+        Function *f = getNondetValueFn(type, m, ndvalfn);
+        return b.CreateCall(f);
+      }
     }
     /*Function *malloc = nondetMalloc(m);*/
     /*FunctionType *ft =*/

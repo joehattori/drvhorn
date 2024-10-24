@@ -119,7 +119,7 @@ llvm::Pass *createFileOperationsSetupPass(llvm::StringRef fileOpName);
 llvm::Pass *createPlatformDriverPass(llvm::StringRef fileOpName);
 llvm::Pass *createKernelSetupPass();
 llvm::Pass *createHandleDevicesPass();
-llvm::Pass *createKernelDebugPass();
+llvm::Pass *createKernelDebugPass(llvm::StringRef outFileName);
 llvm::Pass *createSlimDownPass();
 llvm::Pass *createHandleNondetMallocPass();
 llvm::Pass *createIntoBinaryPass();
@@ -128,6 +128,7 @@ llvm::Pass *createDsaSwitchOpsPass(llvm::StringRef dsaSwitchOpsName);
 llvm::Pass *createInitGlobalKrefsPass();
 llvm::Pass *createListOpsPass(llvm::ArrayRef<std::string> ops);
 llvm::Pass *createHandleInlineAsmPass();
+llvm::Pass *createAssertKrefsPass();
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

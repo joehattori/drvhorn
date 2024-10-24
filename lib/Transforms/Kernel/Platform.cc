@@ -66,11 +66,11 @@ private:
   }
 
   void setupPDev(Module &m, IRBuilder<> &b, Value *pdev) {
-    Function *setupKref = m.getFunction("drvhorn.setup_kref");
+    Function *krefInit = m.getFunction("drvhorn.kref_init");
     Type *pdevType = pdev->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     PointerType *krefPtrType =
-        cast<PointerType>(setupKref->getArg(0)->getType());
+        cast<PointerType>(krefInit->getArg(0)->getType());
     StringRef kobjName = "drvhorn.kref.struct.platform_device";
     Value *globalKref = m.getGlobalVariable(kobjName, true);
     if (!globalKref) {
@@ -88,22 +88,17 @@ private:
                         ConstantInt::get(i32Ty, 0),
                         ConstantInt::get(i32Ty, 6),
                     });
-    if (krefPtr->getType() != setupKref->getArg(0)->getType())
-      krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
-    if (globalKref->getType() != setupKref->getArg(1)->getType())
-      globalKref = b.CreateBitCast(globalKref, setupKref->getArg(1)->getType());
-    b.CreateCall(setupKref, {krefPtr, globalKref});
+    b.CreateCall(krefInit, krefPtr);
+    b.CreateStore(krefPtr, globalKref);
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("drvhorn.assert_kref");
-    for (GlobalVariable *g : getKrefs(m)) {
-      Value *v = b.CreateLoad(g->getValueType(), g);
-      if (v->getType() != checker->getArg(0)->getType())
-        v = b.CreateBitCast(v, checker->getArg(0)->getType());
-      b.CreateCall(checker, v);
-    }
+    LLVMContext &ctx = m.getContext();
+    Function *failFn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), false),
+        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
+    b.CreateCall(failFn);
     b.CreateBr(ret);
   }
 

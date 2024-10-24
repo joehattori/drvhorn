@@ -72,8 +72,13 @@ private:
     Value *iPrivate =
         buildIPrivate(m, b, inodeType, inode, byteSize, iPrivateFieldIdx);
     populateFields(m, b, iPrivate, fields);
-    Function *setupKref = m.getFunction("drvhorn.setup_kref");
-    Type *krefType = setupKref->getArg(0)->getType()->getPointerElementType();
+    Function *krefInit = m.getFunction("drvhorn.kref_init");
+    Type *krefType = krefInit->getArg(0)->getType()->getPointerElementType();
+    GlobalVariable *globalKref =
+        new GlobalVariable(m, krefType->getPointerTo(), false,
+                           GlobalValue::LinkageTypes::PrivateLinkage,
+                           ConstantPointerNull::get(krefType->getPointerTo()),
+                           "drvhorn.kref.struct.file_operations");
     SmallVector<Value *, 8> krefPtrs =
         embeddedKrefPtrs(m, b, iPrivate, fields, krefType);
     switch (krefPtrs.size()) {
@@ -81,7 +86,8 @@ private:
       errs() << "No kref found\n";
       break;
     case 1:
-      callSetupKref(m, b, krefPtrs[0], setupKref, krefType);
+      b.CreateCall(krefInit, krefPtrs[0]);
+      b.CreateStore(krefPtrs[0], globalKref);
       break;
     default:
       errs() << "TODO: multiple kref\n";
@@ -95,27 +101,13 @@ private:
     b.CreateCondBr(notZero, fail, ret);
   }
 
-  void callSetupKref(Module &m, IRBuilder<> &b, Value *krefPtr,
-                     Function *setupKref, Type *krefType) {
-    GlobalVariable *globalKref = new GlobalVariable(
-        m, setupKref->getArg(1)->getType()->getPointerElementType(), false,
-        GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(krefType->getPointerTo()),
-        "drvhorn.kref.inode_private");
-    if (setupKref->getArg(0)->getType() != krefPtr->getType())
-      krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
-    b.CreateCall(setupKref, {krefPtr, globalKref});
-  }
-
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("drvhorn.assert_kref");
-    for (GlobalVariable *g : getKrefs(m)) {
-      Value *v = b.CreateLoad(g->getValueType(), g);
-      if (v->getType() != checker->getArg(0)->getType())
-        v = b.CreateBitCast(v, checker->getArg(0)->getType());
-      b.CreateCall(checker, v);
-    }
+    LLVMContext &ctx = m.getContext();
+    Function *failFn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), false),
+        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
+    b.CreateCall(failFn);
     b.CreateBr(ret);
   }
 

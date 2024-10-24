@@ -75,13 +75,11 @@ private:
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("drvhorn.assert_kref");
-    for (GlobalVariable *g : getKrefs(m)) {
-      Value *v = b.CreateLoad(g->getValueType(), g);
-      if (v->getType() != checker->getArg(0)->getType())
-        v = b.CreateBitCast(v, checker->getArg(0)->getType());
-      b.CreateCall(checker, v);
-    }
+    LLVMContext &ctx = m.getContext();
+    Function *failFn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), false),
+        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
+    b.CreateCall(failFn);
     b.CreateBr(ret);
   }
 

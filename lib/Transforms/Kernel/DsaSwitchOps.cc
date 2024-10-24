@@ -62,15 +62,15 @@ private:
 
   void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch,
                       StructType *dsaSwitchType) {
-    Function *setupKref = m.getFunction("drvhorn.setup_kref");
+    Function *krefInit = m.getFunction("drvhorn.kref_init");
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     Type *deviceType =
         dsaSwitchType->getElementType(0)->getPointerElementType();
     Value *devPtr = b.CreateAlloca(deviceType);
-    PointerType *krefPtrType = cast<PointerType>(
-        setupKref->getArg(1)->getType()->getPointerElementType());
+    PointerType *krefPtrType =
+        cast<PointerType>(krefInit->getArg(0)->getType());
     GlobalVariable *globalKref = new GlobalVariable(
         m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
         ConstantPointerNull::get(krefPtrType),
@@ -79,9 +79,8 @@ private:
         b.CreateGEP(deviceType, devPtr,
                     {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
                      ConstantInt::get(i32Ty, 6)});
-    if (krefPtr->getType() != setupKref->getArg(0)->getType())
-      krefPtr = b.CreateBitCast(krefPtr, setupKref->getArg(0)->getType());
-    b.CreateCall(setupKref, {krefPtr, globalKref});
+    b.CreateCall(krefInit, krefPtr);
+    b.CreateStore(krefPtr, globalKref);
     Value *gep =
         b.CreateGEP(dsaSwitchType, dsaSwitch,
                     {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0)});
@@ -93,13 +92,11 @@ private:
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(fail);
-    Function *checker = m.getFunction("drvhorn.assert_kref");
-    for (GlobalVariable *g : getKrefs(m)) {
-      Value *v = b.CreateLoad(g->getValueType(), g);
-      if (v->getType() != checker->getArg(0)->getType())
-        v = b.CreateBitCast(v, checker->getArg(0)->getType());
-      b.CreateCall(checker, v);
-    }
+    LLVMContext &ctx = m.getContext();
+    Function *failFn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), false),
+        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
+    b.CreateCall(failFn);
     b.CreateBr(ret);
   }
 

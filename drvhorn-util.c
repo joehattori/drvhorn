@@ -7,6 +7,7 @@
 #include <linux/of.h>
 #include <linux/device/class.h>
 #include <linux/slab.h>
+#include <linux/phy.h>
 #include <base/base.h>
 
 extern _Bool nd_bool();
@@ -155,53 +156,14 @@ u32 __DRVHORN_util_read_u32(u8 *addr) { return *(u32 *)addr; }
 u16 __DRVHORN_util_read_u16(u8 *addr) { return *(u16 *)addr; }
 u8 __DRVHORN_util_read_u8(u8 *addr) { return *addr; }
 
-static int __DRVHORN_util_get_kref_count(const struct kref *kref) {
-  return kref->refcount.refs.counter;
-}
-
-#define LIMIT 0x100
-struct kref *__DRVHORN_kref_device_node;
-struct device_node *__DRVHORN_create_device_node(void) {
-  static unsigned count = 0;
-  static struct device_node storage[LIMIT];
-
-  if (count >= LIMIT || nd_bool())
-    return NULL;
-  struct device_node *ret = &storage[count++];
-  ret->kobj.kref.refcount.refs.counter = 1;
-  if (nd_bool()) {
-    __DRVHORN_kref_device_node = &ret->kobj.kref;
-  }
-  return ret;
-}
-
-struct device_node *__DRVHORN_of_get_next_child(const struct device_node *node, struct device_node *prev) {
-  if (!node) {
-    return NULL;
-  }
-  struct device_node *child =  __DRVHORN_create_device_node();
-  of_node_get(child);
-  of_node_put(prev);
-  return child;
-}
-
-struct device_node *__DRVHORN_get_device_node(struct device_node *from) {
-  struct device_node *dn = __DRVHORN_create_device_node();
-  of_node_get(dn);
-  of_node_put(from);
-  return dn;
-}
-
-void __DRVHORN_setup_kref(struct kref *kref, struct kref **global_kref) {
-  kref->refcount.refs.counter = 1;
-  if (nd_bool()) {
-    *global_kref = kref;
-  }
+void __DRVHORN_update_index(long long int index, long long int *target_index) {
+  if (nd_bool())
+    *target_index = index;
 }
 
 void __DRVHORN_assert_kref(const struct kref *kref) {
   if (kref) {
-    int counter = __DRVHORN_util_get_kref_count(kref);
+    int counter = kref->refcount.refs.counter;
     sassert(counter == 1);
   }
 }

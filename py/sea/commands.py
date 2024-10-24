@@ -255,12 +255,13 @@ def get_sea_horn_dsa (opts):
 
 class Seapp(sea.LimitedCmd):
     def __init__(self, quiet=False, internalize=False, strip_extern=False,
-                 keep_lib_fn=False, kernel=False, list_ops=False):
+                 keep_lib_fn=False, kernel=False, kernel_debug=False, list_ops=False):
         super(Seapp, self).__init__('pp', 'Pre-processing', allow_extra=True)
         self._internalize = internalize
         self._strip_extern = strip_extern
         self._keep_lib_fn = keep_lib_fn
         self._kernel = kernel
+        self._kernel_debug = kernel_debug
         self._list_ops = list_ops
 
     @property
@@ -325,6 +326,8 @@ class Seapp(sea.LimitedCmd):
                          type=str, metavar='str,..')
         ap.add_argument ('--dsa-switch-ops', dest='dsa_switch_ops', help='Specify a dsa_switch_ops to validate',
                          type=str, metavar='str,..')
+        ap.add_argument ('--out-ll', dest='out_ll', help='Output file for kernel LLVM IR emission',
+                         type=str, default=None, metavar='str')
 
         ap.add_argument ('--externalize-addr-taken-functions',
                          help='Externalize uses of address-taken functions',
@@ -420,9 +423,29 @@ class Seapp(sea.LimitedCmd):
 
         if self._kernel:
             argv.append ('--kernel')
+        if self._kernel_debug:
+            argv.append ('--kernel-debug')
 
         if self._list_ops:
             argv.append ('--list-ops=file_operations,platform_driver,dsa_switch_ops')
+
+        if args.out_ll:
+            argv.append('--kernel-out-ll={0}'.format(args.out_ll))
+
+        if args.specific_function:
+            argv.append ('--specific-function={0}'.format (args.specific_function))
+
+        if args.acpi_driver:
+            argv.append ('--acpi-driver={0}'.format (args.acpi_driver))
+
+        if args.platform_driver:
+            argv.append ('--platform-driver={0}'.format (args.platform_driver))
+
+        if args.file_operations:
+            argv.append ('--file-operations={0}'.format (args.file_operations))
+
+        if args.dsa_switch_ops:
+            argv.append ('--dsa-switch-ops={0}'.format (args.dsa_switch_ops))
 
         # internalize takes precedence over all other options and must run alone
         if self._strip_extern:
@@ -497,21 +520,6 @@ class Seapp(sea.LimitedCmd):
 
             if args.entry is not None:
                 argv.append ('--entry-point={0}'.format (args.entry))
-
-            if args.specific_function:
-                argv.append ('--specific-function={0}'.format (args.specific_function))
-
-            if args.acpi_driver:
-                argv.append ('--acpi-driver={0}'.format (args.acpi_driver))
-
-            if args.platform_driver:
-                argv.append ('--platform-driver={0}'.format (args.platform_driver))
-
-            if args.file_operations:
-                argv.append ('--file-operations={0}'.format (args.file_operations))
-
-            if args.dsa_switch_ops:
-                argv.append ('--dsa-switch-ops={0}'.format (args.dsa_switch_ops))
 
             if args.kill_vaarg:
                 argv.append('--kill-vaarg=true')
@@ -1751,6 +1759,8 @@ Spf = sea.SeqCmd('spf', 'clang|add-branch-sentinel|fat-bnd-check|fe|unroll|cut-l
                  [Clang(), AddBranchSentinel(), FatBoundsCheck()] + FrontEnd.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
 Kernel = sea.SeqCmd('kernel', 'Linux kernel verification: alias for pp|ms|opt|horn --solve',
                  [Seapp(kernel=True), MixedSem(), Seaopt(), Seahorn(solve=True)])
+KernelDebug = sea.SeqCmd('kernel-debug', 'Linux kernel debug: alias for pp|ms|opt|horn --solve',
+                 [Seapp(kernel_debug=True), MixedSem(), Seaopt(), Seahorn(solve=True)])
 ExeKernel = sea.SeqCmd ('exe-kernel', 'alias for clang|pp --strip-extern|pp --internalize|wmem|rmtf|linkrt',
                   [Seapp(strip_extern=True, keep_lib_fn=True, kernel=True),
                    Seapp(internalize=True), WrapMem(), RemoveTargetFeatures(), LinkRt()])

@@ -12,6 +12,7 @@ llvm::Function *extractCalledFunction(llvm::CallInst &call);
 llvm::SmallVector<llvm::CallInst *, 16> getCalls(llvm::Function *fn);
 llvm::SmallVector<const llvm::CallInst *, 16>
 getCalls(const llvm::Function *fn);
-llvm::SmallVector<llvm::GlobalVariable *> getKrefs(llvm::Module &m);
-llvm::Function *getOrCreateNdBool(llvm::Module &m);
+llvm::Function *getOrCreateNdIntFn(llvm::Module &m, unsigned);
+llvm::Optional<llvm::SmallVector<unsigned>>
+indicesToStruct(const llvm::StructType *s, const llvm::Type *target);
 } // namespace seahorn

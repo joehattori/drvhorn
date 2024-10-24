@@ -139,14 +139,14 @@ private:
     FunctionType *krefInitTy = FunctionType::get(
         Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
     Function *krefInit =
-        Function::Create(krefInitTy, GlobalValue::LinkageTypes::InternalLinkage,
+        Function::Create(krefInitTy, GlobalValue::LinkageTypes::ExternalLinkage,
                          "drvhorn.kref_init", &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", krefInit);
     IRBuilder<> b(block);
-    Value *gep =
-        b.CreateGEP(krefTy, krefInit->getArg(0),
-                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-                     ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    Value *gep = b.CreateInBoundsGEP(
+        krefTy, krefInit->getArg(0),
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
     b.CreateStore(ConstantInt::get(i32Ty, 1), gep);
     b.CreateRetVoid();
 
@@ -165,10 +165,10 @@ private:
                          "drvhorn.kref_get", &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", krefGet);
     IRBuilder<> b(block);
-    Value *gep =
-        b.CreateGEP(krefTy, krefGet->getArg(0),
-                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-                     ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    Value *gep = b.CreateInBoundsGEP(
+        krefTy, krefGet->getArg(0),
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
     LoadInst *load = b.CreateLoad(i32Ty, gep);
     Value *add = b.CreateAdd(load, ConstantInt::get(i32Ty, 1));
     b.CreateStore(add, gep);
@@ -189,10 +189,10 @@ private:
     BasicBlock *block = BasicBlock::Create(ctx, "", krefPut);
 
     IRBuilder<> b(block);
-    Value *gep =
-        b.CreateGEP(krefTy, krefPut->getArg(0),
-                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-                     ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    Value *gep = b.CreateInBoundsGEP(
+        krefTy, krefPut->getArg(0),
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
     LoadInst *load = b.CreateLoad(i32Ty, gep);
     Value *sub = b.CreateSub(load, ConstantInt::get(i32Ty, 1));
     b.CreateStore(sub, gep);

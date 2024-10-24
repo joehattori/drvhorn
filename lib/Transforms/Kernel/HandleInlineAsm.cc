@@ -1441,7 +1441,7 @@ private:
         }
       }
     }
-    Function *ndBool = getOrCreateNdBool(m);
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
     for (CallBrInst *callbr : binaryCallBrs) {
       IRBuilder<> b(callbr);
       Value *cond = b.CreateCall(ndBool);
