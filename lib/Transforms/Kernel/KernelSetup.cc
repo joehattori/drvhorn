@@ -25,9 +25,9 @@ public:
   KernelSetup() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
+    stubAllocationFunctions(m);
     stubKernelFunctions(m);
     stubAllocPages(m);
-    stubDevmKmalloc(m);
     handleKrefAPIs(m);
     handleFree(m);
     handleKmemCache(m);
@@ -50,24 +50,48 @@ public:
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
 
+  void stubAllocationFunctions(Module &m) {
+    struct AllocFn {
+      StringRef name;
+      unsigned sizeIdx;
+    };
+    // TODO: handle flags for zero-init.
+    AllocFn allocFns[] = {
+        {"__kmalloc", 0},
+        {"__kmalloc_node", 0},
+        {"__kmalloc_node_track_caller", 0},
+        {"kmalloc_large", 0},
+        {"kmalloc_trace", 2},
+        {"kmalloc_large_node", 0},
+        {"__vmalloc_node_range", 0},
+        {"slob_alloc", 0},
+        {"pcpu_alloc", 0},
+        {"__ioremap_caller", 1},
+        {"__early_ioremap", 1},
+        {"devm_kmalloc", 1},
+    };
+    IntegerType *i8Ty = Type::getInt8Ty(m.getContext());
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    for (const AllocFn &f : allocFns) {
+      Function *orig = m.getFunction(f.name);
+      if (!orig)
+        continue;
+      for (CallInst *call : getCalls(orig)) {
+        IRBuilder<> b(call);
+        Value *cond = b.CreateCall(ndBool, {}, "alloc.cond");
+        Value *size = call->getArgOperand(f.sizeIdx);
+        AllocaInst *alloca = b.CreateAlloca(i8Ty, size);
+        Value *result = b.CreateSelect(
+            cond, alloca, ConstantPointerNull::get(i8Ty->getPointerTo()));
+        call->replaceAllUsesWith(result);
+        call->eraseFromParent();
+      }
+    }
+  }
+
   void stubKernelFunctions(Module &m) {
-    std::string mallocFns[] = {"__kmalloc",
-                               "__kmalloc_node",
-                               "__kmalloc_node_track_caller",
-                               "kmalloc_large",
-                               "kmalloc_trace",
-                               "kmalloc_large_node",
-                               "__vmalloc_node_range",
-                               "slob_alloc",
-                               "pcpu_alloc",
-                               "__ioremap_caller",
-                               "__early_ioremap",
-                               "strcpy",
-                               "strncpy",
-                               "strlen",
-                               "strnlen",
-                               "strcmp",
-                               "strncmp"};
+    std::string mallocFns[] = {"strcpy",  "strncpy", "strlen",
+                               "strnlen", "strcmp",  "strncmp"};
     for (const std::string &name : mallocFns) {
       Function *orig = m.getFunction(name);
       if (!orig)
@@ -110,19 +134,6 @@ private:
       }
       orig->replaceAllUsesWith(wrapper);
       orig->eraseFromParent();
-    }
-  }
-
-  void stubDevmKmalloc(Module &m) {
-    Function *f = m.getFunction("devm_kmalloc");
-    SmallVector<CallInst *> toRemove;
-    Function *mallocFn = m.getFunction("malloc");
-    for (CallInst *call : getCalls(f)) {
-      CallInst *malloc = CallInst::Create(mallocFn, {call->getArgOperand(1)},
-                                          "devm_kmalloc", call);
-      call->replaceAllUsesWith(malloc);
-      call->eraseFromParent();
-      toRemove.push_back(call);
     }
   }
 
