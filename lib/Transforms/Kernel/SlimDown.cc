@@ -343,9 +343,35 @@ private:
         if (toRemoveInstructions.count(opInst)) {
           if (!removedInstructions.insert(opInst).second)
             continue;
+          if (CallInst *call = dyn_cast<CallInst>(opInst))
+            handleRetainedCallInst(call, toRemoveInstructions, ndvalfn);
           Value *replace = getReplacement(opInst, ndvalfn);
           opInst->replaceAllUsesWith(replace);
         }
+      }
+    }
+  }
+
+  void
+  handleRetainedCallInst(CallInst *call,
+                         const DenseSet<Instruction *> &toRemoveInstructions,
+                         DenseMap<const Type *, Function *> &ndvalfn) {
+    Function *f = extractCalledFunction(call);
+    if (!f)
+      return;
+    for (Argument &arg : f->args()) {
+      if (arg.hasAttribute(Attribute::WriteOnly)) {
+        Value *argVal =
+            call->getArgOperand(arg.getArgNo())->stripPointerCasts();
+        if (Instruction *inst = dyn_cast<Instruction>(argVal)) {
+          if (toRemoveInstructions.count(inst))
+            continue;
+        }
+        Value *ndVal = nondetValue(argVal->getType()->getPointerElementType(),
+                                   call, ndvalfn);
+        ndVal->setName("writeonly_filler." + call->getName().str());
+        IRBuilder<> b(call);
+        b.CreateStore(ndVal, argVal);
       }
     }
   }
