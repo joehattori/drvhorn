@@ -211,4 +211,18 @@ indicesToStruct(const llvm::StructType *s, const llvm::Type *target) {
     return llvm::None;
   return llvm::SmallVector<unsigned>(indices->rbegin(), indices->rend());
 }
+
+bool embedsStruct(const llvm::StructType *s, const llvm::Type *target) {
+  for (unsigned i = 0; i < s->getNumElements(); i++) {
+    const llvm::Type *elemType = s->getElementType(i);
+    if (equivTypes(elemType, target))
+      return true;
+    if (const llvm::StructType *sTy =
+            llvm::dyn_cast<llvm::StructType>(elemType)) {
+      if (embedsStruct(sTy, target))
+        return true;
+    }
+  }
+  return false;
+}
 } // namespace seahorn

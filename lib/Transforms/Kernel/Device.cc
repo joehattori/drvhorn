@@ -310,29 +310,6 @@ private:
     }
   }
 
-  bool isEmbeddedStruct(const StructType *embedded, const StructType *base) {
-    SmallVector<StructType *> workList;
-    DenseSet<StructType *> visited;
-    for (Type *elem : base->elements()) {
-      if (StructType *s = dyn_cast<StructType>(elem)) {
-        workList.push_back(s);
-        visited.insert(s);
-      }
-    }
-    while (!workList.empty()) {
-      StructType *elem = workList.pop_back_val();
-      if (equivTypes(elem, embedded))
-        return true;
-      for (Type *e : elem->elements()) {
-        if (StructType *s = dyn_cast<StructType>(e)) {
-          if (visited.insert(s).second)
-            workList.push_back(s);
-        }
-      }
-    }
-    return false;
-  }
-
   bool isClsOrBusPtr(Type *type) {
     if (PointerType *ptr = dyn_cast<PointerType>(type)) {
       if (StructType *s = dyn_cast<StructType>(ptr->getElementType()))
@@ -348,9 +325,9 @@ private:
     SmallVector<StructType *> res;
     const StructType *deviceType =
         StructType::getTypeByName(v->getContext(), "struct.device");
-    auto recordTypeIfEmbedsDevice = [this, &res, deviceType](Type *type) {
+    auto recordTypeIfEmbedsDevice = [ &res, deviceType](Type *type) {
       if (StructType *s = dyn_cast<StructType>(type)) {
-        if (isEmbeddedStruct(deviceType, s))
+        if (embedsStruct(s, deviceType))
           res.push_back(s);
       }
     };
@@ -461,8 +438,9 @@ private:
     }
     StructType *cur = baseTypes[0];
     for (size_t i = 1; i < baseTypes.size(); i++) {
-      if (isEmbeddedStruct(cur, baseTypes[i]))
+      if (embedsStruct(baseTypes[i], cur)) {
         cur = baseTypes[i];
+      }
     }
     return cur;
   }
