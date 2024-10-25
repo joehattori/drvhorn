@@ -336,10 +336,13 @@ private:
 
   void handleRetainedInst(Instruction *inst,
                           DenseMap<const Type *, Function *> &ndvalfn,
-                          const DenseSet<Instruction *> &toRemoveInstructions) {
+                          const DenseSet<Instruction *> &toRemoveInstructions,
+                          DenseSet<Instruction *> &removedInstructions) {
     for (Value *op : inst->operands()) {
       if (Instruction *opInst = dyn_cast<Instruction>(op)) {
         if (toRemoveInstructions.count(opInst)) {
+          if (!removedInstructions.insert(opInst).second)
+            continue;
           Value *replace = getReplacement(opInst, ndvalfn);
           opInst->replaceAllUsesWith(replace);
         }
@@ -388,13 +391,14 @@ private:
 
   void sliceModule(Module &m) {
     Filter filter(m);
-    DenseSet<Instruction *> toRemoveInstructions;
     DenseMap<const Type *, Function *> ndvalfn;
     for (Function &f : m) {
       // we keep these functions still.
       if (f.getName().equals("main") || f.getName().startswith("drvhorn.") ||
           f.isDeclaration())
         continue;
+      DenseSet<Instruction *> toRemoveInstructions;
+      DenseSet<Instruction *> removedInstructions;
       SmallVector<Instruction *> retained;
       for (Instruction &inst : instructions(f)) {
         if (filter.isTarget(&inst)) {
@@ -404,11 +408,12 @@ private:
         }
       }
       for (Instruction *inst : retained) {
-        handleRetainedInst(inst, ndvalfn, toRemoveInstructions);
+        handleRetainedInst(inst, ndvalfn, toRemoveInstructions,
+                           removedInstructions);
       }
-    }
-    for (Instruction *inst : toRemoveInstructions) {
-      inst->eraseFromParent();
+      for (Instruction *inst : toRemoveInstructions) {
+        inst->eraseFromParent();
+      }
     }
   }
 
