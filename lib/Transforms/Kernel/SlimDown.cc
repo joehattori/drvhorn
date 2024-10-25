@@ -21,6 +21,46 @@ using namespace llvm;
 
 namespace seahorn {
 
+struct Acceptor : public InstVisitor<Acceptor> {
+  Acceptor(DenseSet<const Instruction *> &targets,
+           DenseSet<const Value *> &underlyingLoadedPtrs)
+      : targets(targets), underlyingLoadedPtrs(underlyingLoadedPtrs) {}
+
+  void visitValue(Value *v) {
+    if (!visited.insert(v).second)
+      return;
+    if (Instruction *inst = dyn_cast<Instruction>(v)) {
+      visit(inst);
+    } else if (Operator *op = dyn_cast<Operator>(v)) {
+      visitOperator(op);
+    }
+  }
+
+  void visitInstruction(Instruction &inst) {
+    targets.insert(&inst);
+    for (Value *v : inst.operands()) {
+      visitValue(v);
+    }
+  }
+
+  void visitLoadInst(LoadInst &load) {
+    Value *ptr = load.getPointerOperand();
+    targets.insert(&load);
+    underlyingLoadedPtrs.insert(getUnderlyingObject(ptr));
+    visitValue(ptr);
+  }
+
+private:
+  DenseSet<const Instruction *> &targets;
+  DenseSet<const Value *> &underlyingLoadedPtrs;
+  DenseSet<const Value *> visited;
+
+  void visitOperator(Operator *op) {
+    if (isa<BitCastOperator, GEPOperator>(op))
+      visitValue(op->getOperand(0));
+  }
+};
+
 struct Filter : public InstVisitor<Filter, bool> {
 public:
   Filter(Module &m) {
@@ -35,13 +75,23 @@ public:
           recordUnderlyingObjectOfRetVal(ret);
         }
       }
+
       // store and some calls cannot be tracked from ret.
       for (Instruction &inst : instructions(f)) {
-        if (StoreInst *store = dyn_cast<StoreInst>(&inst)) {
-          visitStoreInst(*store);
-        } else if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          visitCallInst(*call);
+        if (isa<CallInst>(inst))
+          visit(inst);
+      }
+
+      // track stores last, since some underlyingLoadedPtrs might be inserted
+      // during the previous loop.
+      while (true) {
+        size_t size = underlyingLoadedPtrs.size();
+        for (Instruction &inst : instructions(f)) {
+          if (isa<StoreInst>(inst))
+            visit(inst);
         }
+        if (size == underlyingLoadedPtrs.size())
+          break;
       }
     }
   }
@@ -53,7 +103,7 @@ public:
   }
 
   bool visitReturnInst(ReturnInst &ret) {
-    acceptInst(&ret);
+    recordInst(&ret);
     if (Value *retVal = ret.getReturnValue()) {
       visitValue(retVal);
     }
@@ -64,7 +114,7 @@ public:
     Value *ptr = load.getPointerOperand();
     bool isTarget = visitValue(ptr);
     if (isTarget) {
-      acceptInst(&load);
+      recordInst(&load);
       underlyingLoadedPtrs.insert(getUnderlyingObject(ptr));
     }
     return isTarget;
@@ -73,9 +123,9 @@ public:
   bool visitStoreInst(StoreInst &store) {
     bool isTarget = isStoreTarget(&store);
     if (isTarget) {
-      acceptInst(&store);
-      visitValue(store.getValueOperand());
-      visitValue(store.getPointerOperand());
+      recordInst(&store);
+      Acceptor acceptor(targets, underlyingLoadedPtrs);
+      acceptor.visit(store);
     }
     return isTarget;
   }
@@ -87,11 +137,16 @@ public:
     bool isTarget = startingPoints.count(&call);
     if (Function *f = extractCalledFunction(call)) {
       for (Argument &arg : f->args()) {
-        isTarget |= targetArgs.count(&arg);
+        if (targetArgs.count(&arg)) {
+          isTarget = true;
+          Value *argVal = call.getArgOperand(arg.getArgNo());
+          Acceptor acceptor(targets, underlyingLoadedPtrs);
+          acceptor.visitValue(argVal);
+        }
       }
     }
     if (isTarget) {
-      acceptInst(&call);
+      recordInst(&call);
       for (Value *v : call.operands()) {
         visitValue(v);
       }
@@ -103,7 +158,7 @@ public:
     if (br.isConditional()) {
       visitValue(br.getCondition());
     }
-    acceptInst(&br);
+    recordInst(&br);
     return true;
   }
 
@@ -111,7 +166,7 @@ public:
     for (Value *v : phi.incoming_values()) {
       visitValue(v);
     }
-    acceptInst(&phi);
+    recordInst(&phi);
     return true;
   }
 
@@ -119,7 +174,7 @@ public:
     bool isTarget =
         all_of(inst.operands(), [this](Value *v) { return visitValue(v); });
     if (isTarget) {
-      acceptInst(&inst);
+      recordInst(&inst);
     }
     return isTarget;
   }
@@ -139,9 +194,9 @@ private:
     cache[val] = false;
     bool isTarget = false;
     if (Instruction *inst = dyn_cast<Instruction>(val)) {
-      isTarget = visit(*inst);
+      isTarget = visit(inst);
     } else if (BasicBlock *blk = dyn_cast<BasicBlock>(val)) {
-      isTarget = visit(*blk->getTerminator());
+      isTarget = visit(blk->getTerminator());
     } else if (Operator *op = dyn_cast<Operator>(val)) {
       isTarget = visitOperator(op);
     } else if (Constant *c = dyn_cast<Constant>(val)) {
@@ -166,7 +221,7 @@ private:
     return false;
   }
 
-  void acceptInst(Instruction *inst) {
+  void recordInst(Instruction *inst) {
     targets.insert(inst);
     for (BasicBlock *blk : predecessors(inst->getParent())) {
       visitValue(blk->getTerminator());
