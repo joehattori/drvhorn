@@ -56,8 +56,8 @@ private:
     Value *dsaSwitch = allocType(m, b, dsaSwitchType);
     setupDsaSwitch(m, b, dsaSwitch, dsaSwitchType);
     CallInst *call = b.CreateCall(setup, {dsaSwitch});
-    Value *zero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
-    b.CreateCondBr(zero, ret, fail);
+    Value *isZero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
+    b.CreateCondBr(isZero, ret, fail);
   }
 
   void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch,

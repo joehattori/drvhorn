@@ -82,9 +82,12 @@ public:
   HandleDevices() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    handleDeviceNodeFinders(m);
+    Function *devNodeGetter = handleDeviceNodeFinders(m);
+    handleFwnodePut(m);
+    handleFwnodeFinders(m, devNodeGetter);
     handleFindDevice(m);
     handleDevmAddAction(m);
+    handleDeviceLinkAdd(m);
 
     stubOfFunctions(m);
     return true;
@@ -99,13 +102,14 @@ private:
     GlobalVariable *targetIndex;
   };
 
-  void handleDeviceNodeFinders(Module &m) {
+  // returns the device node generator function
+  Function *handleDeviceNodeFinders(Module &m) {
     struct FinderInfo {
       StringRef name;
-      Optional<size_t> devNodeArgIndex;
+      Optional<size_t> putNodeIndex;
       Optional<size_t> returnIfNullArgIndex;
     };
-    FinderInfo namesAndDeviceNodeIndices[] = {
+    FinderInfo finders[] = {
         {"of_find_node_opts_by_path", None, None},
         {"of_find_node_by_name", 0, None},
         {"of_find_node_by_type", 0, None},
@@ -113,96 +117,247 @@ private:
         {"of_find_node_by_phandle", None, None},
         {"of_find_matching_node_and_match", 0, None},
         {"of_find_node_with_property", 0, None},
-        {"of_get_compatible_child", 0, None},
-        {"of_get_child_by_name", 0, None},
+        {"of_get_compatible_child", None, 0},
+        {"of_get_child_by_name", None, 0},
         {"of_get_next_child", 1, 0},
         {"of_get_next_available_child", 1, 0},
     };
+
+    auto getDeviceNodeType = [finders, &m]() -> StructType * {
+      for (const FinderInfo &info : finders) {
+        if (const Function *f = m.getFunction(info.name))
+          return cast<StructType>(f->getReturnType()->getPointerElementType());
+      }
+      return nullptr;
+    };
+
     LLVMContext &ctx = m.getContext();
-    Function *ndBool = getOrCreateNdIntFn(m, 1);
-    Function *krefInit = m.getFunction("drvhorn.kref_init");
-    Function *krefGet = m.getFunction("drvhorn.kref_get");
-    Function *updateIndex = m.getFunction("drvhorn.update_index");
+    Constant *ofNodeGet = m.getFunction("of_node_get");
     Function *ofNodePut = m.getFunction("of_node_put");
-    StructType *krefType = cast<StructType>(
-        krefInit->getArg(0)->getType()->getPointerElementType());
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    for (const FinderInfo &info : namesAndDeviceNodeIndices) {
+    StructType *devNodeType = getDeviceNodeType();
+    Function *deviceNodeGetter = buildDeviceNodeGetter(m, devNodeType);
+    for (const FinderInfo &info : finders) {
       Function *f = m.getFunction(info.name);
       if (!f)
         continue;
       f->deleteBody();
-      StructType *devNodeType =
-          cast<StructType>(f->getReturnType()->getPointerElementType());
       BasicBlock *earlyReturn = info.returnIfNullArgIndex.hasValue()
                                     ? BasicBlock::Create(ctx, "early_return", f)
                                     : nullptr;
-      BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
       BasicBlock *body = BasicBlock::Create(ctx, "body", f);
       BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
-      StorageGlobals globals = getStorageAndIndex(m, devNodeType);
-      GlobalVariable *storage = globals.storage;
-      GlobalVariable *index = globals.curIndex;
-      GlobalVariable *targetIndex = globals.targetIndex;
 
       IRBuilder<> b(ctx);
       if (earlyReturn) {
         b.SetInsertPoint(earlyReturn);
         Value *cond = b.CreateIsNull(f->getArg(*info.returnIfNullArgIndex));
-        b.CreateCondBr(cond, ret, entry);
+        b.CreateCondBr(cond, ret, body);
       }
-
-      b.SetInsertPoint(entry);
-      CallInst *ndCond = b.CreateCall(ndBool);
-      LoadInst *curIndex = b.CreateLoad(i64Ty, index);
-      Value *withinRange =
-          b.CreateICmpULT(curIndex, ConstantInt::get(i64Ty, STORAGE_SIZE));
-      Value *cond = b.CreateAnd(ndCond, withinRange);
-      b.CreateCondBr(cond, body, ret);
 
       b.SetInsertPoint(body);
-      Value *devNode =
-          b.CreateInBoundsGEP(storage->getValueType(), storage,
-                              {ConstantInt::get(i64Ty, 0), curIndex});
-      const SmallVector<unsigned> devIndices(
-          indicesToStruct(devNodeType, krefType).getValue());
-      SmallVector<Value *> gepIndices;
-      gepIndices.push_back(ConstantInt::get(i64Ty, 0));
-      for (unsigned i : devIndices) {
-        gepIndices.push_back(ConstantInt::get(i32Ty, i));
-      }
-      Value *krefPtr = b.CreateInBoundsGEP(devNodeType, devNode, gepIndices);
-      b.CreateCall(krefInit, krefPtr);
-      b.CreateCall(krefGet, krefPtr);
-      Value *nxtIndex = b.CreateAdd(curIndex, ConstantInt::get(i64Ty, 1));
-      b.CreateStore(nxtIndex, index);
-      b.CreateCall(updateIndex, {curIndex, targetIndex});
+      Value *devNode = b.CreateCall(deviceNodeGetter);
+      FunctionType *ofNodeGetType = FunctionType::get(
+          devNodeType->getPointerTo(), devNodeType->getPointerTo(), false);
+      if (ofNodeGet->getType() != ofNodeGetType->getPointerTo())
+        ofNodeGet =
+            ConstantExpr::getBitCast(ofNodeGet, ofNodeGetType->getPointerTo());
+      b.CreateCall(ofNodeGetType, ofNodeGet, devNode);
       b.CreateBr(ret);
 
       b.SetInsertPoint(ret);
-      PHINode *retPhi = b.CreatePHI(f->getReturnType(), 3);
-      Constant *null = Constant::getNullValue(devNodeType->getPointerTo());
-      retPhi->addIncoming(null, entry);
+      PHINode *retPhi = b.CreatePHI(devNodeType->getPointerTo(), 2);
       retPhi->addIncoming(devNode, body);
       if (earlyReturn) {
+        Constant *null = ConstantPointerNull::get(devNodeType->getPointerTo());
         retPhi->addIncoming(null, earlyReturn);
       }
-      if (info.devNodeArgIndex.hasValue()) {
-        Value *from = f->getArg(info.devNodeArgIndex.getValue());
+      if (info.putNodeIndex.hasValue()) {
+        Value *from = f->getArg(info.putNodeIndex.getValue());
         if (from->getType() != ofNodePut->getArg(0)->getType())
           from = b.CreateBitCast(from, ofNodePut->getArg(0)->getType());
-        b.CreateCall(ofNodePut, {from});
+        b.CreateCall(ofNodePut, from);
       }
       b.CreateRet(retPhi);
     }
+    return deviceNodeGetter;
   }
 
-  StorageGlobals getStorageAndIndex(Module &m, StructType *elemType) {
-    StringRef suffix = elemType->getName();
-    std::string storageName = "drvhorn.storage." + suffix.str();
-    std::string indexName = "drvhorn.index." + suffix.str();
-    std::string targetIndexName = "drvhorn.target_index." + suffix.str();
+  Function *buildDeviceNodeGetter(Module &m, StructType *devNodeType) {
+    Function *krefInit = m.getFunction("drvhorn.kref_init");
+    StructType *krefType = cast<StructType>(
+        krefInit->getArg(0)->getType()->getPointerElementType());
+    Function *updateIndex = m.getFunction("drvhorn.update_index");
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    Function *f =
+        Function::Create(FunctionType::get(devNodeType->getPointerTo(), false),
+                         GlobalValue::LinkageTypes::PrivateLinkage,
+                         "drvhorn.gen_device_node", &m);
+    StorageGlobals globals = getStorageAndIndex(m, devNodeType);
+    GlobalVariable *storage = globals.storage;
+    GlobalVariable *index = globals.curIndex;
+    GlobalVariable *targetIndex = globals.targetIndex;
+
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+
+    IRBuilder<> b(entry);
+    CallInst *ndCond = b.CreateCall(ndBool);
+    LoadInst *curIndex = b.CreateLoad(i64Ty, index);
+    Value *withinRange =
+        b.CreateICmpULT(curIndex, ConstantInt::get(i64Ty, STORAGE_SIZE));
+    Value *cond = b.CreateAnd(ndCond, withinRange);
+    b.CreateCondBr(cond, body, ret);
+
+    b.SetInsertPoint(body);
+    Value *devNode =
+        b.CreateInBoundsGEP(storage->getValueType(), storage,
+                            {ConstantInt::get(i64Ty, 0), curIndex});
+    Value *krefPtr = b.CreateInBoundsGEP(
+        devNodeType, devNode,
+        gepIndicesToStruct(devNodeType, krefType).getValue());
+    b.CreateCall(krefInit, krefPtr);
+    Value *nxtIndex = b.CreateAdd(curIndex, ConstantInt::get(i64Ty, 1));
+    b.CreateStore(nxtIndex, index);
+    b.CreateCall(updateIndex, {curIndex, targetIndex});
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *retPhi = b.CreatePHI(devNodeType->getPointerTo(), 2);
+    Constant *null = ConstantPointerNull::get(devNodeType->getPointerTo());
+    retPhi->addIncoming(null, entry);
+    retPhi->addIncoming(devNode, body);
+    b.CreateRet(retPhi);
+
+    return f;
+  }
+
+#define DEVNODE_FWNODE_INDEX 3
+  void handleFwnodePut(Module &m) {
+    Function *f = m.getFunction("fwnode_handle_put");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.fwnode_put");
+    Argument *fwnode = f->getArg(0);
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+    Function *ofNodePut = m.getFunction("of_node_put");
+    StructType *devNodeType = cast<StructType>(
+        ofNodePut->getArg(0)->getType()->getPointerElementType());
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+
+    IRBuilder<> b(entry);
+    Value *isNull = b.CreateIsNull(fwnode);
+    b.CreateCondBr(isNull, ret, body);
+
+    b.SetInsertPoint(body);
+    // to_of_node() was translated to something like this:
+    //   getelementptr %struct.fwnode_handle, %struct.fwnode_handle* %0, i64 -1,
+    //   i32 4
+    Value *devNode =
+        b.CreateGEP(fwnode->getType()->getPointerElementType(), fwnode,
+                    {ConstantInt::get(i64Ty, -1), ConstantInt::get(i32Ty, 4)});
+    devNode = b.CreateBitCast(devNode, devNodeType->getPointerTo());
+    b.CreateCall(ofNodePut, devNode);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    b.CreateRetVoid();
+  }
+
+  void handleFwnodeFinders(Module &m, Function *devNodeGetter) {
+    struct FinderInfo {
+      StringRef name;
+      Optional<unsigned> putIndex;
+    };
+
+    FinderInfo finders[] = {
+        {"fwnode_find_reference", None},
+        {"fwnode_get_parent", None},
+        {"fwnode_get_next_parent", 0},
+        {"fwnode_get_nth_parent", 0},
+        {"fwnode_get_next_child_node", 1},
+        {"fwnode_get_next_available_child_node", 1},
+        {"device_get_next_child_node", 1},
+        {"fwnode_get_named_child_node", None},
+        {"device_get_named_child_node", None},
+        {"fwnode_handle_get", None},
+        {"fwnode_graph_get_next_endpoint", 1},
+        {"fwnode_graph_get_port_parent", None},
+        {"fwnode_graph_get_remote_port_parent", None},
+        {"fwnode_graph_get_remote_port", None},
+        {"fwnode_graph_get_remote_endpoint", None},
+        {"fwnode_graph_get_endpoint_by_id", None},
+    };
+    LLVMContext &ctx = m.getContext();
+    Function *putter = m.getFunction("drvhorn.fwnode_put");
+    Type *devNodePtrType = devNodeGetter->getReturnType();
+    FunctionType *ofNodeGetType =
+        FunctionType::get(devNodePtrType, devNodePtrType, false);
+    Constant *ofNodeGet = m.getFunction("of_node_get");
+    Constant *ofNodeGetCasted =
+        ConstantExpr::getBitCast(ofNodeGet, ofNodeGetType->getPointerTo());
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+
+    for (const FinderInfo &info : finders) {
+      Function *f = m.getFunction(info.name);
+      if (!f)
+        continue;
+      f->deleteBody();
+      f->setName("drvhorn.fwnode_getter." + info.name);
+
+      BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+      BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+      BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+      IRBuilder<> b(entry);
+      if (info.putIndex.hasValue()) {
+        Value *prev = f->getArg(*info.putIndex);
+        if (putter->getArg(0)->getType() != prev->getType())
+          prev = b.CreateBitCast(prev, putter->getArg(0)->getType());
+        b.CreateCall(putter, prev);
+      }
+      Value *devNode = b.CreateCall(devNodeGetter);
+      Value *isNull = b.CreateIsNull(devNode);
+      b.CreateCondBr(isNull, ret, body);
+
+      b.SetInsertPoint(body);
+      b.CreateCall(ofNodeGetType, ofNodeGetCasted, devNode);
+      Value *fwnode =
+          b.CreateInBoundsGEP(devNodePtrType->getPointerElementType(), devNode,
+                              {
+                                  ConstantInt::get(i64Ty, 0),
+                                  ConstantInt::get(i32Ty, DEVNODE_FWNODE_INDEX),
+                              });
+      b.CreateBr(ret);
+
+      b.SetInsertPoint(ret);
+      PHINode *retPhi = b.CreatePHI(fwnode->getType(), 2);
+      Constant *null = Constant::getNullValue(fwnode->getType());
+      retPhi->addIncoming(null, entry);
+      retPhi->addIncoming(fwnode, body);
+      if (retPhi->getType() == f->getReturnType())
+        b.CreateRet(retPhi);
+      else
+        b.CreateRet(b.CreateBitCast(retPhi, f->getReturnType()));
+    }
+  }
+
+  StorageGlobals getStorageAndIndex(Module &m, StructType *elemType,
+                                    std::string prefix = "") {
+    std::string suffix = elemType->getName().str();
+    if (!prefix.empty())
+      suffix = prefix + "." + suffix;
+    std::string storageName = "drvhorn.storage." + suffix;
+    std::string indexName = "drvhorn.index." + suffix;
+    std::string targetIndexName = "drvhorn.target_index." + suffix;
     GlobalVariable *storage = m.getGlobalVariable(storageName, true);
     GlobalVariable *index = m.getGlobalVariable(indexName, true);
     GlobalVariable *targetIndex = m.getGlobalVariable(targetIndexName, true);
@@ -226,9 +381,11 @@ private:
     Function *devmAddAction = m.getFunction("__devm_add_action");
     if (!devmAddAction)
       return;
-    Function *ndI32Fn = getOrCreateNdIntFn(m, 32);
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
     LLVMContext &ctx = m.getContext();
-    ConstantInt *zero = ConstantInt::get(Type::getInt32Ty(ctx), 0);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    ConstantInt *zero = ConstantInt::get(i32Ty, 0);
+    ConstantInt *enomem = ConstantInt::get(i32Ty, -12);
     for (CallInst *call : getCalls(devmAddAction)) {
       BasicBlock *orig = call->getParent();
       Function *action =
@@ -239,27 +396,69 @@ private:
                << "\n";
         continue;
       }
-      Value *data = call->getArgOperand(2);
-      BasicBlock *next = orig->splitBasicBlock(call, "__devm_add_action.next");
-      BranchInst *origBr = cast<BranchInst>(orig->getTerminator());
-      BasicBlock *execAction = BasicBlock::Create(
-          ctx, "__devm_add_action.exec_action", orig->getParent(), next);
+      BasicBlock *next =
+          orig->splitBasicBlock(call->getNextNode(), "__devm_add_action.next");
+      Instruction *origBr = orig->getTerminator();
+      BasicBlock *execAction = BasicBlock::Create(ctx, "__devm_add_action.exec",
+                                                  orig->getParent(), next);
 
-      IRBuilder<> b(origBr);
-      Value *res = b.CreateCall(ndI32Fn);
-      Value *isZero = b.CreateICmpEQ(res, zero);
+      IRBuilder<> b(orig);
+      Value *isZero = b.CreateCall(ndBool);
+      // __devm_add_action returns 0 or -ENOMEM
+      Value *res = b.CreateSelect(isZero, zero, enomem);
       call->replaceAllUsesWith(res);
-      BranchInst *br = b.CreateCondBr(isZero, execAction, next);
-      origBr->replaceAllUsesWith(br);
+      b.CreateCondBr(isZero, execAction, next);
+      origBr->eraseFromParent();
 
       b.SetInsertPoint(execAction);
+      Value *data = call->getArgOperand(2);
       if (data->getType() != action->getArg(0)->getType())
         data = b.CreateBitCast(data, action->getArg(0)->getType());
       b.CreateCall(action, data);
       b.CreateBr(next);
 
       call->eraseFromParent();
-      origBr->eraseFromParent();
+    }
+  }
+
+#define DL_FLAG_AUTOREMOVE_SUPPLIER (1 << 4)
+#define DL_FLAG_AUTOPROBE_CONSUMER (1 << 5)
+  void handleDeviceLinkAdd(Module &m) {
+    auto isAutoremove = [](CallInst *devLinkAddCall) -> bool {
+      ConstantInt *flags =
+          dyn_cast<ConstantInt>(devLinkAddCall->getArgOperand(2));
+      if (!flags)
+        return false;
+      return flags->getZExtValue() &
+             (DL_FLAG_AUTOREMOVE_SUPPLIER | DL_FLAG_AUTOPROBE_CONSUMER);
+    };
+
+    Function *f = m.getFunction("device_link_add");
+    if (!f)
+      return;
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    for (CallInst *call : getCalls(f)) {
+      if (!isAutoremove(call))
+        continue;
+      SmallVector<ICmpInst *, 8> icmps;
+      for (User *user : call->users()) {
+        if (ICmpInst *icmp = dyn_cast<ICmpInst>(user)) {
+          icmps.push_back(icmp);
+        } else {
+          errs() << "The result of device_link_add with a autoremove flag "
+                    "should only be used in a null check\n";
+          errs() << "user in " << call->getFunction()->getName() << *user
+                 << "\n";
+          std::exit(1);
+        }
+      }
+      Value *ndCond =
+          CallInst::Create(ndBool, {}, "device_link_add.result", call);
+      for (ICmpInst *icmp : icmps) {
+        icmp->replaceAllUsesWith(ndCond);
+        icmp->eraseFromParent();
+      }
+      call->eraseFromParent();
     }
   }
 
@@ -280,8 +479,8 @@ private:
         if (!surroundingDevType) {
           surroundingDevType = deviceType;
         }
-        const SmallVector<unsigned> devIndices(
-            indicesToStruct(surroundingDevType, deviceType).getValue());
+        const SmallVector<Value *> &devIndices =
+            gepIndicesToStruct(surroundingDevType, deviceType).getValue();
         findCallToSurroundingDevPtr[call] =
             insertDeviceGetter(m, call, surroundingDevType, devIndices);
         collectContainersOfs(call, containerOfs);
@@ -325,7 +524,7 @@ private:
     SmallVector<StructType *> res;
     const StructType *deviceType =
         StructType::getTypeByName(v->getContext(), "struct.device");
-    auto recordTypeIfEmbedsDevice = [ &res, deviceType](Type *type) {
+    auto recordTypeIfEmbedsDevice = [&res, deviceType](Type *type) {
       if (StructType *s = dyn_cast<StructType>(type)) {
         if (embedsStruct(s, deviceType))
           res.push_back(s);
@@ -486,14 +685,15 @@ private:
   }
 
   // returns a pointer to the surrounding device.
-  Value *insertDeviceGetter(Module &m, CallInst *call,
+  Value *insertDeviceGetter(Module &m, CallInst *finderCall,
                             StructType *surroundingDevType,
-                            const SmallVector<unsigned> &devIndices) {
+                            const SmallVector<Value *> &devIndices) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    BasicBlock *origBlk = call->getParent();
-    BasicBlock *nxtBlk = origBlk->splitBasicBlock(call, "device_getter.after");
+    BasicBlock *origBlk = finderCall->getParent();
+    BasicBlock *nxtBlk =
+        origBlk->splitBasicBlock(finderCall, "device_getter.after");
     BasicBlock *genBlk = BasicBlock::Create(ctx, "device_getter.gen",
                                             origBlk->getParent(), nxtBlk);
     StorageGlobals globals = getStorageAndIndex(m, surroundingDevType);
@@ -520,33 +720,29 @@ private:
     term->eraseFromParent();
 
     b.SetInsertPoint(genBlk);
-    SmallVector<Value *> gepIndices;
-    gepIndices.push_back(ConstantInt::get(i64Ty, 0));
-    for (unsigned i : devIndices) {
-      gepIndices.push_back(ConstantInt::get(i32Ty, i));
-    }
     Value *devPtr =
-        b.CreateInBoundsGEP(surroundingDevType, surroundingDevPtr, gepIndices);
+        b.CreateInBoundsGEP(surroundingDevType, surroundingDevPtr, devIndices);
     Value *krefPtr = b.CreateInBoundsGEP(
         devPtr->getType()->getPointerElementType(), devPtr,
         {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
          ConstantInt::get(i32Ty, 6)});
+    /*setupFwnode(m, devPtr, b);*/
     b.CreateCall(krefInit, krefPtr);
     b.CreateCall(krefGet, krefPtr);
-    if (call->getType() != devPtr->getType())
-      devPtr = b.CreateBitCast(devPtr, call->getType());
+    if (finderCall->getType() != devPtr->getType())
+      devPtr = b.CreateBitCast(devPtr, finderCall->getType());
     Value *nxtIndex = b.CreateAdd(curIndex, ConstantInt::get(i64Ty, 1));
     b.CreateStore(nxtIndex, index);
     b.CreateCall(updateIndex, {curIndex, targetIndex});
     b.CreateBr(nxtBlk);
 
-    b.SetInsertPoint(call);
+    b.SetInsertPoint(finderCall);
     Type *devPtrType = devPtr->getType();
     PHINode *callReplacer = b.CreatePHI(devPtrType, 2);
     callReplacer->addIncoming(Constant::getNullValue(devPtrType), origBlk);
     callReplacer->addIncoming(devPtr, genBlk);
-    call->replaceAllUsesWith(callReplacer);
-    call->eraseFromParent();
+    finderCall->replaceAllUsesWith(callReplacer);
+    finderCall->eraseFromParent();
     return surroundingDevPtr;
   }
 

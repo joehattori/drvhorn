@@ -29,10 +29,12 @@ public:
     stubKernelFunctions(m);
     stubAllocPages(m);
     handleKrefAPIs(m);
-    handleFree(m);
+    killFree(m);
     handleKmemCache(m);
 
     handleCallRcu(m);
+    handleDevErrProbeCalls(m);
+    handleIsErr(m);
 
     // handleMemset(m);
     handleMemCpy(m);
@@ -49,6 +51,15 @@ public:
 
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
+
+  Value *createAllocStub(Module &m, IRBuilder<> &b, Value *size) {
+    IntegerType *i8Ty = Type::getInt8Ty(m.getContext());
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    Value *cond = b.CreateCall(ndBool, {}, "alloc.cond");
+    AllocaInst *alloca = b.CreateAlloca(i8Ty, size);
+    return b.CreateSelect(cond, alloca,
+                          ConstantPointerNull::get(i8Ty->getPointerTo()));
+  }
 
   void stubAllocationFunctions(Module &m) {
     struct AllocFn {
@@ -69,20 +80,15 @@ private:
         {"__ioremap_caller", 1},
         {"__early_ioremap", 1},
         {"devm_kmalloc", 1},
+        {"kvmalloc_node", 1},
     };
-    IntegerType *i8Ty = Type::getInt8Ty(m.getContext());
-    Function *ndBool = getOrCreateNdIntFn(m, 1);
     for (const AllocFn &f : allocFns) {
       Function *orig = m.getFunction(f.name);
       if (!orig)
         continue;
       for (CallInst *call : getCalls(orig)) {
         IRBuilder<> b(call);
-        Value *cond = b.CreateCall(ndBool, {}, "alloc.cond");
-        Value *size = call->getArgOperand(f.sizeIdx);
-        AllocaInst *alloca = b.CreateAlloca(i8Ty, size);
-        Value *result = b.CreateSelect(
-            cond, alloca, ConstantPointerNull::get(i8Ty->getPointerTo()));
+        Value *result = createAllocStub(m, b, call->getArgOperand(f.sizeIdx));
         call->replaceAllUsesWith(result);
         call->eraseFromParent();
       }
@@ -242,7 +248,7 @@ private:
     }
   }
 
-  void handleFree(Module &m) {
+  void killFree(Module &m) {
     std::string freeFuncNames[] = {
         "kfree",
         "vfree",
@@ -255,7 +261,7 @@ private:
     }
   }
 
-  GlobalVariable *gVarOfKmemCacheAllocCall(Module &M, CallInst *call) {
+  GlobalVariable *gVarOfKmemCacheAllocCall(Module &m, CallInst *call) {
     Value *cache = call->getArgOperand(0);
     if (LoadInst *load = dyn_cast<LoadInst>(cache)) {
       if (GlobalVariable *gv =
@@ -291,23 +297,21 @@ private:
     return None;
   }
 
-  void handleKmemCache(Module &M) {
+  void handleKmemCache(Module &m) {
     StringRef kmemCacheFuncNames[] = {
         "kmem_cache_alloc",
         "kmem_cache_alloc_lru",
         "kmem_cache_alloc_node",
     };
-    LLVMContext &ctx = M.getContext();
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Function *malloc = M.getFunction("__DRVHORN_malloc");
     for (StringRef name : kmemCacheFuncNames) {
-      Function *orig = M.getFunction(name);
+      Function *orig = m.getFunction(name);
       if (!orig)
         continue;
       for (User *user : orig->users()) {
         if (CallInst *call = dyn_cast<CallInst>(user)) {
-          GlobalVariable *gv = gVarOfKmemCacheAllocCall(M, call);
+          GlobalVariable *gv = gVarOfKmemCacheAllocCall(m, call);
           if (!gv) {
             errs() << "TODO: kmem_cache_alloc: global variable not found\n";
             continue;
@@ -317,9 +321,8 @@ private:
             continue;
           }
           ConstantInt *sizeArg = ConstantInt::get(i64Ty, size.getValue());
-          ConstantInt *flagArg = ConstantInt::get(i32Ty, 0);
-          CallInst *newMalloc =
-              CallInst::Create(malloc, {sizeArg, flagArg}, "kmemcache", call);
+          IRBuilder<> b(call);
+          Value *newMalloc = createAllocStub(m, b, sizeArg);
           call->replaceAllUsesWith(newMalloc);
         }
       }
@@ -344,16 +347,16 @@ private:
     }
   }
 
-  void handleCallRcu(Module &M) {
-    LLVMContext &ctx = M.getContext();
+  void handleCallRcu(Module &m) {
+    LLVMContext &ctx = m.getContext();
     std::string name = "call_rcu";
-    Function *orig = M.getFunction(name);
+    Function *orig = m.getFunction(name);
     if (!orig)
       return;
     std::string wrapperName = name + "_wrapper";
     Function *wrapper = Function::Create(
         orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
+        wrapperName, &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
     Value *arg = wrapper->getArg(0);
     Value *fn = wrapper->getArg(1);
@@ -367,9 +370,55 @@ private:
     orig->eraseFromParent();
   }
 
-  void handleMemset(Module &M) {
-    if (Function *llvmMemset = M.getFunction("llvm.memset.p0i8.i64")) {
-      Function *memsetFn = M.getFunction("__DRVHORN_memset");
+  void handleDevErrProbeCalls(Module &m) {
+    Function *f = m.getFunction("dev_err_probe");
+    if (!f)
+      return;
+    for (CallInst *call : getCalls(f)) {
+      Value *err = call->getArgOperand(1);
+      call->replaceAllUsesWith(err);
+      call->eraseFromParent();
+    }
+  }
+
+  // The IS_ERR check is translated to something like the following LLVM IR:
+  //   %1 = icmp ugt %struct.a* %0, inttoptr (i64 -4096 to %struct.a*)
+  // This code may be evaluated to true even if %0 is a valid pointer.
+  // We replace the IS_ERR check with comparison to 0, i.e.
+  //   %1 = icmp ult %struct.a* %0, inttoptr (i64 0 to %struct.a*)
+  void handleIsErr(Module &m) {
+    auto isTarget = [](ICmpInst *icmp) {
+      if (icmp->getPredicate() == CmpInst::ICMP_UGT) {
+        if (ConstantExpr *ci = dyn_cast<ConstantExpr>(icmp->getOperand(1))) {
+          if (ci->getOpcode() == Instruction::IntToPtr) {
+            if (ConstantInt *intVal =
+                    dyn_cast<ConstantInt>(ci->getOperand(0))) {
+              return intVal->getSExtValue() == -4096;
+            }
+          }
+        }
+      }
+      return false;
+    };
+
+    IntegerType *i64Ty = Type::getInt64Ty(m.getContext());
+    for (Function &f : m) {
+      for (Instruction &inst : instructions(f)) {
+        if (ICmpInst *icmp = dyn_cast<ICmpInst>(&inst)) {
+          if (isTarget(icmp)) {
+            icmp->setPredicate(CmpInst::ICMP_ULT);
+            Constant *rhs = ConstantExpr::getIntToPtr(
+                ConstantInt::get(i64Ty, 0), icmp->getOperand(0)->getType());
+            icmp->setOperand(1, rhs);
+          }
+        }
+      }
+    }
+  }
+
+  void handleMemset(Module &m) {
+    if (Function *llvmMemset = m.getFunction("llvm.memset.p0i8.i64")) {
+      Function *memsetFn = m.getFunction("__DRVHORN_memset");
       if (!memsetFn) {
         errs() << "__DRVHORN_memset not found\n";
         std::exit(1);
@@ -379,7 +428,7 @@ private:
     }
   }
 
-  void handleMemCpy(Module &M) {
+  void handleMemCpy(Module &m) {
     enum RetType {
       Void,
       Len,
@@ -391,7 +440,7 @@ private:
       RetType returnType;
     };
 
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     MemcpyInfo memcpyFuncNames[] = {
         MemcpyInfo{"memcpy", RetType::Dest},
         MemcpyInfo{"memcpy_fromio", RetType::Void},
@@ -402,13 +451,13 @@ private:
         MemcpyInfo{"_copy_from_user", RetType::Len},
     };
     for (const MemcpyInfo &info : memcpyFuncNames) {
-      Function *f = M.getFunction(info.name);
+      Function *f = m.getFunction(info.name);
       if (!f)
         continue;
       std::string wrapperName = info.name + "_wrapper";
       Function *wrapper = Function::Create(
           f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &M);
+          wrapperName, &m);
       BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
       Value *dst = wrapper->getArg(0);
       Value *src = wrapper->getArg(1);
@@ -431,15 +480,15 @@ private:
     }
   }
 
-  void handleMemMove(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    Function *f = M.getFunction("memmove");
+  void handleMemMove(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    Function *f = m.getFunction("memmove");
     if (!f)
       return;
     std::string wrapperName = "memmove_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
+        wrapperName, &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
     Value *dst = wrapper->getArg(0);
     Value *src = wrapper->getArg(1);
@@ -451,17 +500,17 @@ private:
     f->eraseFromParent();
   }
 
-  void handleStrCat(Module &M) {
-    Function *f = M.getFunction("strcat");
+  void handleStrCat(Module &m) {
+    Function *f = m.getFunction("strcat");
     if (!f)
       return;
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strcat_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
+        wrapperName, &m);
     Value *dst = wrapper->getArg(0);
     Value *src = wrapper->getArg(1);
 
@@ -507,17 +556,17 @@ private:
     f->eraseFromParent();
   }
 
-  void handleStrCmp(Module &M) {
-    Function *f = M.getFunction("strcmp");
+  void handleStrCmp(Module &m) {
+    Function *f = m.getFunction("strcmp");
     if (!f)
       return;
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strcmp_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
+        wrapperName, &m);
     Value *s1 = wrapper->getArg(0);
     Value *s2 = wrapper->getArg(1);
 
@@ -558,17 +607,17 @@ private:
     f->eraseFromParent();
   }
 
-  void handleStrNCmp(Module &M) {
-    Function *f = M.getFunction("strncmp");
+  void handleStrNCmp(Module &m) {
+    Function *f = m.getFunction("strncmp");
     if (!f)
       return;
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strncmp_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
+        wrapperName, &m);
     Value *s1 = wrapper->getArg(0);
     Value *s2 = wrapper->getArg(1);
     Value *size = wrapper->getArg(2);
@@ -611,17 +660,17 @@ private:
     f->eraseFromParent();
   }
 
-  void handleStrChr(Module &M) {
-    Function *f = M.getFunction("strchr");
+  void handleStrChr(Module &m) {
+    Function *f = m.getFunction("strchr");
     if (!f)
       return;
-    LLVMContext &ctx = M.getContext();
+    LLVMContext &ctx = m.getContext();
     Type *i8Type = Type::getInt8Ty(ctx);
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strchr_wrapper";
     Function *wrapper = Function::Create(
         f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &M);
+        wrapperName, &m);
     Value *str = wrapper->getArg(0);
     Value *chr = wrapper->getArg(1);
 
@@ -670,14 +719,14 @@ private:
     return res;
   }
 
-  FunctionCallee getNondetFn(Type *type, Module &M) {
+  FunctionCallee getNondetFn(Type *type, Module &m) {
     auto it = ndfn.find(type);
     if (it != ndfn.end()) {
       return it->second;
     }
 
     FunctionCallee res =
-        makeNewNondetFn(M, *type, ndfn.size(), "verifier.nondet.");
+        makeNewNondetFn(m, *type, ndfn.size(), "verifier.nondet.");
     ndfn[type] = res;
     return res;
   }

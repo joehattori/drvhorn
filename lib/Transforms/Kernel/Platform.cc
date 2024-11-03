@@ -12,6 +12,7 @@ namespace seahorn {
 
 static unsigned platformDriverProbeIndex = 0;
 static unsigned pDevDeviceGEPIndex = 3;
+static unsigned deviceDriverDataIndex = 8;
 
 class PlatformDriver : public ModulePass {
 public:
@@ -54,13 +55,10 @@ private:
   void buildEntryBlock(Module &m, Function *probe, BasicBlock *entry,
                        BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
-    StructType *pdevType =
-        StructType::getTypeByName(m.getContext(), "struct.platform_device");
+    Type *pdevType = probe->getArg(0)->getType()->getPointerElementType();
     Value *pdev = allocType(m, b, pdevType);
     setupPDev(m, b, pdev);
-    if (pdev->getType() != probe->getArg(0)->getType())
-      pdev = b.CreateBitCast(pdev, probe->getArg(0)->getType());
-    CallInst *call = b.CreateCall(probe, {pdev});
+    CallInst *call = b.CreateCall(probe, pdev);
     Value *zero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
     b.CreateCondBr(zero, ret, fail);
   }
@@ -69,8 +67,8 @@ private:
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     Type *pdevType = pdev->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
-    PointerType *krefPtrType =
-        cast<PointerType>(krefInit->getArg(0)->getType());
+    Type *krefType = krefInit->getArg(0)->getType()->getPointerElementType();
+    PointerType *krefPtrType = krefType->getPointerTo();
     StringRef kobjName = "drvhorn.kref.struct.platform_device";
     Value *globalKref = m.getGlobalVariable(kobjName, true);
     if (!globalKref) {
@@ -78,18 +76,54 @@ private:
           m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
           ConstantPointerNull::get(krefPtrType), kobjName);
     }
+    Type *i8Ty = Type::getInt8Ty(ctx);
     Type *i32Ty = Type::getInt32Ty(ctx);
     Type *i64Ty = Type::getInt64Ty(ctx);
-    Value *krefPtr =
-        b.CreateGEP(pdevType, pdev,
-                    {
-                        ConstantInt::get(i64Ty, 0),
-                        ConstantInt::get(i32Ty, pDevDeviceGEPIndex),
-                        ConstantInt::get(i32Ty, 0),
-                        ConstantInt::get(i32Ty, 6),
-                    });
+    Value *devPtr =
+        b.CreateInBoundsGEP(pdevType, pdev,
+                            {
+                                ConstantInt::get(i64Ty, 0),
+                                ConstantInt::get(i32Ty, pDevDeviceGEPIndex),
+                            },
+                            "device");
+    StructType *devType =
+        cast<StructType>(devPtr->getType()->getPointerElementType());
+    Value *krefPtr = b.CreateInBoundsGEP(devType, devPtr,
+                                         {
+                                             ConstantInt::get(i64Ty, 0),
+                                             ConstantInt::get(i32Ty, 0),
+                                             ConstantInt::get(i32Ty, 6),
+                                         },
+                                         "kref");
     b.CreateCall(krefInit, krefPtr);
     b.CreateStore(krefPtr, globalKref);
+
+    // setup driver_data
+    Value *driverDataPtr =
+        b.CreateInBoundsGEP(devType, devPtr,
+                            {
+                                ConstantInt::get(i64Ty, 0),
+                                ConstantInt::get(i32Ty, deviceDriverDataIndex),
+                            },
+                            "driver_data");
+    Constant *driverDataSize = ConstantInt::get(i64Ty, 0x1000);
+    AllocaInst *driverData = b.CreateAlloca(i8Ty, driverDataSize);
+    b.CreateStore(driverData, driverDataPtr);
+
+    // setup of_node
+    const SmallVector<Value *> &devNodeIndices =
+        gepIndicesToStruct(devType,
+                           StructType::getTypeByName(ctx, "struct.device_node")
+                               ->getPointerTo())
+            .getValue();
+    Value *ofNodeGEP =
+        b.CreateInBoundsGEP(devType, devPtr, devNodeIndices, "of_node");
+    Function *devNodeGetter = m.getFunction("drvhorn.gen_device_node");
+    Value *ofNode = b.CreateCall(devNodeGetter);
+    if (ofNode->getType() != ofNodeGEP->getType()->getPointerElementType())
+      ofNode = b.CreateBitCast(ofNode,
+                               ofNodeGEP->getType()->getPointerElementType());
+    b.CreateStore(ofNode, ofNodeGEP);
   }
 
   void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {

@@ -326,6 +326,8 @@ class Seapp(sea.LimitedCmd):
                          type=str, metavar='str,..')
         ap.add_argument ('--dsa-switch-ops', dest='dsa_switch_ops', help='Specify a dsa_switch_ops to validate',
                          type=str, metavar='str,..')
+        ap.add_argument ('--i2c-driver', dest='i2c_driver', help='Specify a i2c_driver to validate',
+                         type=str, metavar='str,..')
         ap.add_argument ('--out-ll', dest='out_ll', help='Output file for kernel LLVM IR emission',
                          type=str, default=None, metavar='str')
 
@@ -446,6 +448,9 @@ class Seapp(sea.LimitedCmd):
 
         if args.dsa_switch_ops:
             argv.append ('--dsa-switch-ops={0}'.format (args.dsa_switch_ops))
+
+        if args.i2c_driver:
+            argv.append ('--i2c-driver={0}'.format (args.i2c_driver))
 
         # internalize takes precedence over all other options and must run alone
         if self._strip_extern:

@@ -24,6 +24,43 @@ index 305bb21d843c..49f0eb7d0b9d 100644
  		return err;
  	}
  fail:
+diff --git a/drivers/media/platform/xilinx/xilinx-tpg.c b/drivers/media/platform/xilinx/xilinx-tpg.c
+index 80353ca44402..0980e923ffa1 100644
+--- a/drivers/media/platform/xilinx/xilinx-tpg.c
++++ b/drivers/media/platform/xilinx/xilinx-tpg.c
+@@ -719,7 +719,7 @@ static int xtpg_parse_of(struct xtpg_device *xtpg)
+ 
+ 	ports = of_get_child_by_name(node, "ports");
+ 	if (ports == NULL)
+-		ports = node;
++		ports = of_node_get(node);
+ 
+ 	for_each_child_of_node(ports, port) {
+ 		const struct xvip_video_format *format;
+@@ -732,6 +732,7 @@ static int xtpg_parse_of(struct xtpg_device *xtpg)
+ 		if (IS_ERR(format)) {
+ 			dev_err(dev, "invalid format in DT");
+ 			of_node_put(port);
++			of_node_put(ports);
+ 			return PTR_ERR(format);
+ 		}
+ 
+@@ -741,6 +742,7 @@ static int xtpg_parse_of(struct xtpg_device *xtpg)
+ 		} else if (xtpg->vip_format != format) {
+ 			dev_err(dev, "in/out format mismatch in DT");
+ 			of_node_put(port);
++			of_node_put(ports);
+ 			return -EINVAL;
+ 		}
+ 
+@@ -754,6 +756,7 @@ static int xtpg_parse_of(struct xtpg_device *xtpg)
+ 		/* Count the number of ports. */
+ 		nports++;
+ 	}
++	of_node_put(ports);
+ 
+ 	if (nports != 1 && nports != 2) {
+ 		dev_err(dev, "invalid number of ports %u\n", nports);
 diff --git a/drivers/net/dsa/bcm_sf2.c b/drivers/net/dsa/bcm_sf2.c
 index cd1f240c90f3..bdba656c88ae 100644
 --- a/drivers/net/dsa/bcm_sf2.c
@@ -91,3 +128,108 @@ index 4ce68e655a63..bbb0022ff5b7 100644
  }
  
  static int
+diff --git a/drivers/net/dsa/qca/qca8k-leds.c b/drivers/net/dsa/qca/qca8k-leds.c
+index e8c16e76e34b..77a79c249402 100644
+--- a/drivers/net/dsa/qca/qca8k-leds.c
++++ b/drivers/net/dsa/qca/qca8k-leds.c
+@@ -431,8 +431,11 @@ qca8k_parse_port_leds(struct qca8k_priv *priv, struct fwnode_handle *port, int p
+ 		init_data.devname_mandatory = true;
+ 		init_data.devicename = kasprintf(GFP_KERNEL, "%s:0%d", ds->slave_mii_bus->id,
+ 						 port_num);
+-		if (!init_data.devicename)
++		if (!init_data.devicename) {
++			fwnode_handle_put(led);
++			fwnode_handle_put(leds);
+ 			return -ENOMEM;
++		}
+ 
+ 		ret = devm_led_classdev_register_ext(priv->dev, &port_led->cdev, &init_data);
+ 		if (ret)
+@@ -441,6 +444,7 @@ qca8k_parse_port_leds(struct qca8k_priv *priv, struct fwnode_handle *port, int p
+ 		kfree(init_data.devicename);
+ 	}
+ 
++	fwnode_handle_put(leds);
+ 	return 0;
+ }
+ 
+@@ -471,9 +475,13 @@ qca8k_setup_led_ctrl(struct qca8k_priv *priv)
+ 		 * the correct port for LED setup.
+ 		 */
+ 		ret = qca8k_parse_port_leds(priv, port, qca8k_port_to_phy(port_num));
+-		if (ret)
++		if (ret) {
++			fwnode_handle_put(port);
++			fwnode_handle_put(ports);
+ 			return ret;
++		}
+ 	}
+ 
++	fwnode_handle_put(ports);
+ 	return 0;
+ }
+diff --git a/drivers/nvme/host/apple.c b/drivers/nvme/host/apple.c
+index 596bb11eeba5..1de32ba48589 100644
+--- a/drivers/nvme/host/apple.c
++++ b/drivers/nvme/host/apple.c
+@@ -1518,7 +1518,7 @@ static int apple_nvme_probe(struct platform_device *pdev)
+ 	anv->ctrl.admin_q = blk_mq_init_queue(&anv->admin_tagset);
+ 	if (IS_ERR(anv->ctrl.admin_q)) {
+ 		ret = -ENOMEM;
+-		goto put_dev;
++		goto out_uninit_ctrl;
+ 	}
+ 
+ 	nvme_reset_ctrl(&anv->ctrl);
+@@ -1526,6 +1526,8 @@ static int apple_nvme_probe(struct platform_device *pdev)
+ 
+ 	return 0;
+ 
++out_uninit_ctrl:
++	nvme_uninit_ctrl(&anv->ctrl);
+ put_dev:
+ 	put_device(anv->dev);
+ 	return ret;
+diff --git a/drivers/soc/qcom/ice.c b/drivers/soc/qcom/ice.c
+index fbab7fe5c652..8c71bd1efaa7 100644
+--- a/drivers/soc/qcom/ice.c
++++ b/drivers/soc/qcom/ice.c
+@@ -43,7 +43,6 @@
+ struct qcom_ice {
+ 	struct device *dev;
+ 	void __iomem *base;
+-	struct device_link *link;
+ 
+ 	struct clk *core_clk;
+ };
+@@ -268,6 +267,7 @@ struct qcom_ice *of_qcom_ice_get(struct device *dev)
+ 	struct device_node *node;
+ 	struct resource *res;
+ 	void __iomem *base;
++	struct device_link *link;
+ 
+ 	if (!dev || !dev->of_node)
+ 		return ERR_PTR(-ENODEV);
+@@ -312,8 +312,8 @@ struct qcom_ice *of_qcom_ice_get(struct device *dev)
+ 		goto out;
+ 	}
+ 
+-	ice->link = device_link_add(dev, &pdev->dev, DL_FLAG_AUTOREMOVE_SUPPLIER);
+-	if (!ice->link) {
++	link = device_link_add(dev, &pdev->dev, DL_FLAG_AUTOREMOVE_SUPPLIER);
++	if (!link) {
+ 		dev_err(&pdev->dev,
+ 			"Failed to create device link to consumer %s\n",
+ 			dev_name(dev));
+diff --git a/drivers/usb/typec/class.c b/drivers/usb/typec/class.c
+index 9c1dbf3c00e0..1d59d3484e7b 100644
+--- a/drivers/usb/typec/class.c
++++ b/drivers/usb/typec/class.c
+@@ -2183,6 +2183,7 @@ void typec_port_register_altmodes(struct typec_port *port,
+ 		altmodes[index] = alt;
+ 		index++;
+ 	}
++	fwnode_handle_put(altmodes_node);
+ }
+ EXPORT_SYMBOL_GPL(typec_port_register_altmodes);
+ 

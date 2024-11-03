@@ -129,6 +129,7 @@ llvm::Pass *createInitGlobalKrefsPass();
 llvm::Pass *createListOpsPass(llvm::ArrayRef<std::string> ops);
 llvm::Pass *createHandleInlineAsmPass();
 llvm::Pass *createAssertKrefsPass();
+llvm::Pass *createI2CDriverPass(llvm::StringRef i2cDriverName);
 } // namespace seahorn
 
 #ifdef HAVE_LLVM_SEAHORN

@@ -46,17 +46,13 @@ private:
   void buildEntryBlock(Module &m, Function *target, BasicBlock *entry,
                        BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
-    IntegerType *retTy = dyn_cast<IntegerType>(target->getReturnType());
-    if (!retTy) {
-      errs() << "specify a function that returns an integer\n";
-      std::exit(1);
-    }
     SmallVector<Value *, 8> args;
     for (Argument &arg : target->args()) {
       args.push_back(setupCallArg(b, arg.getType(), m));
     }
     CallInst *call = b.CreateCall(target, args);
-    Value *zero = b.CreateICmpEQ(call, ConstantInt::get(retTy, 0));
+    Value *nullVal = Constant::getNullValue(target->getReturnType());
+    Value *zero = b.CreateICmpEQ(call, nullVal);
     b.CreateCondBr(zero, ret, fail);
   }
 

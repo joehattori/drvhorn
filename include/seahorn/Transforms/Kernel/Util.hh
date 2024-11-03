@@ -13,7 +13,7 @@ llvm::SmallVector<llvm::CallInst *, 16> getCalls(llvm::Function *fn);
 llvm::SmallVector<const llvm::CallInst *, 16>
 getCalls(const llvm::Function *fn);
 llvm::Function *getOrCreateNdIntFn(llvm::Module &m, unsigned);
-llvm::Optional<llvm::SmallVector<unsigned>>
-indicesToStruct(const llvm::StructType *s, const llvm::Type *target);
+llvm::Optional<llvm::SmallVector<llvm::Value *>>
+gepIndicesToStruct(const llvm::StructType *s, const llvm::Type *target);
 bool embedsStruct(const llvm::StructType *s, const llvm::Type *target);
 } // namespace seahorn

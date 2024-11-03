@@ -32,8 +32,8 @@ public:
     for (GlobalVariable &gv : m.globals()) {
       Type *t = gv.getValueType();
       if (StructType *st = dyn_cast<StructType>(t)) {
-        const Optional<SmallVector<unsigned>> &indices =
-            indicesToStruct(st, krefType);
+        const Optional<SmallVector<Value *>> &indices =
+            gepIndicesToStruct(st, krefType);
         if (indices.hasValue()) {
           std::string krefName = "drvhorn.kref." + st->getName().str();
           initializeTargetGv(&gv, indices.getValue(), krefName, b);
@@ -47,8 +47,8 @@ public:
         StructType *innerType = dyn_cast<StructType>(et->getElementType());
         if (!innerType)
           continue;
-        const Optional<SmallVector<unsigned>> &indices =
-            indicesToStruct(innerType, krefType);
+        const Optional<SmallVector<Value *>> &indices =
+            gepIndicesToStruct(innerType, krefType);
         if (indices.hasValue()) {
           changed |= handleGlobalArrayElems(gv, b, indices.getValue());
         }
@@ -67,7 +67,7 @@ private:
   SmallVector<GlobalVariable *> krefsToAssert;
 
   bool handleGlobalArrayElems(GlobalVariable &gv, IRBuilder<> &b,
-                              const SmallVector<unsigned> &indices) {
+                              const SmallVector<Value *> &indices) {
     Module *m = gv.getParent();
     bool ret = false;
     for (User *user : gv.users()) {
@@ -114,19 +114,10 @@ private:
   }
 
   void initializeTargetGv(GlobalVariable *gv,
-                          const SmallVector<unsigned> &indices,
+                          const SmallVector<Value *> &gepIndices,
                           StringRef krefName, IRBuilder<> &b) {
     Module *m = gv->getParent();
-    LLVMContext &ctx = m->getContext();
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-
     Function *krefInit = m->getFunction("drvhorn.kref_init");
-    SmallVector<Value *> gepIndices;
-    gepIndices.push_back(ConstantInt::get(i64Ty, 0));
-    for (unsigned i : indices) {
-      gepIndices.push_back(ConstantInt::get(i32Ty, i));
-    }
     Function *ndFn = getNondetFn(m, cast<StructType>(gv->getValueType()));
     b.CreateStore(b.CreateCall(ndFn), gv);
     Value *kref =

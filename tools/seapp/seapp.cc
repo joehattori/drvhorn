@@ -304,7 +304,7 @@ static llvm::cl::opt<std::string>
                llvm::cl::init(""));
 
 static llvm::cl::opt<std::string>
-    PlatformDriver("platform-driver", llvm::cl::desc("Target Platform drivers"),
+    PlatformDriver("platform-driver", llvm::cl::desc("Target Platform driver"),
                    llvm::cl::init(""));
 
 static llvm::cl::opt<std::string>
@@ -314,6 +314,10 @@ static llvm::cl::opt<std::string>
 static llvm::cl::opt<std::string>
     DsaSwitchOps("dsa-switch-ops", llvm::cl::desc("Target DSA Switch Ops"),
                  llvm::cl::init(""));
+
+static llvm::cl::opt<std::string> I2CDriver("i2c-driver",
+                                            llvm::cl::desc("Target I2C driver"),
+                                            llvm::cl::init(""));
 
 static llvm::cl::opt<std::string>
     SpecificFunction("specific-function",
@@ -477,6 +481,8 @@ int main(int argc, char **argv) {
       pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
     } else if (!DsaSwitchOps.empty()) {
       pm_wrapper.add(seahorn::createDsaSwitchOpsPass(DsaSwitchOps));
+    } else if (!I2CDriver.empty()) {
+      pm_wrapper.add(seahorn::createI2CDriverPass(I2CDriver));
     } else {
       llvm::errs() << "Unknown kernel target\n";
       return 1;

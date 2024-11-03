@@ -20,10 +20,7 @@ public:
     Type *krefType = checker->getArg(0)->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IRBuilder<> b(blk);
-    // TODO: remove from Util.cc
     std::string storagePrefix = "drvhorn.storage.";
     for (GlobalVariable &gv : m.globals()) {
       if (gv.getName().startswith(storagePrefix)) {
@@ -32,19 +29,16 @@ public:
             m.getGlobalVariable("drvhorn.target_index." + suffix.str(), true);
         Function *f = genAssertFunction(m, gv, targetIndex, suffix);
         b.CreateCall(f);
-      } else if (gv.getName().startswith("drvhorn.kref.arrayelem")) {
-        StructType *gvValueType = cast<StructType>(gv.getValueType());
-        const SmallVector<unsigned> indices(
-            indicesToStruct(gvValueType, krefType).getValue());
-        SmallVector<Value *> gepIndices;
-        gepIndices.push_back(ConstantInt::get(i64Ty, 0));
-        for (unsigned i : indices) {
-          gepIndices.push_back(ConstantInt::get(i32Ty, i));
-        }
-        Value *krefPtr = b.CreateInBoundsGEP(gvValueType, &gv, gepIndices);
-        b.CreateCall(checker, krefPtr);
       } else if (gv.getName().startswith("drvhorn.kref.")) {
-        Value *krefPtr = b.CreateLoad(gv.getValueType(), &gv);
+        Type *type = gv.getValueType();
+        Value *krefPtr;
+        if (equivTypes(type, krefType->getPointerTo())) {
+          krefPtr = b.CreateLoad(type, &gv);
+        } else {
+          krefPtr = b.CreateInBoundsGEP(
+              type, &gv,
+              gepIndicesToStruct(cast<StructType>(type), krefType).getValue());
+        }
         b.CreateCall(checker, krefPtr);
       }
     }
@@ -62,7 +56,6 @@ private:
     Function *checker = m.getFunction("drvhorn.assert_kref");
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
     Function *f =
         Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
                          GlobalValue::LinkageTypes::ExternalLinkage,
@@ -81,16 +74,13 @@ private:
         checker->getArg(0)->getType()->getPointerElementType());
     ArrayType *storageType = cast<ArrayType>(storage.getValueType());
     StructType *elemType = cast<StructType>(storageType->getElementType());
-    const SmallVector<unsigned> devIndices(
-        indicesToStruct(elemType, krefType).getValue());
-    SmallVector<Value *> gepIndices;
-    gepIndices.push_back(ConstantInt::get(i64Ty, 0));
-    gepIndices.push_back(target);
-    for (unsigned i : devIndices) {
-      gepIndices.push_back(ConstantInt::get(i32Ty, i));
-    }
+    SmallVector<Value *> devIndices(
+        gepIndicesToStruct(elemType, krefType).getValue());
+    auto pos = devIndices.begin();
+    pos++;
+    devIndices.insert(pos, target);
     Value *krefPtr =
-        b.CreateInBoundsGEP(storage.getValueType(), &storage, gepIndices);
+        b.CreateInBoundsGEP(storage.getValueType(), &storage, devIndices);
     b.CreateCall(checker, krefPtr);
     b.CreateBr(ret);
 

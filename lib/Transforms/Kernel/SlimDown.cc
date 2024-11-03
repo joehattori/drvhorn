@@ -64,7 +64,8 @@ private:
 struct Filter : public InstVisitor<Filter, bool> {
 public:
   Filter(Module &m) {
-    buildStartingPoint(m);
+    const DenseSet<const CallInst *> &ignoreList = trivialFwnodeGetters(m);
+    buildStartingPoint(m, ignoreList);
     buildTargetArgs(m);
 
     for (Function &f : m) {
@@ -170,6 +171,42 @@ public:
     return true;
   }
 
+  bool visitSelectInst(SelectInst &select) {
+    bool isTarget =
+        visitValue(select.getTrueValue()) && visitValue(select.getFalseValue());
+    if (isTarget) {
+      recordInst(&select);
+      visitValue(select.getCondition());
+    }
+    return isTarget;
+  }
+
+  bool visitAllocaInst(AllocaInst &alloca) {
+    SmallVector<const User *> workList;
+    DenseSet<const User *> visited;
+    workList.push_back(&alloca);
+    const StructType *deviceType =
+        StructType::getTypeByName(alloca.getContext(), "struct.device");
+    while (!workList.empty()) {
+      const User *v = workList.pop_back_val();
+      if (!visited.insert(v).second)
+        continue;
+      if (const GEPOperator *gep = dyn_cast<GEPOperator>(v)) {
+        for (const User *user : gep->users()) {
+          workList.push_back(user);
+        }
+      } else if (const BitCastOperator *bitcast =
+                     dyn_cast<BitCastOperator>(v)) {
+        if (const StructType *st = dyn_cast<StructType>(
+                bitcast->getDestTy()->getPointerElementType())) {
+          if (embedsStruct(st, deviceType))
+            return true;
+        }
+      }
+    }
+    return false;
+  }
+
   bool visitInstruction(Instruction &inst) {
     bool isTarget =
         all_of(inst.operands(), [this](Value *v) { return visitValue(v); });
@@ -197,28 +234,11 @@ private:
       isTarget = visit(inst);
     } else if (BasicBlock *blk = dyn_cast<BasicBlock>(val)) {
       isTarget = visit(blk->getTerminator());
-    } else if (Operator *op = dyn_cast<Operator>(val)) {
-      isTarget = visitOperator(op);
-    } else if (Constant *c = dyn_cast<Constant>(val)) {
-      isTarget = visitConstant(c);
-    } else if (isa<Argument>(val)) {
+    } else if (isa<Constant, Argument>(val)) {
       isTarget = true;
     }
     cache[val] = isTarget;
     return isTarget;
-  }
-
-  bool visitConstant(Constant *c) {
-    if (ConstantExpr *ce = dyn_cast<ConstantExpr>(c)) {
-      return visitValue(ce->getAsInstruction());
-    }
-    return true;
-  }
-
-  bool visitOperator(Operator *op) {
-    if (isa<BitCastOperator, GEPOperator>(op))
-      return visitValue(op->getOperand(0));
-    return false;
   }
 
   void recordInst(Instruction *inst) {
@@ -248,7 +268,39 @@ private:
     }
   }
 
-  void recordCallers(const Function *f) {
+  DenseSet<const CallInst *> trivialFwnodeGetters(const Module &m) {
+    DenseSet<const CallInst *> trivialCalls;
+    for (const Function &f : m) {
+      for (const BasicBlock &blk : f) {
+        const CallInst *target = nullptr;
+        for (const Instruction &inst : blk) {
+          if (const CallInst *call = dyn_cast<CallInst>(&inst)) {
+            const Function *calledFn = extractCalledFunction(call);
+            if (!calledFn)
+              continue;
+            if (calledFn->getName().startswith("drvhorn.fwnode_getter")) {
+              if (target)
+                errs() << "target drvhorn.fwnode_getter already set\n";
+              target = call;
+            } else if (calledFn->getName().equals("drvhorn.fwnode_put")) {
+              if (target) {
+                if (call->getArgOperand(0)->stripPointerCasts() !=
+                    target->stripPointerCasts()) {
+                  errs() << "drvhorn.fwnode_put target does not match\n";
+                }
+                trivialCalls.insert(target);
+                trivialCalls.insert(call);
+              }
+            }
+          }
+        }
+      }
+    }
+    return trivialCalls;
+  }
+
+  void recordCallers(const Function *f,
+                     const DenseSet<const CallInst *> &ignoreList) {
     DenseSet<const Function *> visited;
     SmallVector<const Function *> workList;
     workList.push_back(f);
@@ -258,15 +310,18 @@ private:
       if (!visited.insert(f).second)
         continue;
       for (const CallInst *call : getCalls(f)) {
+        if (ignoreList.contains(call))
+          continue;
         startingPoints.insert(call);
         workList.push_back(call->getFunction());
       }
     }
   }
 
-  void buildStartingPoint(const Module &m) {
+  void buildStartingPoint(const Module &m,
+                          const DenseSet<const CallInst *> &ignoreList) {
     if (const Function *f = m.getFunction("drvhorn.update_index")) {
-      recordCallers(f);
+      recordCallers(f, ignoreList);
     }
   }
 
@@ -317,15 +372,28 @@ private:
   }
 
   SmallVector<const Argument *> underlyingArgs(const Value *v) {
-    SmallVector<const Value *> objects;
-    getUnderlyingObjects(v, objects, nullptr, 0);
+    SmallVector<const Argument *> args;
+    SmallVector<const Value *> workList;
+    getUnderlyingObjects(v, workList, nullptr, 0);
+    DenseSet<const Value *> visited;
 
-    SmallVector<const Argument *> ret;
-    for (const Value *v : objects) {
-      if (const Argument *arg = dyn_cast<Argument>(v))
-        ret.push_back(arg);
+    while (!workList.empty()) {
+      const Value *v = workList.pop_back_val();
+      if (!visited.insert(v).second)
+        continue;
+      if (const Argument *arg = dyn_cast<Argument>(v)) {
+        args.push_back(arg);
+      } else if (const LoadInst *load = dyn_cast<LoadInst>(v)) {
+        const Value *ptr = load->getPointerOperand();
+        for (const User *user : ptr->users()) {
+          if (const StoreInst *store = dyn_cast<StoreInst>(user)) {
+            const Value *v = store->getValueOperand();
+            getUnderlyingObjects(v, workList, nullptr, 0);
+          }
+        }
+      }
     }
-    return ret;
+    return args;
   }
 };
 
@@ -399,7 +467,7 @@ private:
           if (!removedInstructions.insert(opInst).second)
             continue;
           if (CallInst *call = dyn_cast<CallInst>(opInst))
-            handleRetainedCallInst(call, toRemoveInstructions, ndvalfn);
+            handleWriteOnlyCallArgs(call, toRemoveInstructions, ndvalfn);
           Value *replace = getReplacement(opInst, ndvalfn);
           opInst->replaceAllUsesWith(replace);
         }
@@ -408,9 +476,9 @@ private:
   }
 
   void
-  handleRetainedCallInst(CallInst *call,
-                         const DenseSet<Instruction *> &toRemoveInstructions,
-                         DenseMap<const Type *, Function *> &ndvalfn) {
+  handleWriteOnlyCallArgs(CallInst *call,
+                          const DenseSet<Instruction *> &toRemoveInstructions,
+                          DenseMap<const Type *, Function *> &ndvalfn) {
     Function *f = extractCalledFunction(call);
     if (!f)
       return;
@@ -463,6 +531,7 @@ private:
         "of_property_notify",
         "fwnode_mdiobus_register_phy",
         "fwnode_mdiobus_phy_device_register",
+        "class_for_each_device",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))

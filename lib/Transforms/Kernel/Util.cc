@@ -1,32 +1,34 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 
 #include "seahorn/Transforms/Kernel/Util.hh"
 
+using namespace llvm;
+
 namespace seahorn {
-llvm::StringRef getStructName(llvm::StringRef name) {
+StringRef getStructName(StringRef name) {
   size_t p = name.find('.');
-  if (p == llvm::StringRef::npos)
+  if (p == StringRef::npos)
     return name;
   size_t q = name.find('.', p + 1);
-  if (q == llvm::StringRef::npos)
+  if (q == StringRef::npos)
     return name;
   return name.substr(0, q);
 }
 
-static bool equivTypes(const llvm::Type *t1, const llvm::Type *t2,
-                       llvm::DenseSet<const llvm::Type *> &visited);
+static bool equivTypes(const Type *t1, const Type *t2,
+                       DenseSet<const Type *> &visited);
 
-static bool equivTypes(const llvm::ArrayType *at1, const llvm::ArrayType *at2,
-                       llvm::DenseSet<const llvm::Type *> &visited) {
+static bool equivTypes(const ArrayType *at1, const ArrayType *at2,
+                       DenseSet<const Type *> &visited) {
   return at1->getNumElements() == at2->getNumElements() &&
          equivTypes(at1->getElementType(), at2->getElementType(), visited);
 }
 
-static bool equivTypes(const llvm::FunctionType *ft1,
-                       const llvm::FunctionType *ft2,
-                       llvm::DenseSet<const llvm::Type *> &visited) {
+static bool equivTypes(const FunctionType *ft1, const FunctionType *ft2,
+                       DenseSet<const Type *> &visited) {
   if (ft1->getNumParams() != ft2->getNumParams())
     return false;
   if (!equivTypes(ft1->getReturnType(), ft2->getReturnType(), visited))
@@ -38,19 +40,17 @@ static bool equivTypes(const llvm::FunctionType *ft1,
   return true;
 }
 
-static bool equivTypes(const llvm::IntegerType *it1,
-                       const llvm::IntegerType *it2) {
+static bool equivTypes(const IntegerType *it1, const IntegerType *it2) {
   return it1->getBitWidth() == it2->getBitWidth();
 }
 
-static bool equivTypes(const llvm::PointerType *pt1,
-                       const llvm::PointerType *pt2,
-                       llvm::DenseSet<const llvm::Type *> &visited) {
+static bool equivTypes(const PointerType *pt1, const PointerType *pt2,
+                       DenseSet<const Type *> &visited) {
   return equivTypes(pt1->getElementType(), pt2->getElementType(), visited);
 }
 
-static bool equivTypes(const llvm::StructType *st1, const llvm::StructType *st2,
-                       llvm::DenseSet<const llvm::Type *> &visited) {
+static bool equivTypes(const StructType *st1, const StructType *st2,
+                       DenseSet<const Type *> &visited) {
   if (!st1->hasName() || !st2->hasName()) {
     if (st1->getNumElements() != st2->getNumElements())
       return false;
@@ -60,165 +60,150 @@ static bool equivTypes(const llvm::StructType *st1, const llvm::StructType *st2,
     }
     return true;
   }
-  llvm::StringRef p1 = getStructName(st1->getName());
-  llvm::StringRef p2 = getStructName(st2->getName());
+  StringRef p1 = getStructName(st1->getName());
+  StringRef p2 = getStructName(st2->getName());
   return p1 == p2;
 }
 
-static bool equivTypes(const llvm::VectorType *vt1, const llvm::VectorType *vt2,
-                       llvm::DenseSet<const llvm::Type *> &visited) {
+static bool equivTypes(const VectorType *vt1, const VectorType *vt2,
+                       DenseSet<const Type *> &visited) {
   return vt1->getElementCount() == vt2->getElementCount() &&
          equivTypes(vt1->getElementType(), vt2->getElementType(), visited);
 }
 
-static bool equivTypes(const llvm::Type *t1, const llvm::Type *t2,
-                       llvm::DenseSet<const llvm::Type *> &visited) {
+static bool equivTypes(const Type *t1, const Type *t2,
+                       DenseSet<const Type *> &visited) {
   if (!visited.insert(t1).second)
     return true;
-  if (llvm::isa<llvm::ArrayType>(t1) && llvm::isa<llvm::ArrayType>(t2)) {
-    return equivTypes(llvm::cast<llvm::ArrayType>(t1),
-                      llvm::cast<llvm::ArrayType>(t2), visited);
+  if (isa<ArrayType>(t1) && isa<ArrayType>(t2)) {
+    return equivTypes(cast<ArrayType>(t1), cast<ArrayType>(t2), visited);
   }
-  if (llvm::isa<llvm::FunctionType>(t1) && llvm::isa<llvm::FunctionType>(t2)) {
-    return equivTypes(llvm::cast<llvm::FunctionType>(t1),
-                      llvm::cast<llvm::FunctionType>(t2), visited);
+  if (isa<FunctionType>(t1) && isa<FunctionType>(t2)) {
+    return equivTypes(cast<FunctionType>(t1), cast<FunctionType>(t2), visited);
   }
-  if (llvm::isa<llvm::IntegerType>(t1) && llvm::isa<llvm::IntegerType>(t2)) {
-    return equivTypes(llvm::cast<llvm::IntegerType>(t1),
-                      llvm::cast<llvm::IntegerType>(t2));
+  if (isa<IntegerType>(t1) && isa<IntegerType>(t2)) {
+    return equivTypes(cast<IntegerType>(t1), cast<IntegerType>(t2));
   }
-  if (llvm::isa<llvm::PointerType>(t1) && llvm::isa<llvm::PointerType>(t2)) {
-    return equivTypes(llvm::cast<llvm::PointerType>(t1),
-                      llvm::cast<llvm::PointerType>(t2), visited);
+  if (isa<PointerType>(t1) && isa<PointerType>(t2)) {
+    return equivTypes(cast<PointerType>(t1), cast<PointerType>(t2), visited);
   }
-  if (llvm::isa<llvm::StructType>(t1) && llvm::isa<llvm::StructType>(t2)) {
-    return equivTypes(llvm::cast<llvm::StructType>(t1),
-                      llvm::cast<llvm::StructType>(t2), visited);
+  if (isa<StructType>(t1) && isa<StructType>(t2)) {
+    return equivTypes(cast<StructType>(t1), cast<StructType>(t2), visited);
   }
-  if (llvm::isa<llvm::VectorType>(t1) && llvm::isa<llvm::VectorType>(t2)) {
-    return equivTypes(llvm::cast<llvm::VectorType>(t1),
-                      llvm::cast<llvm::VectorType>(t2), visited);
+  if (isa<VectorType>(t1) && isa<VectorType>(t2)) {
+    return equivTypes(cast<VectorType>(t1), cast<VectorType>(t2), visited);
   }
   return false;
 }
 
-bool equivTypes(const llvm::Type *t1, const llvm::Type *t2) {
-  llvm::DenseSet<const llvm::Type *> visited;
+bool equivTypes(const Type *t1, const Type *t2) {
+  DenseSet<const Type *> visited;
   return equivTypes(t1, t2, visited);
 }
 
-const llvm::Function *extractCalledFunction(const llvm::CallInst *call) {
-  return llvm::dyn_cast<llvm::Function>(
-      call->getCalledOperand()->stripPointerCasts());
+const Function *extractCalledFunction(const CallInst *call) {
+  return dyn_cast<Function>(call->getCalledOperand()->stripPointerCasts());
 }
 
-llvm::Function *extractCalledFunction(llvm::CallInst *call) {
-  return llvm::dyn_cast<llvm::Function>(
-      call->getCalledOperand()->stripPointerCasts());
+Function *extractCalledFunction(CallInst *call) {
+  return dyn_cast<Function>(call->getCalledOperand()->stripPointerCasts());
 }
 
-const llvm::Function *extractCalledFunction(const llvm::CallInst &call) {
-  return llvm::dyn_cast<llvm::Function>(
-      call.getCalledOperand()->stripPointerCasts());
+const Function *extractCalledFunction(const CallInst &call) {
+  return dyn_cast<Function>(call.getCalledOperand()->stripPointerCasts());
 }
 
-llvm::Function *extractCalledFunction(llvm::CallInst &call) {
-  return llvm::dyn_cast<llvm::Function>(
-      call.getCalledOperand()->stripPointerCasts());
+Function *extractCalledFunction(CallInst &call) {
+  return dyn_cast<Function>(call.getCalledOperand()->stripPointerCasts());
 }
 
-static void collectCallUser(llvm::User *user,
-                            llvm::SmallVector<llvm::CallInst *, 16> &res,
-                            llvm::DenseSet<llvm::User *> &visited) {
-  if (!visited.insert(user).second)
-    return;
-  if (llvm::isa<llvm::Instruction>(user)) {
-    if (llvm::CallInst *call = llvm::dyn_cast<llvm::CallInst>(user))
+SmallVector<CallInst *, 16> getCalls(Function *fn) {
+  SmallVector<CallInst *, 16> res;
+  DenseSet<User *> visited;
+  SmallVector<User *> workList;
+  workList.push_back(fn);
+  while (!workList.empty()) {
+    User *user = workList.pop_back_val();
+    if (!visited.insert(user).second)
+      continue;
+    if (CallInst *call = dyn_cast<CallInst>(user)) {
       res.push_back(call);
-  } else {
-    for (llvm::User *user : user->users()) {
-      collectCallUser(user, res, visited);
+    } else if (isa<BitCastOperator, Function>(user)) {
+      for (User *user : user->users()) {
+        workList.push_back(user);
+      }
     }
   }
-}
-
-static void collectCallUser(const llvm::User *user,
-                            llvm::SmallVector<const llvm::CallInst *, 16> &res,
-                            llvm::DenseSet<const llvm::User *> &visited) {
-  if (!visited.insert(user).second)
-    return;
-  if (llvm::isa<llvm::Instruction>(user)) {
-    if (const llvm::CallInst *call = llvm::dyn_cast<llvm::CallInst>(user))
-      res.push_back(call);
-  } else {
-    for (const llvm::User *user : user->users()) {
-      collectCallUser(user, res, visited);
-    }
-  }
-}
-
-llvm::SmallVector<llvm::CallInst *, 16> getCalls(llvm::Function *fn) {
-  llvm::SmallVector<llvm::CallInst *, 16> res;
-  llvm::DenseSet<llvm::User *> visited;
-  collectCallUser(fn, res, visited);
   return res;
 }
 
-llvm::SmallVector<const llvm::CallInst *, 16>
-getCalls(const llvm::Function *fn) {
-  llvm::SmallVector<const llvm::CallInst *, 16> res;
-  llvm::DenseSet<const llvm::User *> visited;
-  collectCallUser(fn, res, visited);
+SmallVector<const CallInst *, 16> getCalls(const Function *fn) {
+  SmallVector<const CallInst *, 16> res;
+  DenseSet<const User *> visited;
+  SmallVector<const User *> workList;
+  workList.push_back(fn);
+  while (!workList.empty()) {
+    const User *user = workList.pop_back_val();
+    if (!visited.insert(user).second)
+      continue;
+    if (const CallInst *call = dyn_cast<CallInst>(user)) {
+      res.push_back(call);
+    } else if (isa<BitCastOperator, Function>(user)) {
+      for (const User *user : user->users()) {
+        workList.push_back(user);
+      }
+    }
+  }
   return res;
 }
 
-llvm::Function *getOrCreateNdIntFn(llvm::Module &m, unsigned bitwidth) {
+Function *getOrCreateNdIntFn(Module &m, unsigned bitwidth) {
   std::string name = "nd.int" + std::to_string(bitwidth);
-  if (llvm::Function *f = m.getFunction(name))
+  if (Function *f = m.getFunction(name))
     return f;
-  llvm::IntegerType *it = llvm::IntegerType::get(m.getContext(), bitwidth);
-  llvm::FunctionType *ft = llvm::FunctionType::get(it, false);
-  return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, name, &m);
+  IntegerType *it = IntegerType::get(m.getContext(), bitwidth);
+  FunctionType *ft = FunctionType::get(it, false);
+  return Function::Create(ft, Function::ExternalLinkage, name, &m);
 }
 
-static llvm::Optional<llvm::SmallVector<unsigned>>
-revIndicesToStruct(const llvm::StructType *s, const llvm::Type *target) {
+static Optional<SmallVector<Value *>>
+revGEPIndicesToStruct(const StructType *s, const Type *target) {
+  IntegerType *i32Ty = Type::getInt32Ty(s->getContext());
   for (unsigned i = 0; i < s->getNumElements(); i++) {
-    const llvm::Type *elemType = s->getElementType(i);
+    const Type *elemType = s->getElementType(i);
     if (equivTypes(elemType, target))
-      return llvm::SmallVector<unsigned>{i};
-    if (const llvm::StructType *sTy =
-            llvm::dyn_cast<llvm::StructType>(elemType)) {
-      llvm::Optional<llvm::SmallVector<unsigned>> indices =
-          revIndicesToStruct(sTy, target);
+      return SmallVector<Value *>{ConstantInt::get(i32Ty, i)};
+    if (const StructType *sTy = dyn_cast<StructType>(elemType)) {
+      Optional<SmallVector<Value *>> indices =
+          revGEPIndicesToStruct(sTy, target);
       if (indices.hasValue()) {
-        indices->push_back(i);
+        indices->push_back(ConstantInt::get(i32Ty, i));
         return indices;
       }
     }
   }
-  return llvm::None;
+  return None;
 }
 
-llvm::Optional<llvm::SmallVector<unsigned>>
-indicesToStruct(const llvm::StructType *s, const llvm::Type *target) {
+Optional<SmallVector<Value *>> gepIndicesToStruct(const StructType *s,
+                                                  const Type *target) {
+  IntegerType *i64Ty = Type::getInt64Ty(s->getContext());
   if (equivTypes(s, target)) {
-    return llvm::SmallVector<unsigned>{};
+    return SmallVector<Value *>{ConstantInt::get(i64Ty, 0)};
   }
-  llvm::Optional<llvm::SmallVector<unsigned>> indices =
-      revIndicesToStruct(s, target);
+  Optional<SmallVector<Value *>> indices = revGEPIndicesToStruct(s, target);
   if (!indices.hasValue())
-    return llvm::None;
-  return llvm::SmallVector<unsigned>(indices->rbegin(), indices->rend());
+    return None;
+  indices->push_back(ConstantInt::get(i64Ty, 0));
+  return SmallVector<Value *>(indices->rbegin(), indices->rend());
 }
 
-bool embedsStruct(const llvm::StructType *s, const llvm::Type *target) {
+bool embedsStruct(const StructType *s, const Type *target) {
   for (unsigned i = 0; i < s->getNumElements(); i++) {
-    const llvm::Type *elemType = s->getElementType(i);
+    const Type *elemType = s->getElementType(i);
     if (equivTypes(elemType, target))
       return true;
-    if (const llvm::StructType *sTy =
-            llvm::dyn_cast<llvm::StructType>(elemType)) {
+    if (const StructType *sTy = dyn_cast<StructType>(elemType)) {
       if (embedsStruct(sTy, target))
         return true;
     }
