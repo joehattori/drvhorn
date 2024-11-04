@@ -51,9 +51,14 @@ private:
       args.push_back(setupCallArg(b, arg.getType(), m));
     }
     CallInst *call = b.CreateCall(target, args);
-    Value *nullVal = Constant::getNullValue(target->getReturnType());
-    Value *zero = b.CreateICmpEQ(call, nullVal);
-    b.CreateCondBr(zero, ret, fail);
+    Type *retType = target->getReturnType();
+    if (retType->isVoidTy()) {
+      b.CreateBr(fail);
+    } else {
+      Value *nullVal = Constant::getNullValue(target->getReturnType());
+      Value *zero = b.CreateICmpEQ(call, nullVal);
+      b.CreateCondBr(zero, ret, fail);
+    }
   }
 
   Value *setupCallArg(IRBuilder<> &b, Type *type, Module &m) {

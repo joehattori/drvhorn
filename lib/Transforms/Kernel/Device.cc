@@ -7,6 +7,7 @@
 #include "llvm/IR/InstVisitor.h"
 #include "llvm/Pass.h"
 
+#include "seahorn/Analysis/SeaBuiltinsInfo.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;
@@ -89,11 +90,18 @@ public:
     handleDevmAddAction(m);
     handleDeviceLinkAdd(m);
 
+    stubFwnodeConnectionFindMatch(m);
+    stubFwnodeConnectionFindMatches(m);
     stubOfFunctions(m);
     return true;
   }
 
   virtual StringRef getPassName() const override { return "HandleDevices"; }
+
+  void getAnalysisUsage(AnalysisUsage &au) const override {
+    au.addRequired<SeaBuiltinsInfoWrapperPass>();
+    au.setPreservesAll();
+  }
 
 private:
   struct StorageGlobals {
@@ -803,6 +811,58 @@ private:
       origFn->replaceAllUsesWith(newFn);
       origFn->eraseFromParent();
     }
+  }
+
+  void stubFwnodeConnectionFindMatch(Module &m) {
+    Function *f = m.getFunction("fwnode_connection_find_match");
+    if (!f)
+      return;
+    IntegerType *i8Ty = Type::getInt8Ty(m.getContext());
+    ConstantInt *size = ConstantInt::get(i8Ty, 0x10000);
+    for (CallInst *call : getCalls(f)) {
+      IRBuilder<> b(call);
+      AllocaInst *ret = b.CreateAlloca(i8Ty, size);
+      call->replaceAllUsesWith(ret);
+      call->eraseFromParent();
+    }
+  }
+
+  void stubFwnodeConnectionFindMatches(Module &m) {
+    Function *f = m.getFunction("fwnode_connection_find_matches");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.fwnode_connection_find_matches");
+
+    LLVMContext &ctx = m.getContext();
+    SeaBuiltinsInfo &sbi = getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
+    Function *assumeFn = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ASSUME, m);
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    Function *ndI32 = getOrCreateNdIntFn(m, 32);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    Value *cond = b.CreateCall(ndBool);
+    b.CreateCondBr(cond, body, ret);
+
+    b.SetInsertPoint(body);
+    Value *retVal = b.CreateCall(ndI32);
+    Argument *len = f->getArg(5);
+    Value *withinRange =
+        b.CreateAnd(b.CreateICmpULT(retVal, len),
+                    b.CreateICmpSGE(retVal, ConstantInt::get(i32Ty, 0)));
+    b.CreateCall(assumeFn, withinRange);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *retPhi = b.CreatePHI(i32Ty, 2);
+    retPhi->addIncoming(ConstantInt::get(i32Ty, -EINVAL), entry);
+    retPhi->addIncoming(retVal, body);
+    b.CreateRet(retPhi);
   }
 };
 
