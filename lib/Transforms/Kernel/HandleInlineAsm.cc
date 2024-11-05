@@ -1,3 +1,4 @@
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
@@ -37,7 +38,9 @@ using namespace llvm;
 #define MOVL_1_0 "movl $1,$0"
 #define MOVQ_0_1 "movq $0,$1"
 #define MOVQ_1_0 "movq $1,$0"
+#define MOVQ_GS_1_0 "movq %gs:$1,$0"
 #define MOVQ_POSITION_INDEPENDENT "movq ${1:P},$0"
+#define MOVQ_GS_POSITION_INDEPENDENT "movq %gs:${1:P},$0"
 #define ADDQ_1_0 "addq $1,$0"
 #define ADDQ_2_0_PREFIX "addq $2,$0"
 #define ADDL_1_0 "addl $1,$0"
@@ -414,36 +417,39 @@ public:
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
 
-  void handleCurrentTask(Module &M) {
-    auto isPtrToPtrToTask = [](Type *type) {
-      if (!type->isPointerTy())
+  void handleCurrentTask(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    StructType *taskStructType =
+        StructType::getTypeByName(ctx, "struct.task_struct");
+
+    auto isCurrentTask = [taskStructType](const CallInst *call) {
+      const Value *arg = call->getArgOperand(0);
+      if (!equivTypes(arg->getType(),
+                      taskStructType->getPointerTo()->getPointerTo())) {
         return false;
-      PointerType *ptrType = dyn_cast<PointerType>(type);
-      Type *innerType = ptrType->getElementType();
-      if (!innerType->isPointerTy())
+      }
+      const GlobalVariable *gv =
+          dyn_cast<GlobalVariable>(getUnderlyingObject(arg));
+      if (!gv || !gv->getName().equals("pcpu_hot"))
         return false;
-      PointerType *innerPtrType = dyn_cast<PointerType>(innerType);
-      return innerPtrType->getElementType()->getStructName().startswith(
-          "struct.task_struct");
+      // the only user should be inttoptr
+      if (!call->hasNUses(1))
+        return false;
+      const User *user = *call->user_begin();
+      return isa<IntToPtrInst>(user);
     };
 
     for (CallInst *call :
-         getTargetAsmCalls(M, MOVQ_POSITION_INDEPENDENT, false)) {
-      IRBuilder<> B(call);
-      Value *arg = call->getArgOperand(0);
-      Value *task;
-      if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(arg)) {
-        task = bitcast->getOperand(0);
-      } else {
-        task = arg;
-      }
-      if (isPtrToPtrToTask(arg->getType()) &&
-          task->getName().equals("current_task")) {
-        Value *currentTask =
-            B.CreateLoad(task->getType()->getPointerElementType(), task);
-        Value *cast = B.CreatePtrToInt(currentTask, B.getInt64Ty());
-        call->replaceAllUsesWith(cast);
+         getTargetAsmCalls(m, {MOVQ_1_0, MOVQ_GS_1_0, MOVQ_POSITION_INDEPENDENT,
+                               MOVQ_GS_POSITION_INDEPENDENT})) {
+      if (isCurrentTask(call)) {
+        IRBuilder<> b(call);
+        IntToPtrInst *intToPtr = cast<IntToPtrInst>(*call->user_begin());
+        AllocaInst *alloca =
+            b.CreateAlloca(intToPtr->getType()->getPointerElementType());
+        intToPtr->replaceAllUsesWith(alloca);
         call->eraseFromParent();
+        intToPtr->eraseFromParent();
       }
     }
   }
