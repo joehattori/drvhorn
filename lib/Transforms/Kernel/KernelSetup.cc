@@ -27,7 +27,6 @@ public:
   bool runOnModule(Module &m) override {
     stubAllocationFunctions(m);
     stubKernelFunctions(m);
-    stubAllocPages(m);
     handleKrefAPIs(m);
     killFree(m);
     handleKmemCache(m);
@@ -109,36 +108,6 @@ private:
         std::exit(1);
       }
       orig->replaceAllUsesWith(stub);
-      orig->eraseFromParent();
-    }
-  }
-
-  void stubAllocPages(Module &m) {
-    std::string names[] = {
-        "__alloc_pages",
-    };
-    LLVMContext &ctx = m.getContext();
-    for (const std::string &name : names) {
-      std::string wrapperName = name + "_wrapper";
-      Function *orig = m.getFunction(name);
-      if (!orig)
-        continue;
-      std::string stubName = "__DRVHORN_" + name;
-      Function *stub = m.getFunction(stubName);
-
-      Function *wrapper = Function::Create(
-          orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &m);
-      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-      IRBuilder<> B(block);
-      CallInst *call = B.CreateCall(stub);
-      if (orig->getReturnType() != call->getType()) {
-        Value *bitCast = B.CreateBitCast(call, orig->getReturnType());
-        B.CreateRet(bitCast);
-      } else {
-        B.CreateRet(call);
-      }
-      orig->replaceAllUsesWith(wrapper);
       orig->eraseFromParent();
     }
   }

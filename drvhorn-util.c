@@ -74,10 +74,6 @@ unsigned long __DRVHORN_strnlen(const char *s, unsigned long count) {
   return i;
 }
 
-struct page *__DRVHORN___alloc_pages() {
-  return nd_bool() ? malloc(sizeof(struct page)) : 0;
-}
-
 u64 __DRVHORN_util_read_u64(u8 *addr) { return *(u64 *)addr; }
 u32 __DRVHORN_util_read_u32(u8 *addr) { return *(u32 *)addr; }
 u16 __DRVHORN_util_read_u16(u8 *addr) { return *(u16 *)addr; }
