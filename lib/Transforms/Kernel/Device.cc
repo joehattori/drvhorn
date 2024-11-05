@@ -92,7 +92,6 @@ public:
 
     stubFwnodeConnectionFindMatch(m);
     stubFwnodeConnectionFindMatches(m);
-    stubOfFunctions(m);
     return true;
   }
 
@@ -794,22 +793,6 @@ private:
         std::exit(1);
       }
       gep->eraseFromParent();
-    }
-  }
-
-  void stubOfFunctions(Module &m) {
-    StringRef names[] = {
-        "of_phandle_iterator_next",
-    };
-    for (StringRef name : names) {
-      Function *origFn = m.getFunction(name);
-      if (!origFn)
-        continue;
-      Constant *newFn = m.getFunction("drvhorn." + name.str());
-      if (origFn->getType() != newFn->getType())
-        newFn = ConstantExpr::getBitCast(newFn, origFn->getType());
-      origFn->replaceAllUsesWith(newFn);
-      origFn->eraseFromParent();
     }
   }
 
