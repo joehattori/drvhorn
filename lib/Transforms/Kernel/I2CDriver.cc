@@ -79,22 +79,6 @@ private:
     b.CreateStore(krefPtr, globalKref);
     return i2cClient;
   }
-
-  void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
-    IRBuilder<> b(fail);
-    LLVMContext &ctx = m.getContext();
-    Function *failFn = Function::Create(
-        FunctionType::get(Type::getVoidTy(ctx), false),
-        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
-    b.CreateCall(failFn);
-    b.CreateBr(ret);
-  }
-
-  void buildRetBlock(Module &m, BasicBlock *ret) {
-    IRBuilder<> b(ret);
-    Type *i32Ty = Type::getInt32Ty(m.getContext());
-    b.CreateRet(ConstantInt::get(i32Ty, 0));
-  }
 };
 
 char I2CDriver::ID = 0;

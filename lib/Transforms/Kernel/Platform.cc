@@ -24,9 +24,8 @@ public:
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
-    Function *main = Function::Create(
-        FunctionType::get(i32Ty, false),
-        GlobalValue::LinkageTypes::ExternalLinkage, "main", &m);
+    Function *main = Function::Create(FunctionType::get(i32Ty, false),
+                                      GlobalValue::ExternalLinkage, "main", &m);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", main);
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
@@ -72,9 +71,9 @@ private:
     StringRef kobjName = "drvhorn.kref.struct.platform_device";
     Value *globalKref = m.getGlobalVariable(kobjName, true);
     if (!globalKref) {
-      globalKref = new GlobalVariable(
-          m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-          ConstantPointerNull::get(krefPtrType), kobjName);
+      globalKref =
+          new GlobalVariable(m, krefPtrType, false, GlobalValue::PrivateLinkage,
+                             ConstantPointerNull::get(krefPtrType), kobjName);
     }
     Type *i8Ty = Type::getInt8Ty(ctx);
     Type *i32Ty = Type::getInt32Ty(ctx);
@@ -124,22 +123,6 @@ private:
       ofNode = b.CreateBitCast(ofNode,
                                ofNodeGEP->getType()->getPointerElementType());
     b.CreateStore(ofNode, ofNodeGEP);
-  }
-
-  void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
-    IRBuilder<> b(fail);
-    LLVMContext &ctx = m.getContext();
-    Function *failFn = Function::Create(
-        FunctionType::get(Type::getVoidTy(ctx), false),
-        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
-    b.CreateCall(failFn);
-    b.CreateBr(ret);
-  }
-
-  void buildRetBlock(Module &m, BasicBlock *ret) {
-    IRBuilder<> b(ret);
-    Type *i32Ty = Type::getInt32Ty(m.getContext());
-    b.CreateRet(ConstantInt::get(i32Ty, 0));
   }
 
   Value *allocType(Module &m, IRBuilder<> &b, Type *type) {

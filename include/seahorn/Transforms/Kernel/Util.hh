@@ -16,4 +16,7 @@ llvm::Function *getOrCreateNdIntFn(llvm::Module &m, unsigned);
 llvm::Optional<llvm::SmallVector<llvm::Value *>>
 gepIndicesToStruct(const llvm::StructType *s, const llvm::Type *target);
 bool embedsStruct(const llvm::StructType *s, const llvm::Type *target);
+void buildFailBlock(llvm::Module &m, llvm::BasicBlock *fail,
+                    llvm::BasicBlock *ret);
+void buildRetBlock(llvm::Module &m, llvm::BasicBlock *ret);
 } // namespace seahorn

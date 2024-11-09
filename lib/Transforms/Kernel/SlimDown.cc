@@ -182,29 +182,11 @@ public:
   }
 
   bool visitAllocaInst(AllocaInst &alloca) {
-    SmallVector<const User *> workList;
-    DenseSet<const User *> visited;
-    workList.push_back(&alloca);
-    const StructType *deviceType =
-        StructType::getTypeByName(alloca.getContext(), "struct.device");
-    while (!workList.empty()) {
-      const User *v = workList.pop_back_val();
-      if (!visited.insert(v).second)
-        continue;
-      if (const GEPOperator *gep = dyn_cast<GEPOperator>(v)) {
-        for (const User *user : gep->users()) {
-          workList.push_back(user);
-        }
-      } else if (const BitCastOperator *bitcast =
-                     dyn_cast<BitCastOperator>(v)) {
-        if (const StructType *st = dyn_cast<StructType>(
-                bitcast->getDestTy()->getPointerElementType())) {
-          if (embedsStruct(st, deviceType))
-            return true;
-        }
-      }
+    bool isTarget = alloca.isArrayAllocation();
+    if (isTarget) {
+      recordInst(&alloca);
     }
-    return false;
+    return isTarget;
   }
 
   bool visitInstruction(Instruction &inst) {
@@ -253,7 +235,8 @@ private:
     if (const Argument *arg = dyn_cast<Argument>(v)) {
       return targetArgs.count(arg);
     }
-    return underlyingLoadedPtrs.count(v) || underlyingRetPtrs.count(v) ||
+    return v->getName().startswith("drvhorn.devres_alloc") ||
+           underlyingLoadedPtrs.count(v) || underlyingRetPtrs.count(v) ||
            underlyingTargetArgsPtrs.count(v);
   }
 
@@ -441,19 +424,20 @@ private:
           // might be used later
           f.getName().equals("drvhorn.assert_kref") ||
           f.getName().equals("drvhorn.kref_init") ||
-          f.getName().equals("drvhorn.malloc"))
+          f.getName().equals("drvhorn.malloc") ||
+          f.hasFnAttribute("devres_release"))
         continue;
-      f.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+      f.setLinkage(GlobalValue::InternalLinkage);
     }
     for (GlobalVariable &v : m.globals()) {
       if (v.isDeclaration())
         continue;
-      v.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+      v.setLinkage(GlobalValue::InternalLinkage);
     }
     for (GlobalAlias &alias : m.aliases()) {
       if (alias.isDeclaration())
         continue;
-      alias.setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+      alias.setLinkage(GlobalValue::InternalLinkage);
     }
   }
 
@@ -526,7 +510,6 @@ private:
         "device_add",
         "device_del",
         "device_register",
-        "device_unregister",
         "__of_mdiobus_register",
         "of_property_notify",
         "fwnode_mdiobus_register_phy",
@@ -587,8 +570,10 @@ private:
       if (getCalls(&f).empty() && !f.getName().equals("main") &&
           // functions below might be used later.
           !f.getName().equals("drvhorn.fail") &&
+          !f.getName().equals("drvhorn.devres_release") &&
           !f.getName().equals("drvhorn.kref_init") &&
-          !f.getName().equals("drvhorn.assert_kref"))
+          !f.getName().equals("drvhorn.assert_kref") &&
+          !f.hasFnAttribute("devres_release"))
         f.deleteBody();
     }
   }
@@ -605,7 +590,8 @@ private:
           }
           if (Function *f = extractCalledFunction(call)) {
             if (f->isDeclaration() && call->user_empty() &&
-                !f->getName().equals("drvhorn.fail"))
+                !f->getName().equals("drvhorn.fail") &&
+                !f->getName().equals("drvhorn.devres_release"))
               toRemove.push_back(call);
           }
         }
@@ -642,13 +628,6 @@ private:
         return b.CreateCall(f);
       }
     }
-    /*Function *malloc = nondetMalloc(m);*/
-    /*FunctionType *ft =*/
-    /*    FunctionType::get(type, malloc->getArg(0)->getType(), false);*/
-    /*Constant *casted = ConstantExpr::getBitCast(malloc, ft->getPointerTo());*/
-    /*size_t size = m->getDataLayout().getTypeAllocSize(elemType);*/
-    /*Type *i64Type = Type::getInt64Ty(m->getContext());*/
-    /*Value *call = b.CreateCall(ft, casted, ConstantInt::get(i64Type, size));*/
     Value *call = b.CreateAlloca(elemType);
     if (elemType->isPointerTy()) {
       Value *value = nondetValue(elemType, before, ndvalfn);
@@ -663,8 +642,7 @@ private:
     FunctionType *nondetMallocType =
         FunctionType::get(Type::getInt8PtrTy(m->getContext()),
                           Type::getInt64Ty(m->getContext()), false);
-    return Function::Create(nondetMallocType,
-                            GlobalValue::LinkageTypes::ExternalLinkage,
+    return Function::Create(nondetMallocType, GlobalValue::ExternalLinkage,
                             "nondet.malloc", m);
   }
 
@@ -688,8 +666,7 @@ private:
       name = prefix + std::to_string(c++);
     } while (m->getNamedValue(name));
     return Function::Create(FunctionType::get(type, false),
-                            GlobalValue::LinkageTypes::ExternalLinkage, name,
-                            m);
+                            GlobalValue::ExternalLinkage, name, m);
   }
 
   Function *makeNewValFn(Module *m, FunctionType *type, unsigned startFrom) {
@@ -698,8 +675,7 @@ private:
     do {
       name = "verifier.nondetvaluefn." + std::to_string(c++);
     } while (m->getNamedValue(name));
-    return Function::Create(type, GlobalValue::LinkageTypes::ExternalLinkage,
-                            name, m);
+    return Function::Create(type, GlobalValue::ExternalLinkage, name, m);
   }
 };
 

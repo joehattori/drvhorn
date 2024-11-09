@@ -1,4 +1,5 @@
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
@@ -209,5 +210,26 @@ bool embedsStruct(const StructType *s, const Type *target) {
     }
   }
   return false;
+}
+
+void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
+  IRBuilder<> b(fail);
+  LLVMContext &ctx = m.getContext();
+  Type *voidTy = Type::getVoidTy(ctx);
+  FunctionType *fnType = FunctionType::get(voidTy, false);
+  // devresReleaseFn and failFn are filled later in AssertKrefs.cc
+  Function *devresReleaseFn = Function::Create(
+      fnType, GlobalValue::ExternalLinkage, "drvhorn.devres_release", &m);
+  Function *failFn = Function::Create(fnType, GlobalValue::ExternalLinkage,
+                                      "drvhorn.fail", &m);
+  b.CreateCall(devresReleaseFn);
+  b.CreateCall(failFn);
+  b.CreateBr(ret);
+}
+
+void buildRetBlock(Module &m, BasicBlock *ret) {
+  IRBuilder<> b(ret);
+  Type *i32Ty = Type::getInt32Ty(m.getContext());
+  b.CreateRet(ConstantInt::get(i32Ty, 0));
 }
 } // namespace seahorn

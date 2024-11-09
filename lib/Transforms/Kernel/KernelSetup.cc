@@ -25,11 +25,12 @@ public:
   KernelSetup() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    stubAllocationFunctions(m);
+    Function *allocStub = createAllocFn(m);
+    stubAllocationFunctions(m, allocStub);
     stubKernelFunctions(m);
     handleKrefAPIs(m);
     killFree(m);
-    handleKmemCache(m);
+    handleKmemCache(m, allocStub);
 
     handleCallRcu(m);
     handleDevErrProbeCalls(m);
@@ -51,16 +52,26 @@ public:
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
 
-  Value *createAllocStub(Module &m, IRBuilder<> &b, Value *size) {
-    IntegerType *i8Ty = Type::getInt8Ty(m.getContext());
+  Function *createAllocFn(Module &m) {
+    LLVMContext &ctx = m.getContext();
     Function *ndBool = getOrCreateNdIntFn(m, 1);
+    IntegerType *i8Ty = Type::getInt8Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Function *f =
+        Function::Create(FunctionType::get(i8Ty->getPointerTo(), i64Ty, false),
+                         GlobalValue::ExternalLinkage, "drvhorn.alloc", &m);
+    Argument *size = f->getArg(0);
+    BasicBlock *blk = BasicBlock::Create(ctx, "", f);
+    IRBuilder<> b(blk);
     Value *cond = b.CreateCall(ndBool, {}, "alloc.cond");
     AllocaInst *alloca = b.CreateAlloca(i8Ty, size);
-    return b.CreateSelect(cond, alloca,
-                          ConstantPointerNull::get(i8Ty->getPointerTo()));
+    Value *result = b.CreateSelect(
+        cond, alloca, ConstantPointerNull::get(i8Ty->getPointerTo()));
+    b.CreateRet(result);
+    return f;
   }
 
-  void stubAllocationFunctions(Module &m) {
+  void stubAllocationFunctions(Module &m, Function *allocStub) {
     struct AllocFn {
       StringRef name;
       unsigned sizeIdx;
@@ -79,7 +90,7 @@ private:
         {"__ioremap_caller", 1},
         {"__early_ioremap", 1},
         {"devm_kmalloc", 1},
-        {"kvmalloc_node", 1},
+        {"kvmalloc_node", 0},
     };
     for (const AllocFn &f : allocFns) {
       Function *orig = m.getFunction(f.name);
@@ -87,8 +98,9 @@ private:
         continue;
       for (CallInst *call : getCalls(orig)) {
         IRBuilder<> b(call);
-        Value *result = createAllocStub(m, b, call->getArgOperand(f.sizeIdx));
-        call->replaceAllUsesWith(result);
+        Value *replace =
+            b.CreateCall(allocStub, call->getArgOperand(f.sizeIdx));
+        call->replaceAllUsesWith(replace);
         call->eraseFromParent();
       }
     }
@@ -124,9 +136,8 @@ private:
     Type *krefTy = getKrefTy(m);
     FunctionType *krefInitTy = FunctionType::get(
         Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
-    Function *krefInit =
-        Function::Create(krefInitTy, GlobalValue::LinkageTypes::ExternalLinkage,
-                         "drvhorn.kref_init", &m);
+    Function *krefInit = Function::Create(
+        krefInitTy, GlobalValue::ExternalLinkage, "drvhorn.kref_init", &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", krefInit);
     IRBuilder<> b(block);
     Value *gep = b.CreateInBoundsGEP(
@@ -146,9 +157,8 @@ private:
     Type *krefTy = getKrefTy(m);
     FunctionType *krefGetTy = FunctionType::get(
         Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
-    Function *krefGet =
-        Function::Create(krefGetTy, GlobalValue::LinkageTypes::InternalLinkage,
-                         "drvhorn.kref_get", &m);
+    Function *krefGet = Function::Create(
+        krefGetTy, GlobalValue::InternalLinkage, "drvhorn.kref_get", &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", krefGet);
     IRBuilder<> b(block);
     Value *gep = b.CreateInBoundsGEP(
@@ -169,9 +179,8 @@ private:
     Type *krefTy = getKrefTy(m);
     FunctionType *krefPutTy =
         FunctionType::get(i32Ty, {krefTy->getPointerTo()}, false);
-    Function *krefPut =
-        Function::Create(krefPutTy, GlobalValue::LinkageTypes::InternalLinkage,
-                         "drvhorn.kref_put", &m);
+    Function *krefPut = Function::Create(
+        krefPutTy, GlobalValue::InternalLinkage, "drvhorn.kref_put", &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", krefPut);
 
     IRBuilder<> b(block);
@@ -266,7 +275,7 @@ private:
     return None;
   }
 
-  void handleKmemCache(Module &m) {
+  void handleKmemCache(Module &m, Function *allocStub) {
     StringRef kmemCacheFuncNames[] = {
         "kmem_cache_alloc",
         "kmem_cache_alloc_lru",
@@ -291,7 +300,7 @@ private:
           }
           ConstantInt *sizeArg = ConstantInt::get(i64Ty, size.getValue());
           IRBuilder<> b(call);
-          Value *newMalloc = createAllocStub(m, b, sizeArg);
+          Value *newMalloc = b.CreateCall(allocStub, sizeArg);
           call->replaceAllUsesWith(newMalloc);
         }
       }
@@ -324,8 +333,7 @@ private:
       return;
     std::string wrapperName = name + "_wrapper";
     Function *wrapper = Function::Create(
-        orig->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &m);
+        orig->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
     Value *arg = wrapper->getArg(0);
     Value *fn = wrapper->getArg(1);
@@ -425,8 +433,7 @@ private:
         continue;
       std::string wrapperName = info.name + "_wrapper";
       Function *wrapper = Function::Create(
-          f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-          wrapperName, &m);
+          f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
       BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
       Value *dst = wrapper->getArg(0);
       Value *src = wrapper->getArg(1);
@@ -456,8 +463,7 @@ private:
       return;
     std::string wrapperName = "memmove_wrapper";
     Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &m);
+        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
     BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
     Value *dst = wrapper->getArg(0);
     Value *src = wrapper->getArg(1);
@@ -478,8 +484,7 @@ private:
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strcat_wrapper";
     Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &m);
+        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
     Value *dst = wrapper->getArg(0);
     Value *src = wrapper->getArg(1);
 
@@ -534,8 +539,7 @@ private:
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strcmp_wrapper";
     Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &m);
+        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
     Value *s1 = wrapper->getArg(0);
     Value *s2 = wrapper->getArg(1);
 
@@ -585,8 +589,7 @@ private:
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strncmp_wrapper";
     Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &m);
+        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
     Value *s1 = wrapper->getArg(0);
     Value *s2 = wrapper->getArg(1);
     Value *size = wrapper->getArg(2);
@@ -638,8 +641,7 @@ private:
     Type *i32Type = Type::getInt32Ty(ctx);
     std::string wrapperName = "strchr_wrapper";
     Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage,
-        wrapperName, &m);
+        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
     Value *str = wrapper->getArg(0);
     Value *chr = wrapper->getArg(1);
 

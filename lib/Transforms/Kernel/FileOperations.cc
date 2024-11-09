@@ -101,22 +101,6 @@ private:
     b.CreateCondBr(notZero, fail, ret);
   }
 
-  void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
-    IRBuilder<> b(fail);
-    LLVMContext &ctx = m.getContext();
-    Function *failFn = Function::Create(
-        FunctionType::get(Type::getVoidTy(ctx), false),
-        GlobalValue::LinkageTypes::ExternalLinkage, "drvhorn.fail", &m);
-    b.CreateCall(failFn);
-    b.CreateBr(ret);
-  }
-
-  void buildRetBlock(Module &m, BasicBlock *ret) {
-    LLVMContext &ctx = m.getContext();
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    ReturnInst::Create(ctx, ConstantInt::get(i32Ty, 0), ret);
-  }
-
   SmallVector<const Value *> getIPrivatePtrs(const Argument *arg,
                                              unsigned iPrivateFieldIdx) {
     SmallVector<const GEPOperator *> geps;

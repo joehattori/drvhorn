@@ -114,10 +114,10 @@ using namespace llvm;
   "# ALT: oldnstr;661:;call __sw_hweight32;662:;# ALT: padding;.skip "         \
   "-(((6651f-6641f)-(662b-661b)) > 0) * "                                      \
   "((6651f-6641f)-(662b-661b)),0x90;663:;.pushsection "                        \
-  ".altinstructions,\"a\"; "                                                   \
-  ".long 661b - .; .long 6641f - .; .word ( 4*32+23); .byte 663b-661b; .byte " \
-  "6651f-6641f;.popsection;.pushsection .altinstr_replacement,\"ax\";# ALT: "  \
-  "replacement 1;6641:;popcntl $1,$0;6651:;.popsection"
+  ".altinstructions,\"a\";.long 661b - .;.long 6641f - .;.4byte ( "            \
+  "4*32+23);.byte 663b-661b;.byte 6651f-6641f;.popsection;.pushsection "       \
+  ".altinstr_replacement,\"ax\";# ALT: replacement 1;6641:;popcntl "           \
+  "$1,$0;6651:;.popsection"
 #define NATIVE_READ_MSR_SAFE                                                   \
   "1: rdmsr ; xor $0,$0;2:; .pushsection \"__ex_table\",\"a\"; .balign 4; "    \
   ".long "                                                                     \
@@ -352,7 +352,7 @@ public:
     handleBitTestAndReset(m);
     handleFFS(m);
     handleFLS(m);
-    // handleHWeight(m);
+    handleHWeight(m);
 
     // should be called before handleAddl, since they have identical prefix.
     handleAddWithCarry(m);
@@ -1117,7 +1117,7 @@ private:
     for (CallInst *call : getTargetAsmCalls(m, HWEIGHT, false)) {
       IRBuilder<> b(call);
       Value *v = call->getArgOperand(0);
-      Value *ctpopCall = b.CreateCall(ctpop, {v});
+      Value *ctpopCall = b.CreateCall(ctpop, v);
       call->replaceAllUsesWith(ctpopCall);
       call->eraseFromParent();
     }
