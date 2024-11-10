@@ -189,6 +189,8 @@ public:
     handleDeviceAllocation(m, devInit);
     // handleDevresAlloc(m);
 
+    handleOfParsePhandleWithArgs(m, devNodeGetter);
+
     stubFwnodeConnectionFindMatch(m);
     stubFwnodeConnectionFindMatches(m);
     return true;
@@ -1032,6 +1034,39 @@ private:
     retPhi->addIncoming(elemPtr, body);
     b.CreateRet(retPhi);
     return f;
+  }
+
+#define OF_PHANDLE_ARG_DEVNODE_INDEX 0
+  void handleOfParsePhandleWithArgs(Module &m, Function *devNodeGetter) {
+    Function *f = m.getFunction("__of_parse_phandle_with_args");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.__of_parse_phandle_with_args");
+    Argument *outArg = f->getArg(f->arg_size() - 1);
+    LLVMContext &ctx = m.getContext();
+    Function *krefGet = m.getFunction("drvhorn.kref_get");
+    Type *krefType = krefGet->getArg(0)->getType()->getPointerElementType();
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IRBuilder<> b(blk);
+    Value *devNode = b.CreateCall(devNodeGetter);
+    StructType *devNodeType =
+        cast<StructType>(devNode->getType()->getPointerElementType());
+    Value *krefPtr = b.CreateInBoundsGEP(
+        devNodeType, devNode,
+        gepIndicesToStruct(devNodeType, krefType).getValue());
+    b.CreateCall(krefGet, krefPtr);
+    Value *devNodeGEP = b.CreateInBoundsGEP(
+        outArg->getType()->getPointerElementType(), outArg,
+        {ConstantInt::get(i64Ty, 0),
+         ConstantInt::get(i32Ty, OF_PHANDLE_ARG_DEVNODE_INDEX)});
+    b.CreateStore(devNode, devNodeGEP);
+    Value *ok = b.CreateIsNotNull(devNode);
+    Value *ret = b.CreateSelect(ok, ConstantInt::get(i32Ty, 0),
+                                ConstantInt::get(i32Ty, -EINVAL));
+    b.CreateRet(ret);
   }
 
   void stubFwnodeConnectionFindMatch(Module &m) {
