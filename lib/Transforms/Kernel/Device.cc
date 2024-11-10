@@ -190,6 +190,8 @@ public:
     // handleDevresAlloc(m);
 
     handleOfParsePhandleWithArgs(m, devNodeGetter);
+    handleOfPhandleIteratorNext(m, devNodeGetter);
+    // TODO: handle of_clk_del_provider?
 
     stubFwnodeConnectionFindMatch(m);
     stubFwnodeConnectionFindMatches(m);
@@ -1064,6 +1066,49 @@ private:
          ConstantInt::get(i32Ty, OF_PHANDLE_ARG_DEVNODE_INDEX)});
     b.CreateStore(devNode, devNodeGEP);
     Value *ok = b.CreateIsNotNull(devNode);
+    Value *ret = b.CreateSelect(ok, ConstantInt::get(i32Ty, 0),
+                                ConstantInt::get(i32Ty, -EINVAL));
+    b.CreateRet(ret);
+  }
+
+#define OF_PHANDLE_ITERATOR_DEVNODE_INDEX 8
+  void handleOfPhandleIteratorNext(Module &m, Function *devNodeGetter) {
+    Function *f = m.getFunction("of_phandle_iterator_next");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.of_phandle_iterator_next");
+    LLVMContext &ctx = m.getContext();
+    Argument *itArg = f->getArg(0);
+    Constant *ofNodeGet = m.getFunction("of_node_get");
+    Constant *ofNodePut = m.getFunction("of_node_put");
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    Type *voidTy = Type::getVoidTy(ctx);
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+    IRBuilder<> b(blk);
+    Value *devNodeGEP = b.CreateInBoundsGEP(
+        itArg->getType()->getPointerElementType(), itArg,
+        {ConstantInt::get(i64Ty, 0),
+         ConstantInt::get(i32Ty, OF_PHANDLE_ITERATOR_DEVNODE_INDEX)});
+    Type *devNodeType = devNodeGEP->getType()->getPointerElementType();
+    FunctionType *ofNodePutType = FunctionType::get(voidTy, devNodeType, false);
+    if (ofNodePut->getType() != ofNodePutType->getPointerTo())
+      ofNodePut =
+          ConstantExpr::getBitCast(ofNodePut, ofNodePutType->getPointerTo());
+    LoadInst *node = b.CreateLoad(devNodeType, devNodeGEP);
+    b.CreateCall(ofNodePutType, ofNodePut, node);
+    Value *newDevNode = b.CreateCall(devNodeGetter);
+    FunctionType *ofNodeGetType =
+        FunctionType::get(devNodeType, devNodeType, false);
+    if (ofNodeGet->getType() != ofNodeGetType->getPointerTo())
+      ofNodeGet =
+          ConstantExpr::getBitCast(ofNodeGet, ofNodeGetType->getPointerTo());
+    b.CreateCall(ofNodeGetType, ofNodeGet, newDevNode);
+    if (newDevNode->getType() != devNodeType)
+      newDevNode = b.CreateBitCast(newDevNode, devNodeType);
+    b.CreateStore(newDevNode, devNodeGEP);
+    Value *ok = b.CreateIsNotNull(newDevNode);
     Value *ret = b.CreateSelect(ok, ConstantInt::get(i32Ty, 0),
                                 ConstantInt::get(i32Ty, -EINVAL));
     b.CreateRet(ret);
