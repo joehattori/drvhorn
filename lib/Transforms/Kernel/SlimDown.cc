@@ -341,6 +341,8 @@ private:
         visited.insert(arg);
       }
     }
+    StructType *devType =
+        StructType::getTypeByName(m.getContext(), "struct.device");
 
     while (!workList.empty()) {
       const Argument *arg = workList.pop_back_val();
@@ -352,12 +354,21 @@ private:
             workList.push_back(arg);
           }
         }
+
+        bool isDevice = equivTypes(v->getType(), devType->getPointerTo());
+        if (isDevice) {
+          for (const Argument *arg : devPointingArgs(v)) {
+            if (visited.insert(arg).second) {
+              workList.push_back(arg);
+            }
+          }
+        }
       }
     }
   }
 
-  SmallVector<const Argument *> underlyingArgs(const Value *v) {
-    SmallVector<const Argument *> args;
+  void collectUnderlyingArgs(const Value *v,
+                             SmallVector<const Argument *> &args) {
     SmallVector<const Value *> workList;
     getUnderlyingObjects(v, workList, nullptr, 0);
     DenseSet<const Value *> visited;
@@ -376,6 +387,24 @@ private:
             getUnderlyingObjects(v, workList, nullptr, 0);
           }
         }
+      }
+    }
+  }
+
+  SmallVector<const Argument *> underlyingArgs(const Value *v) {
+    SmallVector<const Argument *> args;
+    collectUnderlyingArgs(v, args);
+    return args;
+  }
+
+  SmallVector<const Argument *> devPointingArgs(const Value *devPtr) {
+    SmallVector<const Value *> underlyingVals;
+    getUnderlyingObjects(devPtr, underlyingVals, nullptr, 0);
+
+    SmallVector<const Argument *> args;
+    for (const Value *v : underlyingVals) {
+      if (const LoadInst *load = dyn_cast<LoadInst>(v)) {
+        collectUnderlyingArgs(load->getPointerOperand(), args);
       }
     }
     return args;
