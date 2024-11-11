@@ -80,6 +80,7 @@ public:
   DeviceGEPGetter(Function *devInit) : devInit(devInit) {}
 
   Optional<SmallVector<uint64_t>> getGEPIndices(CallInst *allocCall) {
+    visited.clear();
     visited.insert(allocCall);
     prev = allocCall;
     for (User *user : allocCall->users()) {
@@ -183,6 +184,7 @@ public:
     handleFwnodePut(m);
     handleFwnodeFinders(m, devNodeGetter);
     handleFindDevice(m);
+    handleDeviceAdd(m);
     handleDevmAddAction(m);
     handleDeviceLinkAdd(m);
     Function *devInit = handleDeviceInitialize(m);
@@ -923,8 +925,8 @@ private:
     if (!devInit)
       return;
     Function *alloc = m.getFunction("drvhorn.alloc");
+    DeviceGEPGetter getter(devInit);
     for (CallInst *call : getCalls(alloc)) {
-      DeviceGEPGetter getter(devInit);
       Optional<SmallVector<uint64_t>> indices = getter.getGEPIndices(call);
       ConstantInt *sizeArg = dyn_cast<ConstantInt>(call->getArgOperand(0));
       if (!indices.hasValue() || !sizeArg)
@@ -943,29 +945,30 @@ private:
     }
   }
 
-  void handleDevresAlloc(Module &m) {
-    Function *f = m.getFunction("__devres_alloc_node");
-    if (!f)
-      return;
-    LLVMContext &ctx = m.getContext();
-    Attribute attr = Attribute::get(ctx, "devres_release");
-    for (CallInst *call : getCalls(f)) {
-      Function *releaseFn =
-          cast<Function>(call->getArgOperand(0)->stripPointerCasts());
-      releaseFn->setLinkage(GlobalVariable::ExternalLinkage);
-      releaseFn->addFnAttr(attr);
-      ConstantInt *sizeArg = dyn_cast<ConstantInt>(call->getArgOperand(1));
-      if (!sizeArg)
-        continue;
-      uint64_t size = sizeArg->getZExtValue();
-      std::string suffix = "devres_alloc." + std::to_string(size);
-      std::string fnName = "drvhorn.devres_alloc." + std::to_string(size);
-      // Function *devAlloc = getOrCreateDeviceAllocator(m, size, fnName,
-      // suffix); IRBuilder<> b(call); Value *newCall = b.CreateCall(devAlloc);
-      // call->replaceAllUsesWith(newCall);
-      // call->eraseFromParent();
-    }
-  }
+  // void handleDevresAlloc(Module &m) {
+  //   Function *f = m.getFunction("__devres_alloc_node");
+  //   if (!f)
+  //     return;
+  //   LLVMContext &ctx = m.getContext();
+  //   Attribute attr = Attribute::get(ctx, "devres_release");
+  //   for (CallInst *call : getCalls(f)) {
+  //     Function *releaseFn =
+  //         cast<Function>(call->getArgOperand(0)->stripPointerCasts());
+  //     releaseFn->setLinkage(GlobalVariable::ExternalLinkage);
+  //     releaseFn->addFnAttr(attr);
+  //     ConstantInt *sizeArg = dyn_cast<ConstantInt>(call->getArgOperand(1));
+  //     if (!sizeArg)
+  //       continue;
+  //     uint64_t size = sizeArg->getZExtValue();
+  //     std::string suffix = "devres_alloc." + std::to_string(size);
+  //     std::string fnName = "drvhorn.devres_alloc." + std::to_string(size);
+  //     // Function *devAlloc = getOrCreateDeviceAllocator(m, size, fnName,
+  //     // suffix); IRBuilder<> b(call); Value *newCall =
+  //     b.CreateCall(devAlloc);
+  //     // call->replaceAllUsesWith(newCall);
+  //     // call->eraseFromParent();
+  //   }
+  // }
 
   StructType *getCustomDevType(Module &m, uint64_t size,
                                const SmallVector<uint64_t> &devIndices) {
@@ -990,7 +993,9 @@ private:
       if (!st)
         return false;
     }
-    return equivTypes(st, devType);
+    // if the first field is struct device, the index 0 might not be collected.
+    return equivTypes(st, devType) ||
+           equivTypes(st->getElementType(0), devType);
   }
 
   Function *getOrCreateDeviceAllocator(Module &m, StructType *elemType,
@@ -1112,6 +1117,38 @@ private:
     Value *ret = b.CreateSelect(ok, ConstantInt::get(i32Ty, 0),
                                 ConstantInt::get(i32Ty, -EINVAL));
     b.CreateRet(ret);
+  }
+
+  void handleDeviceAdd(Module &m) {
+    Function *f = m.getFunction("device_add");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.device_add");
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    Function *getDevice = m.getFunction("get_device");
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+    Value *devArg = f->getArg(0);
+
+    IRBuilder<> b(entry);
+    Value *cond = b.CreateCall(ndBool);
+    b.CreateCondBr(cond, ret, body);
+
+    b.SetInsertPoint(body);
+    if (devArg->getType() != getDevice->getArg(0)->getType())
+      devArg = b.CreateBitCast(devArg, getDevice->getArg(0)->getType());
+    b.CreateCall(getDevice, devArg);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *retPhi = b.CreatePHI(i32Ty, 2);
+    retPhi->addIncoming(ConstantInt::get(i32Ty, -1), entry);
+    retPhi->addIncoming(ConstantInt::get(i32Ty, 0), body);
+    b.CreateRet(retPhi);
   }
 
   void stubFwnodeConnectionFindMatch(Module &m) {

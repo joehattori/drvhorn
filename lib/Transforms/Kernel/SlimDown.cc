@@ -596,7 +596,6 @@ private:
         "kobject_uevent_env",
         "__mdiobus_register",
         "mdiobus_unregister",
-        "device_add",
         "device_del",
         "device_register",
         "__of_mdiobus_register",
