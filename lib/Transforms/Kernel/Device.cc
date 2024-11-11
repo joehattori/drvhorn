@@ -485,47 +485,18 @@ private:
     return {storage, index, targetIndex};
   }
 
+  // devm functions are handled in Devm.cc
   void handleDevmAddAction(Module &m) {
     Function *devmAddAction = m.getFunction("__devm_add_action");
     if (!devmAddAction)
       return;
-    Function *ndBool = getOrCreateNdIntFn(m, 1);
-    LLVMContext &ctx = m.getContext();
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    ConstantInt *zero = ConstantInt::get(i32Ty, 0);
-    ConstantInt *enomem = ConstantInt::get(i32Ty, -12);
+    devmAddAction->deleteBody();
+    devmAddAction->setName("drvhorn.__devm_add_action");
     for (CallInst *call : getCalls(devmAddAction)) {
-      BasicBlock *orig = call->getParent();
-      Function *action =
-          dyn_cast<Function>(call->getArgOperand(1)->stripPointerCasts());
-      if (!action) {
-        errs() << "TODO: 1st argument of __devm_add_action in "
-               << call->getFunction()->getName() << " is not Function " << *call
-               << "\n";
-        continue;
+      if (Function *action =
+              dyn_cast<Function>(call->getArgOperand(1)->stripPointerCasts())) {
+        action->setName("drvhorn.devm_cleaner." + action->getName());
       }
-      BasicBlock *next =
-          orig->splitBasicBlock(call->getNextNode(), "__devm_add_action.next");
-      Instruction *origBr = orig->getTerminator();
-      BasicBlock *execAction = BasicBlock::Create(ctx, "__devm_add_action.exec",
-                                                  orig->getParent(), next);
-
-      IRBuilder<> b(orig);
-      Value *isZero = b.CreateCall(ndBool);
-      // __devm_add_action returns 0 or -ENOMEM
-      Value *res = b.CreateSelect(isZero, zero, enomem);
-      call->replaceAllUsesWith(res);
-      b.CreateCondBr(isZero, execAction, next);
-      origBr->eraseFromParent();
-
-      b.SetInsertPoint(execAction);
-      Value *data = call->getArgOperand(2);
-      if (data->getType() != action->getArg(0)->getType())
-        data = b.CreateBitCast(data, action->getArg(0)->getType());
-      b.CreateCall(action, data);
-      b.CreateBr(next);
-
-      call->eraseFromParent();
     }
   }
 
@@ -1024,7 +995,7 @@ private:
     Value *elemPtr = b.CreateInBoundsGEP(storage->getValueType(), storage,
                                          {ConstantInt::get(i64Ty, 0), index});
     Value *withinRange =
-        b.CreateICmpULT(curIndex, ConstantInt::get(i64Ty, STORAGE_SIZE));
+        b.CreateICmpULT(index, ConstantInt::get(i64Ty, STORAGE_SIZE));
     Value *cond = b.CreateAnd(ndCond, withinRange);
     b.CreateCondBr(cond, body, ret);
 

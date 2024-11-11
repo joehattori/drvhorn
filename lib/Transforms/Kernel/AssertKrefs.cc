@@ -15,10 +15,8 @@ public:
   AssertKrefs() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    Function *devresRelease = m.getFunction("drvhorn.devres_release");
-    buildDevresRelease(m, devresRelease);
-    buildFail(m, devresRelease);
-    removeNotCalledFunctions(m);
+    buildDevmActionRelease(m);
+    buildFail(m);
     return true;
   }
 
@@ -67,59 +65,63 @@ private:
     return f;
   }
 
-  void buildDevresRelease(Module &m, Function *release) {
-    std::string deversPrefix = "drvhorn.devres.";
+  void buildDevmActionRelease(Module &m) {
+    Function *release = m.getFunction("drvhorn.devres_release");
+    static const std::string devmActionPrefix = "drvhorn.devm_action_data.";
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "blk", release);
     IRBuilder<> b(blk);
     for (GlobalVariable &gv : m.globals()) {
-      if (gv.getName().startswith(deversPrefix)) {
-        StringRef fnName = gv.getName().substr(deversPrefix.size());
-        size_t p = fnName.find('.');
-        if (p != StringRef::npos)
-          fnName = fnName.substr(0, p);
-        Function *f = getAssertDevresFunction(m, gv, fnName);
+      if (gv.getName().startswith(devmActionPrefix)) {
+        StringRef fnName = gv.getName().substr(devmActionPrefix.size());
+        Function *f = getDevmActionDataCleaner(m, gv, fnName);
         b.CreateCall(f);
       }
     }
     b.CreateRetVoid();
   }
 
-  Function *getAssertDevresFunction(Module &m, GlobalVariable &gv,
-                                    StringRef fnName) {
+  Function *getDevmActionDataCleaner(Module &m, GlobalVariable &devmData,
+                                     StringRef fnName) {
     LLVMContext &ctx = m.getContext();
     Function *f =
         Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
                          GlobalValue::ExternalLinkage,
-                         "drvhorn.devres_release." + fnName.str(), &m);
+                         "drvhorn.devm_action_cleaner." + fnName.str(), &m);
+    GlobalVariable *actionSwitch =
+        m.getGlobalVariable("drvhorn.devm_action_switch." + fnName.str(), true);
     Function *release = m.getFunction(fnName);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
 
     IRBuilder<> b(entry);
-    Value *devresPtr = b.CreateInBoundsGEP(
-        gv.getValueType(), &gv,
-        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i64Ty, 0)});
-    if (devresPtr->getType() != release->getArg(1)->getType()) {
-      devresPtr = b.CreateBitCast(devresPtr, release->getArg(1)->getType());
+    LoadInst *enabled =
+        b.CreateLoad(actionSwitch->getValueType(), actionSwitch);
+    b.CreateCondBr(enabled, body, ret);
+
+    b.SetInsertPoint(body);
+    Value *devresPtr = b.CreateLoad(devmData.getValueType(), &devmData);
+    if (devresPtr->getType() != release->getArg(0)->getType()) {
+      devresPtr = b.CreateBitCast(devresPtr, release->getArg(0)->getType());
     }
-    b.CreateCall(
-        release,
-        {Constant::getNullValue(release->getArg(0)->getType()), devresPtr});
+    b.CreateCall(release, devresPtr);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
     b.CreateRetVoid();
     return f;
   }
 
-  void buildFail(Module &m, Function *devresRelease) {
+  void buildFail(Module &m) {
     Function *fail = m.getFunction("drvhorn.fail");
     Function *checker = m.getFunction("drvhorn.assert_kref");
     Type *krefType = checker->getArg(0)->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
     IRBuilder<> b(blk);
-    b.CreateCall(devresRelease);
 
-    std::string storagePrefix = "drvhorn.storage.";
+    static const std::string storagePrefix = "drvhorn.storage.";
     for (GlobalVariable &gv : m.globals()) {
       if (gv.getName().startswith(storagePrefix)) {
         StringRef suffix = gv.getName().substr(storagePrefix.size());
@@ -142,13 +144,6 @@ private:
     }
 
     b.CreateRetVoid();
-  }
-
-  void removeNotCalledFunctions(Module &m) {
-    for (Function &f : m) {
-      if (getCalls(&f).empty() && f.hasFnAttribute("devres_release"))
-        f.deleteBody();
-    }
   }
 };
 

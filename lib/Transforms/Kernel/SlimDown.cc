@@ -137,6 +137,8 @@ public:
   bool visitCallInst(CallInst &call) {
     bool isTarget = startingPoints.count(&call);
     if (Function *f = extractCalledFunction(call)) {
+      if (f->getName().equals("drvhorn.__devm_add_action"))
+        isTarget = true;
       for (Argument &arg : f->args()) {
         if (targetArgs.count(&arg)) {
           isTarget = true;
@@ -455,8 +457,7 @@ private:
           // might be used later
           f.getName().equals("drvhorn.assert_kref") ||
           f.getName().equals("drvhorn.kref_init") ||
-          f.getName().equals("drvhorn.malloc") ||
-          f.hasFnAttribute("devres_release"))
+          f.getName().equals("drvhorn.malloc"))
         continue;
       f.setLinkage(GlobalValue::InternalLinkage);
     }
@@ -548,10 +549,6 @@ private:
         }
         Value *ndVal = nondetValue(argVal->getType()->getPointerElementType(),
                                    call, ndvalfn);
-        if (call->getFunction()->getName().equals(
-                "led_classdev_register_ext")) {
-          errs() << "filling " << *call << "\n";
-        }
         ndVal->setName("arg_filler." + call->getName().str());
         IRBuilder<> b(call);
         b.CreateStore(ndVal, argVal);
@@ -632,8 +629,7 @@ private:
           !f.getName().equals("drvhorn.fail") &&
           !f.getName().equals("drvhorn.devres_release") &&
           !f.getName().equals("drvhorn.kref_init") &&
-          !f.getName().equals("drvhorn.assert_kref") &&
-          !f.hasFnAttribute("devres_release"))
+          !f.getName().equals("drvhorn.assert_kref"))
         f.deleteBody();
     }
   }

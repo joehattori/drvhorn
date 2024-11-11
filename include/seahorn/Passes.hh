@@ -119,6 +119,7 @@ llvm::Pass *createFileOperationsSetupPass(llvm::StringRef fileOpName);
 llvm::Pass *createPlatformDriverPass(llvm::StringRef fileOpName);
 llvm::Pass *createKernelSetupPass();
 llvm::Pass *createHandleDevicesPass();
+llvm::Pass *createHandleDevmPass();
 llvm::Pass *createKernelDebugPass(llvm::StringRef outFileName);
 llvm::Pass *createSlimDownPass();
 llvm::Pass *createHandleNondetMallocPass();

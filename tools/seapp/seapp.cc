@@ -489,6 +489,7 @@ int main(int argc, char **argv) {
     }
     pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
     pm_wrapper.add(seahorn::createSlimDownPass());
+    pm_wrapper.add(seahorn::createHandleDevmPass());
     pm_wrapper.add(seahorn::createHandleInlineAsmPass());
     pm_wrapper.add(seahorn::createInitGlobalKrefsPass());
     pm_wrapper.add(seahorn::createAssertKrefsPass());
