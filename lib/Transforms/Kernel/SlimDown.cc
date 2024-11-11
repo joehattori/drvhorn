@@ -593,8 +593,6 @@ private:
         "kobject_uevent_env",
         "__mdiobus_register",
         "mdiobus_unregister",
-        "device_del",
-        "device_register",
         "__of_mdiobus_register",
         "of_property_notify",
         "fwnode_mdiobus_register_phy",

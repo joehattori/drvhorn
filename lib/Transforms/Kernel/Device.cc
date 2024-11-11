@@ -184,10 +184,11 @@ public:
     handleFwnodePut(m);
     handleFwnodeFinders(m, devNodeGetter);
     handleFindDevice(m);
-    handleDeviceAdd(m);
+    Function *devInit = handleDeviceInitialize(m);
+    handleDeviceAdd(m, devInit);
+    handleDeviceDel(m);
     handleDevmAddAction(m);
     handleDeviceLinkAdd(m);
-    Function *devInit = handleDeviceInitialize(m);
     handleDeviceAllocation(m, devInit);
     // handleDevresAlloc(m);
 
@@ -1090,36 +1091,62 @@ private:
     b.CreateRet(ret);
   }
 
-  void handleDeviceAdd(Module &m) {
+#define DEVICE_PARENT_INDEX 1
+  // simulate device_add() by setting the last field (i8) of the device to 0 or 1.
+  void handleDeviceAdd(Module &m, Constant *devInit) {
     Function *f = m.getFunction("device_add");
     if (!f)
       return;
     f->deleteBody();
     f->setName("drvhorn.device_add");
     LLVMContext &ctx = m.getContext();
+    IntegerType *i8Ty = Type::getInt8Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
     Function *ndBool = getOrCreateNdIntFn(m, 1);
-    Function *getDevice = m.getFunction("get_device");
+    Argument *dev = f->getArg(0);
+    StructType *devType =
+        cast<StructType>(dev->getType()->getPointerElementType());
+
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+    IRBuilder<> b(blk);
+    Value *isAddedGEP = b.CreateInBoundsGEP(
+        devType, dev,
+        {ConstantInt::get(i64Ty, 0),
+         ConstantInt::get(i32Ty, devType->getNumElements() - 1)});
+    Value *ndVal = b.CreateCall(ndBool);
+    Value *isAdded = b.CreateSelect(ndVal, ConstantInt::get(i8Ty, 1),
+                                    ConstantInt::get(i8Ty, 0));
+    b.CreateStore(isAdded, isAddedGEP);
+    Value *ret = b.CreateSelect(ndVal, ConstantInt::get(i32Ty, 0),
+                                ConstantInt::get(i32Ty, -EINVAL));
+    b.CreateRet(ret);
+  }
+
+  // simulate device_del() by setting the last field (i8) of the device to 0.
+  void handleDeviceDel(Module &m) {
+    Function *f = m.getFunction("device_del");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.device_del");
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i8Ty = Type::getInt8Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Argument *dev = f->getArg(0);
+    StructType *devType =
+        cast<StructType>(dev->getType()->getPointerElementType());
+
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
-    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
-    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
-    Value *devArg = f->getArg(0);
 
     IRBuilder<> b(entry);
-    Value *cond = b.CreateCall(ndBool);
-    b.CreateCondBr(cond, ret, body);
-
-    b.SetInsertPoint(body);
-    if (devArg->getType() != getDevice->getArg(0)->getType())
-      devArg = b.CreateBitCast(devArg, getDevice->getArg(0)->getType());
-    b.CreateCall(getDevice, devArg);
-    b.CreateBr(ret);
-
-    b.SetInsertPoint(ret);
-    PHINode *retPhi = b.CreatePHI(i32Ty, 2);
-    retPhi->addIncoming(ConstantInt::get(i32Ty, -1), entry);
-    retPhi->addIncoming(ConstantInt::get(i32Ty, 0), body);
-    b.CreateRet(retPhi);
+    Value *isAddedGEP = b.CreateInBoundsGEP(
+        devType, dev,
+        {ConstantInt::get(i64Ty, 0),
+         ConstantInt::get(i32Ty, devType->getNumElements() - 1)});
+    b.CreateStore(ConstantInt::get(i8Ty, 0), isAddedGEP);
+    b.CreateRetVoid();
   }
 
   void stubFwnodeConnectionFindMatch(Module &m) {
