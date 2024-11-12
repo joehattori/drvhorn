@@ -420,7 +420,6 @@ public:
   SlimDown() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    m.setModuleInlineAsm("");
     ignoreSomeFunctions(m);
     updateLinkage(m);
     removeCompilerUsed(m);

@@ -25,6 +25,7 @@ public:
   KernelSetup() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
+    m.setModuleInlineAsm("");
     Function *allocStub = createAllocFn(m);
     stubAllocationFunctions(m, allocStub);
     stubKernelFunctions(m);
