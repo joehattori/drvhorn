@@ -561,8 +561,14 @@ private:
         }
         const SmallVector<Value *> &devIndices =
             gepIndicesToStruct(surroundingDevType, deviceType).getValue();
-        findCallToSurroundingDevPtr[call] =
-            insertDeviceGetter(m, call, surroundingDevType, devIndices);
+        Function *devGetter = deviceGetter(m, surroundingDevType, devIndices);
+        IRBuilder<> b(call);
+        Value *replace = b.CreateCall(devGetter);
+        if (replace->getType() != call->getType())
+          replace = b.CreateBitCast(replace, call->getType());
+        call->replaceAllUsesWith(replace);
+        call->eraseFromParent();
+        findCallToSurroundingDevPtr[call] = replace;
         collectContainersOfs(call, containerOfs);
       }
     }
@@ -614,16 +620,8 @@ private:
     const Value *base = getUnderlyingObject(v);
     if (const CallInst *call = dyn_cast<CallInst>(base)) {
       const Function *f = extractCalledFunction(call);
-      if (f->getName().equals("drvhorn.__kmalloc") ||
-          f->getName().equals("drvhorn.__kmalloc_node") ||
-          f->getName().equals("drvhorn.__kmalloc_node_track_caller") ||
-          f->getName().equals("drvhorn.kmalloc_large") ||
-          f->getName().equals("drvhorn.kmalloc_trace") ||
-          f->getName().equals("drvhorn.kmalloc_large_node") ||
-          f->getName().equals("drvhorn.__vmalloc_node_range") ||
-          f->getName().equals("drvhorn.slob_alloc") ||
-          f->getName().equals("drvhorn.pcpu_alloc")) {
-        // guess the actual type for a kmalloc-ish call.
+      if (f->getName().equals("drvhorn.alloc")) {
+        // guess the actual type for the drvhorn.alloc call.
         SmallVector<const User *> workList(call->user_begin(),
                                            call->user_end());
 
@@ -765,30 +763,34 @@ private:
   }
 
   // returns a pointer to the surrounding device.
-  Value *insertDeviceGetter(Module &m, CallInst *finderCall,
-                            StructType *surroundingDevType,
-                            const SmallVector<Value *> &devIndices) {
+  Function *deviceGetter(Module &m, StructType *surroundingDevType,
+                         const SmallVector<Value *> &devIndices) {
+    std::string fnName =
+        "drvhorn.device_getter." + surroundingDevType->getName().str();
+    if (Function *f = m.getFunction(fnName))
+      return f;
     LLVMContext &ctx = m.getContext();
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    BasicBlock *origBlk = finderCall->getParent();
-    BasicBlock *nxtBlk =
-        origBlk->splitBasicBlock(finderCall, "device_getter.after");
-    BasicBlock *genBlk = BasicBlock::Create(ctx, "device_getter.gen",
-                                            origBlk->getParent(), nxtBlk);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Type *retType = getGEPType(surroundingDevType, devIndices);
+    Function *f =
+        Function::Create(FunctionType::get(retType->getPointerTo(), false),
+                         GlobalValue::PrivateLinkage, fnName, &m);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
     StorageGlobals globals = getStorageAndIndex(
         m, surroundingDevType, surroundingDevType->getName().str());
     GlobalVariable *storage = globals.storage;
     GlobalVariable *index = globals.curIndex;
     GlobalVariable *targetIndex = globals.targetIndex;
 
-    Instruction *term = origBlk->getTerminator();
     Function *ndBool = getOrCreateNdIntFn(m, 1);
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     Function *krefGet = m.getFunction("drvhorn.kref_get");
     Function *updateIndex = m.getFunction("drvhorn.update_index");
 
-    IRBuilder<> b(term);
+    IRBuilder<> b(entry);
     CallInst *ndCond = b.CreateCall(ndBool);
     LoadInst *curIndex = b.CreateLoad(i64Ty, index);
     Value *surroundingDevPtr =
@@ -797,10 +799,9 @@ private:
     Value *withinRange =
         b.CreateICmpULT(curIndex, ConstantInt::get(i64Ty, STORAGE_SIZE));
     Value *cond = b.CreateAnd(ndCond, withinRange);
-    b.CreateCondBr(cond, genBlk, nxtBlk);
-    term->eraseFromParent();
+    b.CreateCondBr(cond, body, ret);
 
-    b.SetInsertPoint(genBlk);
+    b.SetInsertPoint(body);
     Value *devPtr =
         b.CreateInBoundsGEP(surroundingDevType, surroundingDevPtr, devIndices);
     Value *krefPtr = b.CreateInBoundsGEP(
@@ -809,21 +810,18 @@ private:
          ConstantInt::get(i32Ty, 6)});
     b.CreateCall(krefInit, krefPtr);
     b.CreateCall(krefGet, krefPtr);
-    if (finderCall->getType() != devPtr->getType())
-      devPtr = b.CreateBitCast(devPtr, finderCall->getType());
     Value *nxtIndex = b.CreateAdd(curIndex, ConstantInt::get(i64Ty, 1));
     b.CreateStore(nxtIndex, index);
     b.CreateCall(updateIndex, {curIndex, targetIndex});
-    b.CreateBr(nxtBlk);
+    b.CreateBr(ret);
 
-    b.SetInsertPoint(finderCall);
-    Type *devPtrType = devPtr->getType();
-    PHINode *callReplacer = b.CreatePHI(devPtrType, 2);
-    callReplacer->addIncoming(Constant::getNullValue(devPtrType), origBlk);
-    callReplacer->addIncoming(devPtr, genBlk);
-    finderCall->replaceAllUsesWith(callReplacer);
-    finderCall->eraseFromParent();
-    return surroundingDevPtr;
+    b.SetInsertPoint(ret);
+    PHINode *retVal = b.CreatePHI(devPtr->getType(), 2);
+    retVal->addIncoming(Constant::getNullValue(devPtr->getType()), entry);
+    retVal->addIncoming(devPtr, body);
+    b.CreateRet(retVal);
+
+    return f;
   }
 
   void replaceContainerOfs(
@@ -1092,7 +1090,8 @@ private:
   }
 
 #define DEVICE_PARENT_INDEX 1
-  // simulate device_add() by setting the last field (i8) of the device to 0 or 1.
+  // simulate device_add() by setting the last field (i8) of the device to 0
+  // or 1.
   void handleDeviceAdd(Module &m, Constant *devInit) {
     Function *f = m.getFunction("device_add");
     if (!f)

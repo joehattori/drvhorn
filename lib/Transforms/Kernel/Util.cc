@@ -199,6 +199,21 @@ Optional<SmallVector<Value *>> gepIndicesToStruct(const StructType *s,
   return SmallVector<Value *>(indices->rbegin(), indices->rend());
 }
 
+Type *getGEPType(StructType *s, ArrayRef<Value *> indices) {
+  indices = indices.drop_front();
+  Type *cur = s;
+  for (Value *index : indices) {
+    ConstantInt *c = dyn_cast<ConstantInt>(index);
+    if (!c)
+      return nullptr;
+    StructType *s = dyn_cast<StructType>(cur);
+    if (!s)
+      return nullptr;
+    cur = s->getElementType(c->getZExtValue());
+  }
+  return cur;
+}
+
 bool embedsStruct(const StructType *s, const Type *target) {
   for (unsigned i = 0; i < s->getNumElements(); i++) {
     const Type *elemType = s->getElementType(i);
