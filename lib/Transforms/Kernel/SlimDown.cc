@@ -137,7 +137,7 @@ public:
   bool visitCallInst(CallInst &call) {
     bool isTarget = startingPoints.count(&call);
     if (Function *f = extractCalledFunction(call)) {
-      if (f->getName().equals("drvhorn.__devm_add_action"))
+      if (f->hasFnAttribute("drvhorn.fill_later"))
         isTarget = true;
       for (Argument &arg : f->args()) {
         if (targetArgs.count(&arg)) {

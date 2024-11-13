@@ -188,9 +188,9 @@ public:
     handleDeviceAdd(m, devInit);
     handleDeviceDel(m);
     handleDevmAddAction(m);
+    handleDevresAlloc(m);
     handleDeviceLinkAdd(m);
     handleDeviceAllocation(m, devInit);
-    // handleDevresAlloc(m);
 
     handleOfParsePhandleWithArgs(m, devNodeGetter);
     handleOfPhandleIteratorNext(m, devNodeGetter);
@@ -493,12 +493,18 @@ private:
       return;
     devmAddAction->deleteBody();
     devmAddAction->setName("drvhorn.__devm_add_action");
-    for (CallInst *call : getCalls(devmAddAction)) {
-      if (Function *action =
-              dyn_cast<Function>(call->getArgOperand(1)->stripPointerCasts())) {
-        action->setName("drvhorn.devm_cleaner." + action->getName());
-      }
-    }
+    Attribute attr = Attribute::get(m.getContext(), "drvhorn.fill_later");
+    devmAddAction->addFnAttr(attr);
+  }
+
+  void handleDevresAlloc(Module &m) {
+    Function *devresAllocNode = m.getFunction("__devres_alloc_node");
+    if (!devresAllocNode)
+      return;
+    devresAllocNode->deleteBody();
+    devresAllocNode->setName("drvhorn.__devres_alloc_node");
+    Attribute attr = Attribute::get(m.getContext(), "drvhorn.fill_later");
+    devresAllocNode->addFnAttr(attr);
   }
 
 #define DL_FLAG_AUTOREMOVE_SUPPLIER (1 << 4)
@@ -763,6 +769,9 @@ private:
   }
 
   // returns a pointer to the surrounding device.
+#define DEV_KOBJ_INDEX 0
+#define KOBJECT_KREF_INDEX 6
+#define KOBJECT_ISINIT_INDEX 7
   Function *deviceGetter(Module &m, StructType *surroundingDevType,
                          const SmallVector<Value *> &devIndices) {
     std::string fnName =
@@ -770,6 +779,7 @@ private:
     if (Function *f = m.getFunction(fnName))
       return f;
     LLVMContext &ctx = m.getContext();
+    IntegerType *i8Ty = Type::getInt8Ty(ctx);
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     Type *retType = getGEPType(surroundingDevType, devIndices);
@@ -806,10 +816,15 @@ private:
         b.CreateInBoundsGEP(surroundingDevType, surroundingDevPtr, devIndices);
     Value *krefPtr = b.CreateInBoundsGEP(
         devPtr->getType()->getPointerElementType(), devPtr,
-        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-         ConstantInt::get(i32Ty, 6)});
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, DEV_KOBJ_INDEX),
+         ConstantInt::get(i32Ty, KOBJECT_KREF_INDEX)});
     b.CreateCall(krefInit, krefPtr);
     b.CreateCall(krefGet, krefPtr);
+    Value *isInitGEP = b.CreateInBoundsGEP(
+        devPtr->getType()->getPointerElementType(), devPtr,
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, DEV_KOBJ_INDEX),
+         ConstantInt::get(i32Ty, KOBJECT_ISINIT_INDEX)});
+    b.CreateStore(ConstantInt::get(i8Ty, 0), isInitGEP);
     Value *nxtIndex = b.CreateAdd(curIndex, ConstantInt::get(i64Ty, 1));
     b.CreateStore(nxtIndex, index);
     b.CreateCall(updateIndex, {curIndex, targetIndex});
@@ -914,31 +929,6 @@ private:
       call->eraseFromParent();
     }
   }
-
-  // void handleDevresAlloc(Module &m) {
-  //   Function *f = m.getFunction("__devres_alloc_node");
-  //   if (!f)
-  //     return;
-  //   LLVMContext &ctx = m.getContext();
-  //   Attribute attr = Attribute::get(ctx, "devres_release");
-  //   for (CallInst *call : getCalls(f)) {
-  //     Function *releaseFn =
-  //         cast<Function>(call->getArgOperand(0)->stripPointerCasts());
-  //     releaseFn->setLinkage(GlobalVariable::ExternalLinkage);
-  //     releaseFn->addFnAttr(attr);
-  //     ConstantInt *sizeArg = dyn_cast<ConstantInt>(call->getArgOperand(1));
-  //     if (!sizeArg)
-  //       continue;
-  //     uint64_t size = sizeArg->getZExtValue();
-  //     std::string suffix = "devres_alloc." + std::to_string(size);
-  //     std::string fnName = "drvhorn.devres_alloc." + std::to_string(size);
-  //     // Function *devAlloc = getOrCreateDeviceAllocator(m, size, fnName,
-  //     // suffix); IRBuilder<> b(call); Value *newCall =
-  //     b.CreateCall(devAlloc);
-  //     // call->replaceAllUsesWith(newCall);
-  //     // call->eraseFromParent();
-  //   }
-  // }
 
   StructType *getCustomDevType(Module &m, uint64_t size,
                                const SmallVector<uint64_t> &devIndices) {
@@ -1089,8 +1079,7 @@ private:
     b.CreateRet(ret);
   }
 
-#define DEVICE_PARENT_INDEX 1
-  // simulate device_add() by setting the last field (i8) of the device to 0
+  // simulate device_add() by setting the 7th field (i8) of the kobject to 0
   // or 1.
   void handleDeviceAdd(Module &m, Constant *devInit) {
     Function *f = m.getFunction("device_add");
@@ -1111,8 +1100,8 @@ private:
     IRBuilder<> b(blk);
     Value *isAddedGEP = b.CreateInBoundsGEP(
         devType, dev,
-        {ConstantInt::get(i64Ty, 0),
-         ConstantInt::get(i32Ty, devType->getNumElements() - 1)});
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, DEV_KOBJ_INDEX),
+         ConstantInt::get(i32Ty, KOBJECT_ISINIT_INDEX)});
     Value *ndVal = b.CreateCall(ndBool);
     Value *isAdded = b.CreateSelect(ndVal, ConstantInt::get(i8Ty, 1),
                                     ConstantInt::get(i8Ty, 0));
@@ -1122,7 +1111,7 @@ private:
     b.CreateRet(ret);
   }
 
-  // simulate device_del() by setting the last field (i8) of the device to 0.
+  // simulate device_del() by setting the 7th field (i8) of the kobject to 0.
   void handleDeviceDel(Module &m) {
     Function *f = m.getFunction("device_del");
     if (!f)
@@ -1142,8 +1131,8 @@ private:
     IRBuilder<> b(entry);
     Value *isAddedGEP = b.CreateInBoundsGEP(
         devType, dev,
-        {ConstantInt::get(i64Ty, 0),
-         ConstantInt::get(i32Ty, devType->getNumElements() - 1)});
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, DEV_KOBJ_INDEX),
+         ConstantInt::get(i32Ty, KOBJECT_ISINIT_INDEX)});
     b.CreateStore(ConstantInt::get(i8Ty, 0), isAddedGEP);
     b.CreateRetVoid();
   }
