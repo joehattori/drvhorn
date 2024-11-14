@@ -910,14 +910,9 @@ private:
     if (!devInit)
       return;
     Function *alloc = m.getFunction("drvhorn.alloc");
-    DeviceGEPGetter getter(devInit);
+    DeviceGEPGetter getter(alloc);
     for (CallInst *call : getCalls(alloc)) {
-      Optional<SmallVector<uint64_t>> indices = getter.getGEPIndices(call);
-      ConstantInt *sizeArg = dyn_cast<ConstantInt>(call->getArgOperand(0));
-      if (!indices.hasValue() || !sizeArg)
-        continue;
-      uint64_t size = sizeArg->getZExtValue();
-      StructType *allocatedDevType = getCustomDevType(m, size, *indices);
+      StructType *allocatedDevType = getCustomDevType(m, getter, call);
       if (!allocatedDevType)
         continue;
       Function *devAlloc = getOrCreateDeviceAllocator(
@@ -930,21 +925,44 @@ private:
     }
   }
 
-  StructType *getCustomDevType(Module &m, uint64_t size,
-                               const SmallVector<uint64_t> &devIndices) {
+  StructType *getCustomDevType(Module &m, DeviceGEPGetter &getter,
+                               CallInst *call) {
     DataLayout dl(&m);
     LLVMContext &ctx = m.getContext();
     StructType *devType = StructType::getTypeByName(ctx, "struct.device");
+    ConstantInt *sizeArg = dyn_cast<ConstantInt>(call->getArgOperand(0));
+    if (!sizeArg)
+      return nullptr;
+    uint64_t size = sizeArg->getZExtValue();
+    if (StructType *directType = directlyCastedType(call)) {
+      if (dl.getTypeAllocSize(directType) == size &&
+          embedsStruct(directType, devType))
+        return directType;
+    }
+    Optional<SmallVector<uint64_t>> indices = getter.getGEPIndices(call);
+    if (!indices.hasValue())
+      return nullptr;
     for (StructType *st : m.getIdentifiedStructTypes()) {
       if (dl.getTypeAllocSize(st) != size)
         continue;
-      if (hasDeviceAtIndices(st, devIndices, devType))
+      if (hasDeviceAtIndices(st, *indices, devType))
         return st;
     }
     return nullptr;
   }
 
-  bool hasDeviceAtIndices(StructType *st, const SmallVector<uint64_t> &indices,
+  StructType *directlyCastedType(CallInst *alloc) {
+    for (User *user : alloc->users()) {
+      if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(user)) {
+        if (StructType *st = dyn_cast<StructType>(
+                bitcast->getDestTy()->getPointerElementType()))
+          return st;
+      }
+    }
+    return nullptr;
+  }
+
+  bool hasDeviceAtIndices(StructType *st, ArrayRef<uint64_t> indices,
                           StructType *devType) {
     for (uint64_t index : indices) {
       if (st->getNumElements() <= index)
