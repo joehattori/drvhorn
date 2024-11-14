@@ -379,14 +379,13 @@ private:
       return false;
     };
 
-    IntegerType *i64Ty = Type::getInt64Ty(m.getContext());
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
         if (ICmpInst *icmp = dyn_cast<ICmpInst>(&inst)) {
           if (isTarget(icmp)) {
-            icmp->setPredicate(CmpInst::ICMP_ULT);
-            Constant *rhs = ConstantExpr::getIntToPtr(
-                ConstantInt::get(i64Ty, 0), icmp->getOperand(0)->getType());
+            icmp->setPredicate(CmpInst::ICMP_SLT);
+            Constant *rhs =
+                Constant::getNullValue(icmp->getOperand(0)->getType());
             icmp->setOperand(1, rhs);
           }
         }
