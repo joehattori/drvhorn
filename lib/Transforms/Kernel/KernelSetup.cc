@@ -360,17 +360,26 @@ private:
       return false;
     };
 
+    SmallVector<Instruction *> toRemove;
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
         if (ICmpInst *icmp = dyn_cast<ICmpInst>(&inst)) {
           if (isTarget(icmp)) {
-            icmp->setPredicate(CmpInst::ICMP_SLT);
+            icmp->setPredicate(CmpInst::ICMP_EQ);
             Constant *rhs =
                 Constant::getNullValue(icmp->getOperand(0)->getType());
             icmp->setOperand(1, rhs);
           }
         }
+        if (IntToPtrInst *intToPtr = dyn_cast<IntToPtrInst>(&inst)) {
+          Constant *null = Constant::getNullValue(intToPtr->getDestTy());
+          toRemove.push_back(intToPtr);
+          intToPtr->replaceAllUsesWith(null);
+        }
       }
+    }
+    for (Instruction *inst : toRemove) {
+      inst->eraseFromParent();
     }
   }
 
