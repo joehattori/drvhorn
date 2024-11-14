@@ -167,6 +167,27 @@ Function *getOrCreateNdIntFn(Module &m, unsigned bitwidth) {
   return Function::Create(ft, Function::ExternalLinkage, name, &m);
 }
 
+Function *getOrCreateAlloc(Module &m) {
+  if (Function *f = m.getFunction("drvhorn.alloc"))
+    return f;
+  LLVMContext &ctx = m.getContext();
+  Function *ndBool = getOrCreateNdIntFn(m, 1);
+  IntegerType *i8Ty = Type::getInt8Ty(ctx);
+  IntegerType *i64Ty = Type::getInt64Ty(ctx);
+  Function *f =
+      Function::Create(FunctionType::get(i8Ty->getPointerTo(), i64Ty, false),
+                       GlobalValue::ExternalLinkage, "drvhorn.alloc", &m);
+  Argument *size = f->getArg(0);
+  BasicBlock *blk = BasicBlock::Create(ctx, "", f);
+  IRBuilder<> b(blk);
+  Value *cond = b.CreateCall(ndBool, {}, "alloc.cond");
+  AllocaInst *alloca = b.CreateAlloca(i8Ty, size);
+  Value *result = b.CreateSelect(
+      cond, alloca, ConstantPointerNull::get(i8Ty->getPointerTo()));
+  b.CreateRet(result);
+  return f;
+}
+
 static Optional<SmallVector<Value *>>
 revGEPIndicesToStruct(const StructType *s, const Type *target) {
   IntegerType *i32Ty = Type::getInt32Ty(s->getContext());

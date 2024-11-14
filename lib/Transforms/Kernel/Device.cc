@@ -909,8 +909,8 @@ private:
   void handleDeviceAllocation(Module &m, Function *devInit) {
     if (!devInit)
       return;
-    Function *alloc = m.getFunction("drvhorn.alloc");
-    DeviceGEPGetter getter(alloc);
+    Function *alloc = getOrCreateAlloc(m);
+    DeviceGEPGetter getter(devInit);
     for (CallInst *call : getCalls(alloc)) {
       StructType *allocatedDevType = getCustomDevType(m, getter, call);
       if (!allocatedDevType)

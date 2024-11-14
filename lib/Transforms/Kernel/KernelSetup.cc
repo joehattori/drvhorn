@@ -26,7 +26,7 @@ public:
 
   bool runOnModule(Module &m) override {
     m.setModuleInlineAsm("");
-    Function *allocStub = createAllocFn(m);
+    Function *allocStub = getOrCreateAlloc(m);
     stubAllocationFunctions(m, allocStub);
     stubKernelFunctions(m);
     handleKrefAPIs(m);
@@ -52,25 +52,6 @@ public:
 
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
-
-  Function *createAllocFn(Module &m) {
-    LLVMContext &ctx = m.getContext();
-    Function *ndBool = getOrCreateNdIntFn(m, 1);
-    IntegerType *i8Ty = Type::getInt8Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Function *f =
-        Function::Create(FunctionType::get(i8Ty->getPointerTo(), i64Ty, false),
-                         GlobalValue::ExternalLinkage, "drvhorn.alloc", &m);
-    Argument *size = f->getArg(0);
-    BasicBlock *blk = BasicBlock::Create(ctx, "", f);
-    IRBuilder<> b(blk);
-    Value *cond = b.CreateCall(ndBool, {}, "alloc.cond");
-    AllocaInst *alloca = b.CreateAlloca(i8Ty, size);
-    Value *result = b.CreateSelect(
-        cond, alloca, ConstantPointerNull::get(i8Ty->getPointerTo()));
-    b.CreateRet(result);
-    return f;
-  }
 
   void stubAllocationFunctions(Module &m, Function *allocStub) {
     struct AllocFn {
