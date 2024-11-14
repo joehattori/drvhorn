@@ -885,10 +885,9 @@ private:
     f->deleteBody();
     f->setName("drvhorn.device_initialize");
     LLVMContext &ctx = m.getContext();
-    Function *krefInit = m.getFunction("drvhorn.kref_init");
     Function *krefGet = m.getFunction("drvhorn.kref_get");
     StructType *krefType = cast<StructType>(
-        krefInit->getArg(0)->getType()->getPointerElementType());
+        krefGet->getArg(0)->getType()->getPointerElementType());
     Argument *dev = f->getArg(0);
     StructType *devType =
         cast<StructType>(dev->getType()->getPointerElementType());
@@ -896,7 +895,6 @@ private:
     IRBuilder<> b(blk);
     Value *krefGEP = b.CreateInBoundsGEP(
         devType, dev, gepIndicesToStruct(devType, krefType).getValue());
-    b.CreateCall(krefInit, krefGEP);
     b.CreateCall(krefGet, krefGEP);
     b.CreateRetVoid();
     return f;
@@ -985,6 +983,8 @@ private:
     GlobalVariable *storage = globals.storage;
     GlobalVariable *curIndex = globals.curIndex;
     GlobalVariable *targetIndex = globals.targetIndex;
+    Function *krefInit = m.getFunction("drvhorn.kref_init");
+    Type *krefType = krefInit->getArg(0)->getType()->getPointerElementType();
     Function *f =
         Function::Create(FunctionType::get(elemType->getPointerTo(), false),
                          GlobalValue::InternalLinkage, fnName, m);
@@ -997,6 +997,9 @@ private:
     LoadInst *index = b.CreateLoad(i64Ty, curIndex);
     Value *elemPtr = b.CreateInBoundsGEP(storage->getValueType(), storage,
                                          {ConstantInt::get(i64Ty, 0), index});
+    Value *krefPtr = b.CreateInBoundsGEP(
+        elemType, elemPtr, gepIndicesToStruct(elemType, krefType).getValue());
+    b.CreateCall(krefInit, krefPtr);
     Value *withinRange =
         b.CreateICmpULT(index, ConstantInt::get(i64Ty, STORAGE_SIZE));
     Value *cond = b.CreateAnd(ndCond, withinRange);
