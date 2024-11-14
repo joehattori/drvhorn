@@ -254,11 +254,8 @@ void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
   Type *voidTy = Type::getVoidTy(ctx);
   FunctionType *fnType = FunctionType::get(voidTy, false);
   // devresReleaseFn and failFn are filled later in AssertKrefs.cc
-  Function *devresReleaseFn = Function::Create(
-      fnType, GlobalValue::ExternalLinkage, "drvhorn.devres_release", &m);
   Function *failFn = Function::Create(fnType, GlobalValue::ExternalLinkage,
                                       "drvhorn.fail", &m);
-  b.CreateCall(devresReleaseFn);
   b.CreateCall(failFn);
   b.CreateBr(ret);
 }

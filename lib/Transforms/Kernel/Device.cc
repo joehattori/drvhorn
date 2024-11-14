@@ -187,10 +187,9 @@ public:
     Function *devInit = handleDeviceInitialize(m);
     handleDeviceAdd(m, devInit);
     handleDeviceDel(m);
-    handleDevmAddAction(m);
-    handleDevresAlloc(m);
     handleDeviceLinkAdd(m);
     handleDeviceAllocation(m, devInit);
+    handleDevmFunctions(m);
 
     handleOfParsePhandleWithArgs(m, devNodeGetter);
     handleOfPhandleIteratorNext(m, devNodeGetter);
@@ -487,24 +486,21 @@ private:
   }
 
   // devm functions are handled in Devm.cc
-  void handleDevmAddAction(Module &m) {
-    Function *devmAddAction = m.getFunction("__devm_add_action");
-    if (!devmAddAction)
-      return;
-    devmAddAction->deleteBody();
-    devmAddAction->setName("drvhorn.__devm_add_action");
-    Attribute attr = Attribute::get(m.getContext(), "drvhorn.fill_later");
-    devmAddAction->addFnAttr(attr);
-  }
-
-  void handleDevresAlloc(Module &m) {
-    Function *devresAllocNode = m.getFunction("__devres_alloc_node");
-    if (!devresAllocNode)
-      return;
-    devresAllocNode->deleteBody();
-    devresAllocNode->setName("drvhorn.__devres_alloc_node");
-    Attribute attr = Attribute::get(m.getContext(), "drvhorn.fill_later");
-    devresAllocNode->addFnAttr(attr);
+  void handleDevmFunctions(Module &m) {
+    StringRef names[] = {
+        "__devm_add_action",
+        "__devres_alloc_node",
+        "devres_add",
+    };
+    Attribute attr = Attribute::get(m.getContext(), "drvhorn.devm");
+    for (StringRef name : names) {
+      Function *f = m.getFunction(name);
+      if (!f)
+        continue;
+      f->deleteBody();
+      f->setName("drvhorn." + name);
+      f->addFnAttr(attr);
+    }
   }
 
 #define DL_FLAG_AUTOREMOVE_SUPPLIER (1 << 4)

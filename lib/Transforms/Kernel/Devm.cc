@@ -17,7 +17,7 @@ public:
 
   bool runOnModule(Module &m) override {
     handleDevmAddActionCalls(m);
-    handleDevresAllocCalls(m);
+    handleDevresAdd(m);
     return true;
   }
 
@@ -77,39 +77,6 @@ private:
                               Constant::getNullValue(dataType), gvName);
   }
 
-  void handleDevresAllocCalls(Module &m) {
-    Function *f = m.getFunction("drvhorn.__devres_alloc_node");
-    if (!f)
-      return;
-    Function *ndBool = getOrCreateNdIntFn(m, 1);
-    LLVMContext &ctx = m.getContext();
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    PointerType *i8PtrTy = Type::getInt8PtrTy(ctx);
-    for (CallInst *call : getCalls(f)) {
-      Function *release =
-          dyn_cast<Function>(call->getArgOperand(0)->stripPointerCasts());
-      ConstantInt *size = dyn_cast<ConstantInt>(call->getArgOperand(1));
-      if (!release || !size)
-        continue;
-      std::string name = release->getName().str();
-      GlobalVariable *devres =
-          getOrCreateDevresGV(m, name, size->getZExtValue());
-      GlobalVariable *switchGV = getOrCreateDevmSwitch(m, name);
-
-      IRBuilder<> b(call);
-      Value *isOk = b.CreateCall(ndBool);
-      b.CreateStore(isOk, switchGV);
-      Constant *devresPtr = ConstantExpr::getInBoundsGetElementPtr(
-          devres->getValueType(), devres,
-          ArrayRef<Constant *>{ConstantInt::get(i64Ty, 0),
-                               ConstantInt::get(i64Ty, 0)});
-      Value *replace =
-          b.CreateSelect(isOk, devresPtr, Constant::getNullValue(i8PtrTy));
-      call->replaceAllUsesWith(replace);
-      call->eraseFromParent();
-    }
-  }
-
   GlobalVariable *getOrCreateDevresGV(Module &m, std::string name,
                                       uint64_t size) {
     std::string gvName = "drvhorn.devres_alloc." + name;
@@ -119,6 +86,40 @@ private:
     ArrayType *type = ArrayType::get(Type::getInt8Ty(ctx), size);
     return new GlobalVariable(m, type, false, GlobalValue::ExternalLinkage,
                               Constant::getNullValue(type), gvName);
+  }
+
+  void handleDevresAdd(Module &m) {
+    Function *devresAdd = m.getFunction("drvhorn.devres_add");
+    if (!devresAdd)
+      return;
+    Function *alloc = getOrCreateAlloc(m);
+    for (CallInst *call : getCalls(devresAdd)) {
+      CallInst *devresAlloc =
+          dyn_cast<CallInst>(call->getArgOperand(1)->stripPointerCasts());
+      if (!devresAlloc) {
+        errs() << "TODO: devres_add's 2nd argument is not devres_alloc?\n";
+        continue;
+      }
+      ConstantInt *size = dyn_cast<ConstantInt>(devresAlloc->getArgOperand(1));
+      if (!size) {
+        continue;
+      }
+      Function *release = dyn_cast<Function>(
+          devresAlloc->getArgOperand(0)->stripPointerCasts());
+      if (!release)
+        continue;
+
+      IRBuilder<> b(devresAlloc);
+      Value *devresReplace = b.CreateCall(alloc, size, "devres");
+      devresAlloc->replaceAllUsesWith(devresReplace);
+      devresAlloc->eraseFromParent();
+
+      b.SetInsertPoint(call);
+      b.CreateCall(release,
+                   {Constant::getNullValue(release->getArg(0)->getType()),
+                    devresReplace});
+      call->eraseFromParent();
+    }
   }
 };
 

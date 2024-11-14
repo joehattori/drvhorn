@@ -86,12 +86,12 @@ public:
       // track stores last, since some underlyingLoadedPtrs might be inserted
       // during the previous loop.
       while (true) {
-        size_t size = underlyingLoadedPtrs.size();
+        size_t size = underlyingTargetPtrs.size();
         for (Instruction &inst : instructions(f)) {
           if (isa<StoreInst>(inst))
             visit(inst);
         }
-        if (size == underlyingLoadedPtrs.size())
+        if (size == underlyingTargetPtrs.size())
           break;
       }
     }
@@ -116,7 +116,7 @@ public:
     bool isTarget = visitValue(ptr);
     if (isTarget) {
       recordInst(&load);
-      underlyingLoadedPtrs.insert(getUnderlyingObject(ptr));
+      underlyingTargetPtrs.insert(getUnderlyingObject(ptr));
     }
     return isTarget;
   }
@@ -125,7 +125,7 @@ public:
     bool isTarget = isStoreTarget(&store);
     if (isTarget) {
       recordInst(&store);
-      Acceptor acceptor(targets, underlyingLoadedPtrs);
+      Acceptor acceptor(targets, underlyingTargetPtrs);
       acceptor.visit(store);
     }
     return isTarget;
@@ -137,13 +137,15 @@ public:
   bool visitCallInst(CallInst &call) {
     bool isTarget = startingPoints.count(&call);
     if (Function *f = extractCalledFunction(call)) {
-      if (f->hasFnAttribute("drvhorn.fill_later"))
-        isTarget = true;
+      bool isDevm = f->hasFnAttribute("drvhorn.devm");
+      if (isDevm) {
+        underlyingTargetPtrs.insert(&call);
+      }
       for (Argument &arg : f->args()) {
-        if (targetArgs.count(&arg)) {
+        if (targetArgs.count(&arg) || isDevm) {
           isTarget = true;
+          Acceptor acceptor(targets, underlyingTargetPtrs);
           Value *argVal = call.getArgOperand(arg.getArgNo());
-          Acceptor acceptor(targets, underlyingLoadedPtrs);
           acceptor.visitValue(argVal);
         }
       }
@@ -186,11 +188,6 @@ public:
   bool visitAllocaInst(AllocaInst &alloca) {
     recordInst(&alloca);
     return true;
-    // bool isTarget = alloca.isArrayAllocation();
-    // if (isTarget) {
-    //   recordInst(&alloca);
-    // }
-    // return isTarget;
   }
 
   bool visitInstruction(Instruction &inst) {
@@ -206,7 +203,7 @@ private:
   DenseSet<const CallInst *> startingPoints;
   DenseSet<const Argument *> targetArgs;
   DenseSet<const Instruction *> targets;
-  DenseSet<const Value *> underlyingLoadedPtrs;
+  DenseSet<const Value *> underlyingTargetPtrs;
   DenseSet<const Value *> underlyingRetPtrs;
   DenseSet<const Value *> underlyingTargetArgsPtrs;
   DenseMap<const Value *, bool> cache;
@@ -239,8 +236,7 @@ private:
     if (const Argument *arg = dyn_cast<Argument>(v)) {
       return targetArgs.count(arg);
     }
-    return v->getName().startswith("drvhorn.devres_alloc") ||
-           underlyingLoadedPtrs.count(v) || underlyingRetPtrs.count(v) ||
+    return underlyingTargetPtrs.count(v) || underlyingRetPtrs.count(v) ||
            underlyingTargetArgsPtrs.count(v);
   }
 
@@ -624,7 +620,6 @@ private:
       if (getCalls(&f).empty() && !f.getName().equals("main") &&
           // functions below might be used later.
           !f.getName().equals("drvhorn.fail") &&
-          !f.getName().equals("drvhorn.devres_release") &&
           !f.getName().equals("drvhorn.kref_init") &&
           !f.getName().equals("drvhorn.assert_kref"))
         f.deleteBody();
@@ -644,8 +639,9 @@ private:
           if (Function *f = extractCalledFunction(call)) {
             if (f->isDeclaration() && call->user_empty() &&
                 !f->getName().equals("drvhorn.fail") &&
-                !f->getName().equals("drvhorn.devres_release"))
+                !f->hasFnAttribute("drvhorn.devm")) {
               toRemove.push_back(call);
+            }
           }
         }
       }

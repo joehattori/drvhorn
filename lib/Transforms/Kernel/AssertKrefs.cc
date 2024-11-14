@@ -16,7 +16,6 @@ public:
   AssertKrefs() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    buildDevmActionRelease(m);
     buildFail(m);
     return true;
   }
@@ -69,77 +68,6 @@ private:
     Value *krefPtr = b.CreateInBoundsGEP(
         elemType, elem, gepIndicesToStruct(elemType, krefType).getValue());
     b.CreateCall(checker, krefPtr);
-    b.CreateBr(ret);
-
-    b.SetInsertPoint(ret);
-    b.CreateRetVoid();
-    return f;
-  }
-
-  void buildDevmActionRelease(Module &m) {
-    Function *release = m.getFunction("drvhorn.devres_release");
-    static const std::string devmActionPrefix = "drvhorn.devm_action_data.";
-    static const std::string devresAllocPrefix = "drvhorn.devres_alloc.";
-    LLVMContext &ctx = m.getContext();
-    BasicBlock *blk = BasicBlock::Create(ctx, "blk", release);
-    IRBuilder<> b(blk);
-    for (GlobalVariable &gv : m.globals()) {
-      if (gv.getName().startswith(devmActionPrefix)) {
-        StringRef fnName = gv.getName().substr(devmActionPrefix.size());
-        Function *f = getDevmActionDataCleaner(m, gv, fnName, 0);
-        b.CreateCall(f);
-      } else if (gv.getName().startswith(devresAllocPrefix)) {
-        StringRef fnName = gv.getName().substr(devresAllocPrefix.size());
-        Function *f = getDevmActionDataCleaner(m, gv, fnName, 1);
-        b.CreateCall(f);
-      }
-    }
-    b.CreateRetVoid();
-  }
-
-  Function *getDevmActionDataCleaner(Module &m, GlobalVariable &devres,
-                                     StringRef fnName, unsigned devresIndex) {
-    LLVMContext &ctx = m.getContext();
-    Function *f =
-        Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
-                         GlobalValue::ExternalLinkage,
-                         "drvhorn.devm_cleaner." + fnName.str(), &m);
-    GlobalVariable *actionSwitch =
-        m.getGlobalVariable("drvhorn.devm_switch." + fnName.str(), true);
-    Function *release = m.getFunction(fnName);
-    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
-    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
-    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-
-    IRBuilder<> b(entry);
-    LoadInst *enabled =
-        b.CreateLoad(actionSwitch->getValueType(), actionSwitch);
-    b.CreateCondBr(enabled, body, ret);
-
-    b.SetInsertPoint(body);
-    Type *devresType = devres.getValueType();
-    Value *devresPtr;
-    if (devresType->isArrayTy()) {
-      devresPtr = ConstantExpr::getInBoundsGetElementPtr(
-          devresType, &devres,
-          ArrayRef<Constant *>{ConstantInt::get(i64Ty, 0),
-                               ConstantInt::get(i64Ty, 0)});
-    } else {
-      devresPtr = b.CreateLoad(devresType, &devres);
-      if (devresPtr->getType() != release->getArg(devresIndex)->getType())
-        devresPtr =
-            b.CreateBitCast(devresPtr, release->getArg(devresIndex)->getType());
-    }
-
-    SmallVector<Value *> argVals;
-    for (Argument &arg : release->args()) {
-      if (arg.getArgNo() == devresIndex)
-        argVals.push_back(devresPtr);
-      else
-        argVals.push_back(Constant::getNullValue(arg.getType()));
-    }
-    b.CreateCall(release, argVals);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
