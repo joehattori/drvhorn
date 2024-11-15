@@ -159,23 +159,36 @@ private:
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     Type *krefTy = getKrefTy(m);
-    FunctionType *krefPutTy =
-        FunctionType::get(i32Ty, {krefTy->getPointerTo()}, false);
+    FunctionType *releaseTy = FunctionType::get(
+        Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
+    FunctionType *krefPutTy = FunctionType::get(
+        i32Ty, {krefTy->getPointerTo(), releaseTy->getPointerTo()}, false);
     Function *krefPut = Function::Create(
         krefPutTy, GlobalValue::InternalLinkage, "drvhorn.kref_put", &m);
-    BasicBlock *block = BasicBlock::Create(ctx, "", krefPut);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", krefPut);
+    BasicBlock *release = BasicBlock::Create(ctx, "release", krefPut);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", krefPut);
 
-    IRBuilder<> b(block);
+    IRBuilder<> b(entry);
+    Argument *krefPtr = krefPut->getArg(0);
     Value *gep = b.CreateInBoundsGEP(
-        krefTy, krefPut->getArg(0),
+        krefTy, krefPtr,
         {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
          ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
     LoadInst *load = b.CreateLoad(i32Ty, gep);
     Value *sub = b.CreateSub(load, ConstantInt::get(i32Ty, 1));
     b.CreateStore(sub, gep);
     Value *isZero = b.CreateICmpEQ(sub, ConstantInt::get(i32Ty, 0));
-    Value *ret = b.CreateZExt(isZero, i32Ty);
-    b.CreateRet(ret);
+    b.CreateCondBr(isZero, release, ret);
+
+    b.SetInsertPoint(release);
+    b.CreateCall(releaseTy, krefPut->getArg(1), krefPtr);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    Value *retVal = b.CreateZExt(isZero, i32Ty);
+    b.CreateRet(retVal);
+
     return krefPut;
   }
 
@@ -186,11 +199,17 @@ private:
 
     auto replaceCalls = [](Function *orig, Function *newFn) {
       for (CallInst *call : getCalls(orig)) {
-        Value *arg = call->getArgOperand(0);
-        if (arg->getType() != newFn->getArg(0)->getType()) {
-          arg = new BitCastInst(arg, newFn->getArg(0)->getType(), "", call);
+        SmallVector<Value *> args;
+        for (unsigned i = 0; i < newFn->arg_size(); i++) {
+          Type *argType = newFn->getArg(i)->getType();
+          Value *arg = i < call->arg_size() ? call->getArgOperand(i)
+                                            : Constant::getNullValue(argType);
+          if (arg->getType() != argType) {
+            arg = new BitCastInst(arg, argType, "", call);
+          }
+          args.push_back(arg);
         }
-        CallInst *newCall = CallInst::Create(newFn, arg, "", call);
+        CallInst *newCall = CallInst::Create(newFn, args, "", call);
         call->replaceAllUsesWith(newCall);
         call->eraseFromParent();
       }
