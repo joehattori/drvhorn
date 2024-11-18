@@ -23,6 +23,19 @@ index 639c3f395a5a..4c0bbba64ee5 100644
  	}
  
  	return err;
+diff --git a/drivers/cxl/core/pmu.c b/drivers/cxl/core/pmu.c
+index 7684c843e5a5..5d8e06b0ba6e 100644
+--- a/drivers/cxl/core/pmu.c
++++ b/drivers/cxl/core/pmu.c
+@@ -23,7 +23,7 @@ const struct device_type cxl_pmu_type = {
+ 
+ static void remove_dev(void *dev)
+ {
+-	device_del(dev);
++	device_unregister(dev);
+ }
+ 
+ int devm_cxl_pmu_add(struct device *parent, struct cxl_pmu_regs *regs,
 diff --git a/drivers/media/dvb-core/dvbdev.c b/drivers/media/dvb-core/dvbdev.c
 index 305bb21d843c..49f0eb7d0b9d 100644
 --- a/drivers/media/dvb-core/dvbdev.c
@@ -37,7 +50,7 @@ index 305bb21d843c..49f0eb7d0b9d 100644
  	}
  fail:
 diff --git a/drivers/media/platform/samsung/exynos4-is/media-dev.h b/drivers/media/platform/samsung/exynos4-is/media-dev.h
-index 786264cf79dc..3bbcab9eed6b 100644
+index 786264cf79dc..a50e58ab7ef7 100644
 --- a/drivers/media/platform/samsung/exynos4-is/media-dev.h
 +++ b/drivers/media/platform/samsung/exynos4-is/media-dev.h
 @@ -178,8 +178,9 @@ int fimc_md_set_camclk(struct v4l2_subdev *sd, bool on);
@@ -46,9 +59,9 @@ index 786264cf79dc..3bbcab9eed6b 100644
  {
 -	node = of_get_child_by_name(node, FIMC_IS_OF_NODE_NAME);
 -	return node ? of_device_is_available(node) : false;
-+	struct device_node *fimc_is __free(device_node) =
++	struct device_node *child __free(device_node) =
 +		of_get_child_by_name(node, FIMC_IS_OF_NODE_NAME);
-+	return fimc_is ? of_device_is_available(fimc_is) : false;
++	return child ? of_device_is_available(child) : false;
  }
  #else
  #define fimc_md_is_isp_available(node) (false)
@@ -218,6 +231,21 @@ index 596bb11eeba5..1de32ba48589 100644
  put_dev:
  	put_device(anv->dev);
  	return ret;
+diff --git a/drivers/nvme/host/core.c b/drivers/nvme/host/core.c
+index 21783aa2ee8e..87209eff3842 100644
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -2824,6 +2824,10 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
+ 	return 0;
+ 
+ out_put_subsystem:
++	if (!found) {
++		device_del(&subsys->dev);
++		put_device(&subsys->dev);
++	}
+ 	nvme_put_subsystem(subsys);
+ out_unlock:
+ 	mutex_unlock(&nvme_subsystems_lock);
 diff --git a/drivers/soc/qcom/ice.c b/drivers/soc/qcom/ice.c
 index fbab7fe5c652..8c71bd1efaa7 100644
 --- a/drivers/soc/qcom/ice.c
@@ -249,6 +277,145 @@ index fbab7fe5c652..8c71bd1efaa7 100644
  		dev_err(&pdev->dev,
  			"Failed to create device link to consumer %s\n",
  			dev_name(dev));
+diff --git a/drivers/usb/typec/anx7411.c b/drivers/usb/typec/anx7411.c
+index 221604f933a4..8ae5dd1e567e 100644
+--- a/drivers/usb/typec/anx7411.c
++++ b/drivers/usb/typec/anx7411.c
+@@ -28,6 +28,8 @@
+ #include <linux/workqueue.h>
+ #include <linux/power_supply.h>
+ 
++#include "mux.h"
++
+ #define TCPC_ADDRESS1		0x58
+ #define TCPC_ADDRESS2		0x56
+ #define TCPC_ADDRESS3		0x54
+@@ -1020,6 +1022,12 @@ static void anx7411_port_unregister_altmodes(struct typec_altmode **adev)
+ 		}
+ }
+ 
++static void anx7411_port_unregister(struct typec_params *typecp)
++{
++	fwnode_handle_put(typecp->caps.fwnode);
++	anx7411_port_unregister_altmodes(typecp->port_amode);
++}
++
+ static int anx7411_usb_mux_set(struct typec_mux_dev *mux,
+ 			       struct typec_mux_state *state)
+ {
+@@ -1087,6 +1095,7 @@ static void anx7411_unregister_mux(struct anx7411_data *ctx)
+ {
+ 	if (ctx->typec.typec_mux) {
+ 		typec_mux_unregister(ctx->typec.typec_mux);
++		fwnode_handle_put(ctx->typec.typec_mux->dev.fwnode);
+ 		ctx->typec.typec_mux = NULL;
+ 	}
+ }
+@@ -1095,6 +1104,7 @@ static void anx7411_unregister_switch(struct anx7411_data *ctx)
+ {
+ 	if (ctx->typec.typec_switch) {
+ 		typec_switch_unregister(ctx->typec.typec_switch);
++		fwnode_handle_put(ctx->typec.typec_switch->dev.fwnode);
+ 		ctx->typec.typec_switch = NULL;
+ 	}
+ }
+@@ -1153,34 +1163,34 @@ static int anx7411_typec_port_probe(struct anx7411_data *ctx,
+ 	ret = fwnode_property_read_string(fwnode, "power-role", &buf);
+ 	if (ret) {
+ 		dev_err(dev, "power-role not found: %d\n", ret);
+-		return ret;
++		goto put_fwnode;
+ 	}
+ 
+ 	ret = typec_find_port_power_role(buf);
+ 	if (ret < 0)
+-		return ret;
++		goto put_fwnode;
+ 	cap->type = ret;
+ 
+ 	ret = fwnode_property_read_string(fwnode, "data-role", &buf);
+ 	if (ret) {
+ 		dev_err(dev, "data-role not found: %d\n", ret);
+-		return ret;
++		goto put_fwnode;
+ 	}
+ 
+ 	ret = typec_find_port_data_role(buf);
+ 	if (ret < 0)
+-		return ret;
++		goto put_fwnode;
+ 	cap->data = ret;
+ 
+ 	ret = fwnode_property_read_string(fwnode, "try-power-role", &buf);
+ 	if (ret) {
+ 		dev_err(dev, "try-power-role not found: %d\n", ret);
+-		return ret;
++		goto put_fwnode;
+ 	}
+ 
+ 	ret = typec_find_power_role(buf);
+ 	if (ret < 0)
+-		return ret;
++		goto put_fwnode;
+ 	cap->prefer_role = ret;
+ 
+ 	/* Get source pdos */
+@@ -1192,7 +1202,7 @@ static int anx7411_typec_port_probe(struct anx7411_data *ctx,
+ 						     typecp->src_pdo_nr);
+ 		if (ret < 0) {
+ 			dev_err(dev, "source cap validate failed: %d\n", ret);
+-			return -EINVAL;
++			goto put_fwnode;
+ 		}
+ 
+ 		typecp->caps_flags |= HAS_SOURCE_CAP;
+@@ -1206,7 +1216,7 @@ static int anx7411_typec_port_probe(struct anx7411_data *ctx,
+ 						     typecp->sink_pdo_nr);
+ 		if (ret < 0) {
+ 			dev_err(dev, "sink cap validate failed: %d\n", ret);
+-			return -EINVAL;
++			goto put_fwnode;
+ 		}
+ 
+ 		for (i = 0; i < typecp->sink_pdo_nr; i++) {
+@@ -1250,13 +1260,18 @@ static int anx7411_typec_port_probe(struct anx7411_data *ctx,
+ 		ret = PTR_ERR(ctx->typec.port);
+ 		ctx->typec.port = NULL;
+ 		dev_err(dev, "Failed to register type c port %d\n", ret);
+-		return ret;
++		goto put_fwnode;
+ 	}
+ 
+ 	typec_port_register_altmodes(ctx->typec.port, NULL, ctx,
+ 				     ctx->typec.port_amode,
+ 				     MAX_ALTMODE);
+ 	return 0;
++
++put_fwnode:
++	fwnode_handle_put(fwnode);
++
++	return ret;
+ }
+ 
+ static int anx7411_typec_check_connection(struct anx7411_data *ctx)
+@@ -1528,7 +1543,7 @@ static int anx7411_i2c_probe(struct i2c_client *client)
+ 
+ free_typec_port:
+ 	typec_unregister_port(plat->typec.port);
+-	anx7411_port_unregister_altmodes(plat->typec.port_amode);
++	anx7411_port_unregister(&plat->typec);
+ 
+ free_typec_switch:
+ 	anx7411_unregister_switch(plat);
+@@ -1563,7 +1578,7 @@ static void anx7411_i2c_remove(struct i2c_client *client)
+ 	if (plat->typec.port)
+ 		typec_unregister_port(plat->typec.port);
+ 
+-	anx7411_port_unregister_altmodes(plat->typec.port_amode);
++	anx7411_port_unregister(&plat->typec);
+ }
+ 
+ static const struct i2c_device_id anx7411_id[] = {
 diff --git a/drivers/usb/typec/class.c b/drivers/usb/typec/class.c
 index 9c1dbf3c00e0..1d59d3484e7b 100644
 --- a/drivers/usb/typec/class.c
