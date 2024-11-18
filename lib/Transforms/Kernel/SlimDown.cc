@@ -122,7 +122,7 @@ public:
   }
 
   bool visitStoreInst(StoreInst &store) {
-    bool isTarget = isStoreTarget(&store);
+    bool isTarget = isStoreTarget(store);
     if (isTarget) {
       recordInst(&store);
       Acceptor acceptor(targets, underlyingTargetPtrs);
@@ -231,8 +231,16 @@ private:
     }
   }
 
-  bool isStoreTarget(const StoreInst *store) {
-    const Value *v = getUnderlyingObject(store->getPointerOperand());
+  bool isStoreTarget(const StoreInst &store) {
+    const Value *v = getUnderlyingObject(store.getPointerOperand());
+    if (StructType *baseType =
+            dyn_cast<StructType>(v->getType()->getPointerElementType())) {
+      StructType *deviceType = StructType::getTypeByName(
+          store.getModule()->getContext(), "struct.device");
+      bool isDevice = embedsStruct(baseType, deviceType);
+      if (isDevice)
+        return false;
+    }
     if (const Argument *arg = dyn_cast<Argument>(v)) {
       return targetArgs.count(arg);
     }
