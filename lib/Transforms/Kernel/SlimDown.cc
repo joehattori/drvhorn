@@ -423,6 +423,7 @@ public:
 
     sliceModule(m);
     runDCEPasses(m, 10);
+    replaceReturnedConstIntToPtr(m);
     removeNotCalledFunctions(m);
     runDCEPasses(m, 20);
     return true;
@@ -576,6 +577,27 @@ private:
       }
       for (Instruction *inst : toRemoveInstructions) {
         inst->eraseFromParent();
+      }
+    }
+  }
+
+  // ERR_PTR should be replaced with null
+  void replaceReturnedConstIntToPtr(Module &m) {
+    auto isConstIntToPtr = [](Value *v) {
+      ConstantExpr *ce = dyn_cast<ConstantExpr>(v);
+      return ce && ce->getOpcode() == Instruction::IntToPtr;
+    };
+
+    for (Function &f : m) {
+      for (Instruction &inst : instructions(f)) {
+        if (PHINode *phi = dyn_cast<PHINode>(&inst)) {
+          for (Value *v : phi->incoming_values()) {
+            if (isConstIntToPtr(v)) {
+              Value *null = Constant::getNullValue(v->getType());
+              v->replaceAllUsesWith(null);
+            }
+          }
+        }
       }
     }
   }
