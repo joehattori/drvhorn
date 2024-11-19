@@ -311,8 +311,23 @@ private:
 
   void buildStartingPoint(const Module &m,
                           const DenseSet<const CallInst *> &ignoreList) {
-    if (const Function *f = m.getFunction("drvhorn.update_index")) {
-      recordCallers(f, ignoreList);
+    DenseSet<const Function *> visited;
+    SmallVector<const Function *> workList;
+    for (const Function &f : m) {
+      if (f.hasFnAttribute("drvhorn.checkpoint"))
+        workList.push_back(&f);
+    }
+    while (!workList.empty()) {
+      const Function *f = workList.back();
+      workList.pop_back();
+      if (!visited.insert(f).second)
+        continue;
+      for (const CallInst *call : getCalls(f)) {
+        if (ignoreList.contains(call))
+          continue;
+        startingPoints.insert(call);
+        workList.push_back(call->getFunction());
+      }
     }
   }
 

@@ -303,13 +303,15 @@ private:
     Function *f = Function::Create(
         FunctionType::get(devNodeType->getPointerTo(), false),
         GlobalValue::PrivateLinkage, "drvhorn.gen_device_node", &m);
+    LLVMContext &ctx = m.getContext();
+    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
+    f->addFnAttr(attr);
     StorageGlobals globals =
         getStorageAndIndex(m, devNodeType, devNodeType->getName().str());
     GlobalVariable *storage = globals.storage;
     GlobalVariable *index = globals.curIndex;
     GlobalVariable *targetIndex = globals.targetIndex;
 
-    LLVMContext &ctx = m.getContext();
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
     BasicBlock *body = BasicBlock::Create(ctx, "body", f);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
@@ -782,6 +784,8 @@ private:
     Function *f =
         Function::Create(FunctionType::get(retType->getPointerTo(), false),
                          GlobalValue::PrivateLinkage, fnName, &m);
+    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
+    f->addFnAttr(attr);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
     BasicBlock *body = BasicBlock::Create(ctx, "body", f);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
@@ -988,6 +992,8 @@ private:
     Function *f =
         Function::Create(FunctionType::get(elemType->getPointerTo(), false),
                          GlobalValue::InternalLinkage, fnName, m);
+    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
+    f->addFnAttr(attr);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
     BasicBlock *body = BasicBlock::Create(ctx, "body", f);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
