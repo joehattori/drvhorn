@@ -44,6 +44,8 @@ public:
     // handleStrNCmp(M);
     handleStrChr(m);
 
+    handleCpuPossibleMask(m);
+
     renameDrvhornFunctions(m);
     return true;
   }
@@ -686,6 +688,35 @@ private:
 
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
+  }
+
+  void handleCpuPossibleMask(Module &m) {
+    GlobalVariable *cpuMask = m.getGlobalVariable("__cpu_possible_mask");
+    if (!cpuMask)
+      return;
+    SmallVector<Instruction *> toRemove;
+    SmallVector<User *> users;
+    DenseSet<User *> visited;
+    users.push_back(cpuMask);
+    while (!users.empty()) {
+      User *user = users.pop_back_val();
+      if (!visited.insert(user).second)
+        continue;
+      if (LoadInst *load = dyn_cast<LoadInst>(user)) {
+        FunctionCallee ndFn = getNondetFn(load->getType(), m);
+        IRBuilder<> b(load);
+        Value *nd = b.CreateCall(ndFn);
+        load->replaceAllUsesWith(nd);
+        toRemove.push_back(load);
+      } else {
+        for (User *u : user->users())
+          users.push_back(u);
+      }
+    }
+
+    for (Instruction *inst : toRemove) {
+      inst->eraseFromParent();
+    }
   }
 
   FunctionCallee makeNewNondetFn(Module &m, Type &type, unsigned num,

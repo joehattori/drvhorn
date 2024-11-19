@@ -28,6 +28,39 @@ public:
   }
 
 private:
+  void buildFail(Module &m) {
+    Function *fail = m.getFunction("drvhorn.fail");
+    Function *checker = m.getFunction("drvhorn.assert_kref");
+    Type *krefType = checker->getArg(0)->getType()->getPointerElementType();
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
+    IRBuilder<> b(blk);
+
+    static const std::string storagePrefix = "drvhorn.storage.";
+    for (GlobalVariable &gv : m.globals()) {
+      if (gv.getName().startswith(storagePrefix)) {
+        StringRef suffix = gv.getName().substr(storagePrefix.size());
+        GlobalVariable *targetIndex =
+            m.getGlobalVariable("drvhorn.target_index." + suffix.str(), true);
+        Function *f = genAssertFunction(m, gv, targetIndex, suffix);
+        b.CreateCall(f);
+      } else if (gv.getName().startswith("drvhorn.kref.")) {
+        Type *type = gv.getValueType();
+        Value *krefPtr;
+        if (equivTypes(type, krefType->getPointerTo())) {
+          krefPtr = b.CreateLoad(type, &gv);
+        } else {
+          krefPtr = b.CreateInBoundsGEP(
+              type, &gv,
+              gepIndicesToStruct(cast<StructType>(type), krefType).getValue());
+        }
+        b.CreateCall(checker, krefPtr);
+      }
+    }
+
+    b.CreateRetVoid();
+  }
+
   Function *genAssertFunction(Module &m, GlobalVariable &storage,
                               GlobalVariable *targetIndex, StringRef suffix) {
     Function *checker = m.getFunction("drvhorn.assert_kref");
@@ -73,39 +106,6 @@ private:
     b.SetInsertPoint(ret);
     b.CreateRetVoid();
     return f;
-  }
-
-  void buildFail(Module &m) {
-    Function *fail = m.getFunction("drvhorn.fail");
-    Function *checker = m.getFunction("drvhorn.assert_kref");
-    Type *krefType = checker->getArg(0)->getType()->getPointerElementType();
-    LLVMContext &ctx = m.getContext();
-    BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
-    IRBuilder<> b(blk);
-
-    static const std::string storagePrefix = "drvhorn.storage.";
-    for (GlobalVariable &gv : m.globals()) {
-      if (gv.getName().startswith(storagePrefix)) {
-        StringRef suffix = gv.getName().substr(storagePrefix.size());
-        GlobalVariable *targetIndex =
-            m.getGlobalVariable("drvhorn.target_index." + suffix.str(), true);
-        Function *f = genAssertFunction(m, gv, targetIndex, suffix);
-        b.CreateCall(f);
-      } else if (gv.getName().startswith("drvhorn.kref.")) {
-        Type *type = gv.getValueType();
-        Value *krefPtr;
-        if (equivTypes(type, krefType->getPointerTo())) {
-          krefPtr = b.CreateLoad(type, &gv);
-        } else {
-          krefPtr = b.CreateInBoundsGEP(
-              type, &gv,
-              gepIndicesToStruct(cast<StructType>(type), krefType).getValue());
-        }
-        b.CreateCall(checker, krefPtr);
-      }
-    }
-
-    b.CreateRetVoid();
   }
 
   Function *deviceChecker(Module &m, StructType *devType) {

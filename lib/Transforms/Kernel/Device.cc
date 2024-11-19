@@ -197,6 +197,8 @@ public:
 
     stubFwnodeConnectionFindMatch(m);
     stubFwnodeConnectionFindMatches(m);
+
+    handleCpufreqGet(m);
     return true;
   }
 
@@ -1209,6 +1211,62 @@ private:
     PHINode *retPhi = b.CreatePHI(i32Ty, 2);
     retPhi->addIncoming(ConstantInt::get(i32Ty, -EINVAL), entry);
     retPhi->addIncoming(retVal, body);
+    b.CreateRet(retPhi);
+  }
+
+  // TODO: implement in a different file or rename this file.
+  void handleCpufreqGet(Module &m) {
+    Function *f = m.getFunction("cpufreq_cpu_get");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.cpufreq_cpu_get");
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    Function *updateIndex = m.getFunction("drvhorn.update_index");
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    StructType *policyType =
+        cast<StructType>(f->getReturnType()->getPointerElementType());
+    StorageGlobals globals =
+        getStorageAndIndex(m, policyType, "cpufreq_policy");
+    GlobalVariable *storage = globals.storage;
+    GlobalVariable *curIndex = globals.curIndex;
+    GlobalVariable *targetIndex = globals.targetIndex;
+    Function *krefInit = m.getFunction("drvhorn.kref_init");
+    Function *krefGet = m.getFunction("drvhorn.kref_get");
+    Type *krefType = krefInit->getArg(0)->getType()->getPointerElementType();
+    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
+    f->addFnAttr(attr);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    CallInst *ndCond = b.CreateCall(ndBool);
+    LoadInst *index = b.CreateLoad(i64Ty, curIndex);
+    Value *elemPtr = b.CreateInBoundsGEP(storage->getValueType(), storage,
+                                         {ConstantInt::get(i64Ty, 0), index});
+    Value *krefPtr = b.CreateInBoundsGEP(
+        policyType, elemPtr,
+        gepIndicesToStruct(policyType, krefType).getValue());
+    b.CreateCall(krefInit, krefPtr);
+    b.CreateCall(krefGet, krefPtr);
+    Value *withinRange =
+        b.CreateICmpULT(index, ConstantInt::get(i64Ty, STORAGE_SIZE));
+    Value *cond = b.CreateAnd(ndCond, withinRange);
+    b.CreateCondBr(cond, body, ret);
+
+    b.SetInsertPoint(body);
+    Value *nxtIndex = b.CreateAdd(index, ConstantInt::get(i64Ty, 1));
+    b.CreateStore(nxtIndex, curIndex);
+    b.CreateCall(updateIndex, {index, targetIndex});
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *retPhi = b.CreatePHI(policyType->getPointerTo(), 2);
+    retPhi->addIncoming(Constant::getNullValue(policyType->getPointerTo()),
+                        entry);
+    retPhi->addIncoming(elemPtr, body);
     b.CreateRet(retPhi);
   }
 };
