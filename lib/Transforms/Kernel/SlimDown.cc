@@ -474,7 +474,6 @@ private:
       if (f.isDeclaration() || f.getName().equals("main") ||
           f.getName().startswith("__VERIFIER_") ||
           // might be used later
-          f.getName().equals("drvhorn.assert_kref") ||
           f.getName().equals("drvhorn.kref_init") ||
           f.getName().equals("drvhorn.malloc"))
         continue;
@@ -665,8 +664,7 @@ private:
       if (getCalls(&f).empty() && !f.getName().equals("main") &&
           // functions below might be used later.
           !f.getName().equals("drvhorn.fail") &&
-          !f.getName().equals("drvhorn.kref_init") &&
-          !f.getName().equals("drvhorn.assert_kref"))
+          !f.getName().equals("drvhorn.kref_init"))
         f.deleteBody();
     }
   }

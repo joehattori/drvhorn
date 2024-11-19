@@ -16,7 +16,8 @@ public:
   AssertKrefs() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    buildFail(m);
+    Function *checker = buildKrefChecker(m);
+    buildFail(m, checker);
     return true;
   }
 
@@ -28,9 +29,42 @@ public:
   }
 
 private:
-  void buildFail(Module &m) {
+  Function *buildKrefChecker(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+    StructType *krefType = StructType::getTypeByName(ctx, "struct.kref");
+    SeaBuiltinsInfo &sbi = getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
+    Function *errFn = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
+    Function *f = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), krefType->getPointerTo(),
+                          false),
+        GlobalValue::PrivateLinkage, "drvhorn.assert_kref", &m);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *err = BasicBlock::Create(ctx, "err", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    Argument *kref = f->getArg(0);
+    Value *counterGEP = b.CreateInBoundsGEP(
+        krefType, kref,
+        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
+         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+    Value *counter = b.CreateLoad(i32Ty, counterGEP);
+    Value *equals = b.CreateICmpEQ(counter, ConstantInt::get(i32Ty, 1));
+    b.CreateCondBr(equals, ret, err);
+
+    b.SetInsertPoint(err);
+    b.CreateCall(errFn);
+    b.CreateUnreachable();
+
+    b.SetInsertPoint(ret);
+    b.CreateRetVoid();
+    return f;
+  }
+
+  void buildFail(Module &m, Function *checker) {
     Function *fail = m.getFunction("drvhorn.fail");
-    Function *checker = m.getFunction("drvhorn.assert_kref");
     Type *krefType = checker->getArg(0)->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
@@ -42,7 +76,7 @@ private:
         StringRef suffix = gv.getName().substr(storagePrefix.size());
         GlobalVariable *targetIndex =
             m.getGlobalVariable("drvhorn.target_index." + suffix.str(), true);
-        Function *f = genAssertFunction(m, gv, targetIndex, suffix);
+        Function *f = genAssertFunction(m, checker, gv, targetIndex, suffix);
         b.CreateCall(f);
       } else if (gv.getName().startswith("drvhorn.kref.")) {
         Type *type = gv.getValueType();
@@ -61,9 +95,9 @@ private:
     b.CreateRetVoid();
   }
 
-  Function *genAssertFunction(Module &m, GlobalVariable &storage,
+  Function *genAssertFunction(Module &m, Function *checker,
+                              GlobalVariable &storage,
                               GlobalVariable *targetIndex, StringRef suffix) {
-    Function *checker = m.getFunction("drvhorn.assert_kref");
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     StructType *deviceType = StructType::getTypeByName(ctx, "struct.device");

@@ -84,13 +84,6 @@ void __DRVHORN_update_index(long long int index, long long int *target_index) {
     *target_index = index;
 }
 
-void __DRVHORN_assert_kref(const struct kref *kref) {
-  if (kref) {
-    int counter = kref->refcount.refs.counter;
-    sassert(counter == 1);
-  }
-}
-
 static void klist_children_get(struct klist_node *n)
 {
   struct device_private *p = to_device_private_parent(n);

@@ -17,12 +17,9 @@ public:
 
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
-    Function *checker = m.getFunction("drvhorn.assert_kref");
-    StructType *krefType = cast<StructType>(
-        checker->getArg(0)->getType()->getPointerElementType());
+    StructType *krefType = StructType::getTypeByName(ctx, "struct.kref");
 
     bool changed = false;
-
     Function *prelude = Function::Create(
         FunctionType::get(Type::getVoidTy(ctx), false),
         GlobalValue::LinkageTypes::PrivateLinkage, "drvhorn.prelude", m);
