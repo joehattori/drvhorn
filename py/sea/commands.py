@@ -429,7 +429,7 @@ class Seapp(sea.LimitedCmd):
             argv.append ('--kernel-debug')
 
         if self._list_ops:
-            argv.append ('--list-ops=file_operations,platform_driver,dsa_switch_ops')
+            argv.append ('--list-ops=file_operations,platform_driver,dsa_switch_ops,i2c_driver')
 
         if args.out_ll:
             argv.append('--kernel-out-ll={0}'.format(args.out_ll))
