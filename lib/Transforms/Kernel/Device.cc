@@ -185,11 +185,13 @@ public:
     handleFwnodeFinders(m, devNodeGetter);
     handleFindDevice(m);
     Function *devInit = handleDeviceInitialize(m);
-    handleDeviceAdd(m, devInit);
+    Function *devAdd = handleDeviceAdd(m, devInit);
     handleDeviceDel(m);
     handleDeviceLinkAdd(m);
     handleDeviceAllocation(m, devInit);
     handleDevmFunctions(m);
+    handleCDevDeviceAdd(m, devAdd);
+    handleCDevDeviceAPIs(m);
 
     handleOfParsePhandleWithArgs(m, devNodeGetter);
     handleOfPhandleIteratorNext(m, devNodeGetter);
@@ -504,6 +506,35 @@ private:
       f->deleteBody();
       f->setName("drvhorn." + name);
       f->addFnAttr(attr);
+    }
+  }
+
+  void handleCDevDeviceAdd(Module &m, Function *devAdd) {
+    Function *f = m.getFunction("cdev_device_add");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.cdev_device_add");
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    Value *dev = f->getArg(1);
+    IRBuilder<> b(entry);
+    if (dev->getType() != devAdd->getArg(0)->getType())
+      dev = b.CreateBitCast(dev, devAdd->getArg(0)->getType());
+    Value *v = b.CreateCall(devAdd, dev);
+    b.CreateRet(v);
+  }
+
+  void handleCDevDeviceAPIs(Module &m) {
+    StringRef names[] = {
+      "cdev_device_del",
+    };
+    for (StringRef name : names) {
+      Function *f = m.getFunction(name);
+      if (!f)
+        continue;
+      f->deleteBody();
+      f->setName("drvhorn." + name);
     }
   }
 
@@ -1106,10 +1137,10 @@ private:
 
   // simulate device_add() by setting the 7th field (i8) of the kobject to 0
   // or 1.
-  void handleDeviceAdd(Module &m, Constant *devInit) {
+  Function *handleDeviceAdd(Module &m, Constant *devInit) {
     Function *f = m.getFunction("device_add");
     if (!f)
-      return;
+      return nullptr;
     f->deleteBody();
     f->setName("drvhorn.device_add");
     LLVMContext &ctx = m.getContext();
@@ -1134,6 +1165,7 @@ private:
     Value *ret = b.CreateSelect(ndVal, ConstantInt::get(i32Ty, 0),
                                 ConstantInt::get(i32Ty, -EINVAL));
     b.CreateRet(ret);
+    return f;
   }
 
   // simulate device_del() by setting the 7th field (i8) of the kobject to 0.
