@@ -32,7 +32,7 @@ private:
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
     ConstantInt *zero = ConstantInt::get(i32Ty, 0);
-    ConstantInt *enomem = ConstantInt::get(i32Ty, -12);
+    ConstantInt *enomem = ConstantInt::get(i32Ty, -ENOMEM);
     for (CallInst *call : getCalls(devmAddAction)) {
       Function *action =
           dyn_cast<Function>(call->getArgOperand(1)->stripPointerCasts());
@@ -43,49 +43,28 @@ private:
         continue;
       }
       std::string name = action->getName().str();
-      GlobalVariable *switchGV = getOrCreateDevmSwitch(m, name);
       Value *data = call->getArgOperand(2);
-      GlobalVariable *dataGV =
-          getOrCreateDevmActionData(m, name, data->getType());
 
       IRBuilder<> b(call);
-      Value *isOk = b.CreateCall(ndBool);
+      BasicBlock *okBlk = BasicBlock::Create(ctx, "ok", call->getFunction());
+      CallInst *isOk = b.CreateCall(ndBool);
       Value *ret = b.CreateSelect(isOk, zero, enomem);
-      b.CreateStore(isOk, switchGV);
-      b.CreateStore(data, dataGV);
+      BasicBlock *orig = isOk->getParent();
+      BasicBlock *nxt = orig->splitBasicBlock(call);
+      Instruction *term = orig->getTerminator();
+
+      b.SetInsertPoint(term);
+      BranchInst *br = b.CreateCondBr(isOk, okBlk, nxt);
+      term->replaceAllUsesWith(br);
+
+      b.SetInsertPoint(okBlk);
+      b.CreateCall(action, data);
+      b.CreateBr(nxt);
+
       call->replaceAllUsesWith(ret);
       call->eraseFromParent();
+      term->eraseFromParent();
     }
-  }
-
-  GlobalVariable *getOrCreateDevmSwitch(Module &m, std::string fnName) {
-    std::string gvName = "drvhorn.devm_switch." + fnName;
-    if (GlobalVariable *gv = m.getGlobalVariable(gvName, true))
-      return gv;
-    LLVMContext &ctx = m.getContext();
-    return new GlobalVariable(m, Type::getInt1Ty(ctx), false,
-                              GlobalValue::ExternalLinkage,
-                              ConstantInt::getFalse(ctx), gvName);
-  }
-
-  GlobalVariable *getOrCreateDevmActionData(Module &m, std::string fnName,
-                                            Type *dataType) {
-    std::string gvName = "drvhorn.devm_action_data." + fnName;
-    if (GlobalVariable *gv = m.getGlobalVariable(gvName, true))
-      return gv;
-    return new GlobalVariable(m, dataType, false, GlobalValue::ExternalLinkage,
-                              Constant::getNullValue(dataType), gvName);
-  }
-
-  GlobalVariable *getOrCreateDevresGV(Module &m, std::string name,
-                                      uint64_t size) {
-    std::string gvName = "drvhorn.devres_alloc." + name;
-    if (GlobalVariable *gv = m.getGlobalVariable(gvName, true))
-      return gv;
-    LLVMContext &ctx = m.getContext();
-    ArrayType *type = ArrayType::get(Type::getInt8Ty(ctx), size);
-    return new GlobalVariable(m, type, false, GlobalValue::ExternalLinkage,
-                              Constant::getNullValue(type), gvName);
   }
 
   void handleDevresAdd(Module &m) {
