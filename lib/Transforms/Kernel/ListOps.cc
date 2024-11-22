@@ -28,12 +28,10 @@ public:
         errs() << "No struct type found for " << op << "\n";
         continue;
       }
-      outs() << op << ":\n";
       const SmallVector<StringRef> &names = getOpNames(m, s);
       for (StringRef name : names) {
-        outs() << "\t" << name << "\n";
+        outs() << op << " " << name << "\n";
       }
-      outs() << "\n";
     }
     return false;
   }

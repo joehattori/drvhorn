@@ -8,6 +8,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
 
@@ -35,9 +36,10 @@ public:
     unsigned int counter = 0;
     if (!outLLFileName.empty()) {
       std::error_code ec;
-      raw_fd_ostream fileOs(outLLFileName, ec);
+      raw_fd_ostream fileOs(outLLFileName, ec, sys::fs::CD_OpenAlways);
       m.setModuleInlineAsm("");
       m.print(fileOs, nullptr);
+      fileOs.close();
     }
 
     for (Function &F : m) {

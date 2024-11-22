@@ -29,6 +29,7 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include "llvm/IR/Verifier.h"
 
@@ -296,8 +297,8 @@ static llvm::cl::opt<bool> Kernel("kernel",
                                   llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
-    KernelDebug("kernel-debug", llvm::cl::desc("Target the Linux kernel"),
-                llvm::cl::init(false));
+    KernelExec("kernel-exec", llvm::cl::desc("Run the kernel verification"),
+               llvm::cl::init(false));
 
 static llvm::cl::opt<std::string>
     AcpiDriver("acpi-driver", llvm::cl::desc("Target ACPI drivers"),
@@ -333,27 +334,56 @@ static llvm::cl::opt<std::string>
                 llvm::cl::desc("Output file for the kernel LLVM IR"),
                 llvm::cl::init(""));
 
-// removes extension from filename if there is one
-std::string getFileName(const std::string &str) {
-  std::string filename = str;
-  size_t lastdot = str.find_last_of(".");
-  if (lastdot != std::string::npos)
-    filename = str.substr(0, lastdot);
-  return filename;
-}
+static llvm::cl::opt<std::string> DriverList("driver-list",
+                                             llvm::cl::desc("List of drivers"),
+                                             llvm::cl::init(""));
 
 namespace {
+enum class DriverType {
+  SpecificFunction,
+  FileOperations,
+  PlatformDriver,
+  I2CDriver,
+  DsaSwitchOps,
+  None
+};
+
+llvm::SmallVector<std::pair<DriverType, std::string>>
+parseDriverList(llvm::StringRef path) {
+  llvm::SmallVector<std::pair<DriverType, std::string>> drivers;
+  std::ifstream file(path.str());
+  if (!file.is_open()) {
+    llvm::errs() << "Unable to open driver list file\n";
+    std::exit(1);
+  }
+  std::string line;
+  while (std::getline(file, line)) {
+    std::istringstream iss(line);
+    std::string driver;
+    std::string name;
+    if (!(iss >> driver >> name)) {
+      llvm::errs() << "Invalid driver list file\n";
+      std::exit(1);
+    }
+    if (driver == "file_operations")
+      drivers.push_back({DriverType::FileOperations, name});
+    else if (driver == "platform_driver")
+      drivers.push_back({DriverType::PlatformDriver, name});
+    else if (driver == "i2c_driver")
+      drivers.push_back({DriverType::I2CDriver, name});
+    else if (driver == "dsa_switch_ops")
+      drivers.push_back({DriverType::DsaSwitchOps, name});
+  }
+  file.close();
+  return drivers;
+}
+
 /// Simple wrapper around llvm::legacy::PassManager for easier debugging.
 class SeaPassManagerWrapper {
   llvm::legacy::PassManager m_PM;
   int m_verifierInstanceID = 0;
 
 public:
-  SeaPassManagerWrapper() {
-    if (VerifyAfterAll)
-      m_PM.add(seahorn::createDebugVerifierPass(++m_verifierInstanceID,
-                                                "Initial Verifier Pass"));
-  }
   void add(llvm::Pass *pass) {
     m_PM.add(pass);
 
@@ -365,6 +395,374 @@ public:
   void run(llvm::Module &m) { m_PM.run(m); }
 
   llvm::legacy::PassManager &getPassManager() { return m_PM; }
+
+  SeaPassManagerWrapper(llvm::PassRegistry &Registry,
+                        std::unique_ptr<llvm::ToolOutputFile> &output,
+                        DriverType driverType, llvm::StringRef name,
+                        bool onlyKernelPP, llvm::StringRef kernelOut) {
+    if (VerifyAfterAll)
+      m_PM.add(seahorn::createDebugVerifierPass(++m_verifierInstanceID,
+                                                "Initial Verifier Pass"));
+    add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
+    add(seahorn::createSeaBuiltinsWrapperPass());
+    if (ReplaceLoopsWithNDFuncs) {
+      add(llvm_seahorn::createSeaLoopExtractorPass());
+    }
+
+    if (Kernel) {
+      if (!ListOps.empty()) {
+        add(seahorn::createListOpsPass(ListOps));
+        return;
+      }
+
+      add(seahorn::createKernelSetupPass());
+      add(llvm::createVerifierPass(true));
+      add(seahorn::createHandleDevicesPass());
+      add(llvm::createVerifierPass(true));
+      // TODO: merge these passes into one.
+      switch (driverType) {
+      case DriverType::SpecificFunction:
+        add(seahorn::createSpecificFunctionPass(name));
+        break;
+      case DriverType::FileOperations:
+        add(seahorn::createFileOperationsSetupPass(name));
+        break;
+      case DriverType::PlatformDriver:
+        add(seahorn::createPlatformDriverPass(name));
+        break;
+      case DriverType::I2CDriver:
+        add(seahorn::createI2CDriverPass(name));
+        break;
+      case DriverType::DsaSwitchOps:
+        add(seahorn::createDsaSwitchOpsPass(name));
+        break;
+      case DriverType::None:
+        llvm::errs() << "Unknown driver target\n";
+        std::exit(1);
+      }
+      add(seahorn::createPromoteVerifierCallsPass());
+      add(seahorn::createSlimDownPass());
+      add(seahorn::createHandleDevmPass());
+      add(seahorn::createHandleInlineAsmPass());
+      add(seahorn::createInitGlobalKrefsPass());
+      add(seahorn::createAssertKrefsPass());
+      add(llvm::createVerifierPass(true));
+      add(seahorn::createAssumeNonNullPass());
+      /*add(seahorn::createIntoBinaryPass());*/
+      add(seahorn::createHandleNondetMallocPass());
+      add(llvm::createCFGSimplificationPass());
+      add(llvm::createVerifierPass(true));
+      add(seahorn::createKernelDebugPass(kernelOut));
+      if (onlyKernelPP)
+        return;
+    }
+
+    if (RenameNondet)
+      // -- ren-nondet utility pass
+      add(seahorn::createRenameNondetPass());
+    else if (StripShadowMem)
+      // -- strips shadows. Useful for debugging
+      add(seahorn::createStripShadowMemPass());
+    else if (KleeInternalize)
+      // -- internalize external definitions to make klee happy
+      // -- useful for preparing seahorn bitcode to be used with KLEE
+      add(seahorn::createKleeInternalizePass());
+    else if (WrapMem)
+      // -- wraps memory instructions with a custom function
+      // -- not actively used. part of cex replaying
+      add(seahorn::createWrapMemPass());
+    else if (OnlyStripExtern) {
+      // -- remove useless declarations
+      add(seahorn::createDevirtualizeFunctionsPass());
+      add(seahorn::createStripUselessDeclarationsPass());
+    } else if (MixedSem) {
+      // -- apply mixed semantics
+      assert(LowerSwitch && "Lower switch must be enabled");
+      add(llvm::createLowerSwitchPass());
+      add(seahorn::createPromoteVerifierCallsPass());
+      add(seahorn::createCanFailPass());
+      add(seahorn::createMixedSemanticsPass());
+      add(seahorn::createRemoveUnreachableBlocksPass());
+      add(seahorn::createPromoteMallocPass());
+    } else if (CutLoops || PeelLoops > 0) {
+      // -- cut loops to turn a program into loop-free program
+      assert(LowerSwitch && "Lower switch must be enabled");
+      add(llvm::createLowerSwitchPass());
+      add(llvm::createLoopSimplifyPass());
+      add(llvm::createLoopSimplifyCFGPass());
+      add(llvm_seahorn::createLoopRotatePass(/*1023*/));
+      add(llvm::createLCSSAPass());
+      if (PeelLoops > 0)
+        add(seahorn::createLoopPeelerPass(PeelLoops));
+      if (CutLoops) {
+        add(seahorn::createBackEdgeCutterPass());
+        // -- disabled. back-edge-cutter should be more robust
+        // add(seahorn::createCutLoopsPass());
+      }
+      // add (new seahorn::RemoveUnreachableBlocksPass ());
+    }
+    // checking for simple instances of memory safety. WIP
+    else if (SimpleMemoryChecks) {
+      add(llvm::createPromoteMemoryToRegisterPass());
+      add(seahorn::createSimpleMemoryCheckPass());
+    }
+    // null deref check. WIP. Not used.
+    else if (NullChecks) {
+      add(seahorn::createLowerCstExprPass());
+      add(seahorn::createNullCheckPass());
+    } else if (FatBoundsCheck) {
+      initializeFatBufferBoundsCheckPass(Registry);
+      add(seahorn::createFatBufferBoundsCheckPass());
+    } else if (LowerIsDeref) {
+      add(seahorn::createLowerIsDerefPass());
+    } else if (AddBranchSentinelOpt) {
+      initializeAddBranchSentinelPassPass(Registry);
+      add(seahorn::createAddBranchSentinelPassPass());
+    } else if (ExternalizeFns) {
+      // -- Externalize some user-selected functions
+      add(seahorn::createExternalizeFunctionsPass());
+    } else if (CrabLowerIsDeref) {
+      // -- prerequisite 1 : Lower constant expressions to instructions
+      add(seahorn::createLowerCstExprPass());
+      add(llvm::createDeadCodeEliminationPass());
+      // -- prerequisite 2 : Run Name Values Pass
+      add(seahorn::createNameValuesPass());
+      // -- attempt to lower any left sea.is_dereferenceable()
+      // First pass is attempted by using LLVM Memory Builtins to compute
+      // the requested size of access <= object size.
+      add(seahorn::createLowerIsDerefPass());
+      // Second pass is using Crab Analysis to compute size and offset
+      // invariants for each pointer.
+      // Note that, another prerequisite: Sea-DSA analysis is run inside
+      // the below LLVM pass.
+      add(seahorn::createCrabLowerIsDerefPass());
+    }
+    // default pre-processing pipeline
+    else {
+      // -- Externalize some user-selected functions
+      add(seahorn::createExternalizeFunctionsPass());
+
+      // -- Replace main function by entry point.
+      add(seahorn::createDummyMainFunctionPass());
+
+      // -- promote verifier specific functions to special names
+      add(seahorn::createPromoteVerifierCallsPass());
+
+      // -- promote top-level mallocs to alloca
+      add(seahorn::createPromoteMallocPass());
+
+      // -- turn loads from _Bool from truc to sgt
+      if (PromoteBoolLoads)
+        add(seahorn::createPromoteBoolLoadsPass());
+
+      if (KillVaArg)
+        add(seahorn::createKillVarArgFnPass());
+
+      if (StripExtern)
+        add(seahorn::createStripUselessDeclarationsPass());
+
+      // -- mark entry points of all functions
+      add(seahorn::createMarkFnEntryPass());
+
+      // turn all functions internal so that we can inline them if requested
+      auto PreserveMain = [=](const llvm::GlobalValue &GV) {
+        return GV.getName() == "main" || GV.getName() == "bcmp";
+      };
+      add(llvm::createInternalizePass(PreserveMain));
+
+      if (LowerInvoke) {
+        // -- lower invoke's
+        add(llvm::createLowerInvokePass());
+        // cleanup after lowering invoke's
+        add(llvm::createCFGSimplificationPass());
+      }
+
+      // -- resolve indirect calls
+      if (DevirtualizeFuncs) {
+        add(seadsa::createRemovePtrToIntPass());
+        add(llvm::createWholeProgramDevirtPass(nullptr, nullptr));
+        add(seahorn::createDevirtualizeFunctionsPass());
+      }
+
+      // -- externalize uses of address-taken functions
+      if (ExternalizeAddrTakenFuncs)
+        add(seahorn::createExternalizeAddressTakenFunctionsPass());
+
+      // kill internal unused code
+      add(llvm::createGlobalDCEPass()); // kill unused internal global
+
+      // -- global optimizations
+      add(llvm::createGlobalOptimizerPass());
+
+      // -- explicitly initialize globals in the beginning of main()
+      if (LowerGlobalInitializers)
+        add(seahorn::createLowerGvInitializersPass());
+
+      // -- SSA
+      add(llvm::createPromoteMemoryToRegisterPass());
+
+      if (NondetInit)
+        // -- Turn undef into nondet
+        add(seahorn::createNondetInitPass());
+
+      // -- Promote memcpy to loads-and-stores for easier alias analysis.
+      add(seahorn::createPromoteMemcpyPass());
+
+      // -- cleanup after SSA
+      add(seahorn::createInstCombine());
+      add(llvm::createCFGSimplificationPass());
+
+      // -- break aggregates
+      // XXX: createScalarReplAggregatesPass is not defined in llvm 5.0
+      // add(llvm::createScalarReplAggregatesPass(
+      //     SROA_Threshold, true, SROA_StructMemThreshold,
+      //     SROA_ArrayElementThreshold, SROA_ScalarLoadThreshold));
+      add(llvm::createSROAPass());
+      if (NondetInit)
+        // -- Turn undef into nondet (undef are created by SROA when it calls
+        //     mem2reg)
+        add(seahorn::createNondetInitPass());
+
+      // -- cleanup after break aggregates
+      add(seahorn::createInstCombine());
+      add(llvm::createCFGSimplificationPass());
+
+      // eliminate unused calls to verifier.nondet() functions
+      add(seahorn::createDeadNondetElimPass());
+
+      if (LowerSwitch)
+        add(llvm::createLowerSwitchPass());
+
+      add(llvm::createDeadCodeEliminationPass());
+      // Superseded by DCE in LLVM12
+      // add(llvm::createDeadInstEliminationPass());
+      add(seahorn::createRemoveUnreachableBlocksPass());
+
+      if (!KeepArithOverflow)
+        // lower arithmetic with overflow intrinsics
+        add(seahorn::createLowerArithWithOverflowIntrinsicsPass());
+      // lower libc++abi functions
+      add(seahorn::createLowerLibCxxAbiFunctionsPass());
+
+      // cleanup after lowering
+      add(seahorn::createInstCombine());
+      add(llvm::createCFGSimplificationPass());
+
+      if (UnfoldLoopsForDsa) {
+        // --- help DSA to be more precise
+#ifdef HAVE_LLVM_SEAHORN
+        add(llvm_seahorn::createFakeLatchExitPass());
+#endif
+        add(seahorn::createUnfoldLoopForDsaPass());
+      }
+
+      if (SimplifyPointerLoops) {
+        // --- simplify loops that iterate over pointers
+        add(seahorn::createSimplifyPointerLoopsPass());
+      }
+
+      // XXX: AG: Should not be part of standard pipeline
+      if (AbstractMemory) {
+        // -- abstract memory load/stores pointer operands with
+        // -- non-deterministic values
+        add(seahorn::createAbstractMemoryPass());
+        // -- abstract memory pass generates a lot of dead load/store
+        // -- instructions
+        add(llvm::createDeadCodeEliminationPass());
+        // Superseded by DCE in LLVM12
+        // add(llvm::createDeadInstEliminationPass());
+      }
+
+      // AG: Used for inconsistency analysis
+      // XXX Should be moved out of standard pp pipeline
+      if (LowerAssert) {
+        add(seahorn::createLowerAssertPass());
+        // LowerAssert might generate some dead code
+        add(llvm::createDeadCodeEliminationPass());
+        // Superseded by DCE in LLVM12
+        // add(llvm::createDeadInstEliminationPass());
+      }
+      add(seahorn::createRemoveUnreachableBlocksPass());
+
+      // -- request seaopt to inline all functions
+      if (InlineAll || Kernel || KernelExec) {
+        add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
+        add(seahorn::createMarkInternalInlinePass());
+      } else {
+        // mark memory allocator/deallocators to be inlined
+        if (InlineAllocFn)
+          add(seahorn::createMarkInternalAllocOrDeallocInlinePass());
+        // mark constructors to be inlined
+        if (InlineConstructFn)
+          add(seahorn::createMarkInternalConstructOrDestructInlinePass());
+      }
+
+      // run inliner pass
+      if (InlineAll || InlineAllocFn || InlineConstructFn || Kernel ||
+          KernelExec) {
+        add(llvm::createAlwaysInlinerLegacyPass());
+        add(llvm::createGlobalDCEPass()); // kill unused internal global
+        add(seahorn::createPromoteMallocPass());
+        add(seahorn::createRemoveUnreachableBlocksPass());
+
+        // -- Promote memcpy to loads-and-stores for easier alias analysis.
+        // -- inline can help with alignment which will help this pass
+        add(seahorn::createPromoteMemcpyPass());
+      }
+
+      // -- EVERYTHING IS MORE EXPENSIVE AFTER INLINING
+      // -- BEFORE SCHEDULING PASSES HERE, THINK WHETHER THEY BELONG BEFORE
+      // INLINE!
+      add(llvm::createDeadCodeEliminationPass());
+      // Superseded by DCE in LLVM12
+      // add(llvm::createDeadInstEliminationPass());
+      add(llvm::createGlobalDCEPass()); // kill unused internal global
+      add(llvm::createUnifyFunctionExitNodesPass());
+
+      // -- moves loop initialization up
+      // AG: After inline because cheap and loop initialization is moved higher
+      // up
+      if (SymbolizeLoops)
+        add(seahorn::createSymbolizeConstantLoopBoundsPass());
+
+      // AG: Maybe should be moved before inline. Not used as far as I know.
+      if (EnumVerifierCalls)
+        add(seahorn::createEnumVerifierCallsPass());
+
+      add(seahorn::createRemoveUnreachableBlocksPass());
+      add(seahorn::createPromoteMallocPass());
+      add(llvm::createGlobalDCEPass()); // kill unused internal global
+
+      // -- Enable function slicing
+      // AG: NOT USED. Not part of std pipeline
+      add(seahorn::createSliceFunctionsPass());
+
+      // AG: Dangerous. Promotes verifier.assume() to llvm.assume()
+      if (PromoteAssumptions)
+        add(seahorn::createPromoteSeahornAssumePass());
+    }
+
+    if (NameValues)
+      add(seahorn::createNameValuesPass());
+
+    if (InstNamer)
+      add(llvm::createInstructionNamerPass());
+
+    if (StripDebug)
+      add(llvm::createStripDeadDebugInfoPass());
+
+    // --- verify if an undefined value can be read
+    add(seahorn::createCanReadUndefPass());
+    // --- verify if bitcode is well-formed
+    add(llvm::createVerifierPass());
+
+    if (!OutputFilename.empty()) {
+      if (OutputAssembly)
+        add(createPrintModulePass(output->os()));
+      else
+        add(createBitcodeWriterPass(output->os()));
+    }
+  }
 };
 } // namespace
 
@@ -420,7 +818,6 @@ int main(int argc, char **argv) {
   // initialise and run passes //
   ///////////////////////////////
 
-  SeaPassManagerWrapper pm_wrapper;
   llvm::PassRegistry &Registry = *llvm::PassRegistry::getPassRegistry();
   llvm::initializeCore(Registry);
   llvm::initializeTransformUtils(Registry);
@@ -453,363 +850,44 @@ int main(int argc, char **argv) {
 
   assert(dl && "Could not find Data Layout for the module");
 
-  pm_wrapper.add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
-  pm_wrapper.add(seahorn::createSeaBuiltinsWrapperPass());
-  if (ReplaceLoopsWithNDFuncs) {
-    pm_wrapper.add(llvm_seahorn::createSeaLoopExtractorPass());
+  if (!DriverList.empty()) {
+    llvm::SmallVector<std::pair<DriverType, std::string>> drivers =
+        parseDriverList(DriverList);
+    const llvm::Module &m = *module.get();
+    for (std::pair<DriverType, std::string> driver : drivers) {
+      std::string out = "gen-" + driver.second + ".ll";
+      SeaPassManagerWrapper pm_wrapper(Registry, output, driver.first,
+                                       driver.second, true, out);
+      llvm::errs() << "Running driver for " << driver.second << "\n";
+      std::unique_ptr<llvm::Module> clonedModule = llvm::CloneModule(m);
+      llvm::errs() << "cloned\n";
+      pm_wrapper.run(*clonedModule.get());
+    }
+  } else {
+    DriverType driverType = DriverType::None;
+    llvm::StringRef name = "";
+    if (Kernel) {
+      if (!SpecificFunction.empty()) {
+        driverType = DriverType::SpecificFunction;
+        name = SpecificFunction;
+      } else if (!FileOperation.empty()) {
+        driverType = DriverType::FileOperations;
+        name = FileOperation;
+      } else if (!PlatformDriver.empty()) {
+        driverType = DriverType::PlatformDriver;
+        name = PlatformDriver;
+      } else if (!I2CDriver.empty()) {
+        driverType = DriverType::I2CDriver;
+        name = I2CDriver;
+      } else if (!DsaSwitchOps.empty()) {
+        driverType = DriverType::DsaSwitchOps;
+        name = DsaSwitchOps;
+      }
+    }
+    SeaPassManagerWrapper pm_wrapper(Registry, output, driverType, name, false,
+                                     KernelOutLL);
+    pm_wrapper.run(*module.get());
   }
-
-  if (Kernel) {
-    if (!ListOps.empty()) {
-      pm_wrapper.add(seahorn::createListOpsPass(ListOps));
-      pm_wrapper.run(*module.get());
-      return 0;
-    }
-
-    pm_wrapper.add(seahorn::createKernelSetupPass());
-    pm_wrapper.add(llvm::createVerifierPass(true));
-    pm_wrapper.add(seahorn::createHandleDevicesPass());
-    pm_wrapper.add(llvm::createVerifierPass(true));
-    // TODO: merge these passes into one.
-    if (!SpecificFunction.empty()) {
-      pm_wrapper.add(seahorn::createSpecificFunctionPass(SpecificFunction));
-    } else if (!AcpiDriver.empty()) {
-      pm_wrapper.add(seahorn::createAcpiSetupPass(AcpiDriver));
-    } else if (!FileOperation.empty()) {
-      pm_wrapper.add(seahorn::createFileOperationsSetupPass(FileOperation));
-    } else if (!PlatformDriver.empty()) {
-      pm_wrapper.add(seahorn::createPlatformDriverPass(PlatformDriver));
-    } else if (!DsaSwitchOps.empty()) {
-      pm_wrapper.add(seahorn::createDsaSwitchOpsPass(DsaSwitchOps));
-    } else if (!I2CDriver.empty()) {
-      pm_wrapper.add(seahorn::createI2CDriverPass(I2CDriver));
-    } else {
-      llvm::errs() << "Unknown kernel target\n";
-      return 1;
-    }
-    pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
-    pm_wrapper.add(seahorn::createSlimDownPass());
-    pm_wrapper.add(seahorn::createHandleDevmPass());
-    pm_wrapper.add(seahorn::createHandleInlineAsmPass());
-    pm_wrapper.add(seahorn::createInitGlobalKrefsPass());
-    pm_wrapper.add(seahorn::createAssertKrefsPass());
-    pm_wrapper.add(llvm::createVerifierPass(true));
-    pm_wrapper.add(seahorn::createAssumeNonNullPass());
-    /*pm_wrapper.add(seahorn::createIntoBinaryPass());*/
-    pm_wrapper.add(seahorn::createHandleNondetMallocPass());
-    pm_wrapper.add(llvm::createCFGSimplificationPass());
-    pm_wrapper.add(llvm::createVerifierPass(true));
-    pm_wrapper.add(seahorn::createKernelDebugPass(KernelOutLL));
-  }
-
-  if (RenameNondet)
-    // -- ren-nondet utility pass
-    pm_wrapper.add(seahorn::createRenameNondetPass());
-  else if (StripShadowMem)
-    // -- strips shadows. Useful for debugging
-    pm_wrapper.add(seahorn::createStripShadowMemPass());
-  else if (KleeInternalize)
-    // -- internalize external definitions to make klee happy
-    // -- useful for preparing seahorn bitcode to be used with KLEE
-    pm_wrapper.add(seahorn::createKleeInternalizePass());
-  else if (WrapMem)
-    // -- wraps memory instructions with a custom function
-    // -- not actively used. part of cex replaying
-    pm_wrapper.add(seahorn::createWrapMemPass());
-  else if (OnlyStripExtern) {
-    // -- remove useless declarations
-    pm_wrapper.add(seahorn::createDevirtualizeFunctionsPass());
-    pm_wrapper.add(seahorn::createStripUselessDeclarationsPass());
-  } else if (MixedSem) {
-    // -- apply mixed semantics
-    assert(LowerSwitch && "Lower switch must be enabled");
-    pm_wrapper.add(llvm::createLowerSwitchPass());
-    pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
-    pm_wrapper.add(seahorn::createCanFailPass());
-    pm_wrapper.add(seahorn::createMixedSemanticsPass());
-    pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
-    pm_wrapper.add(seahorn::createPromoteMallocPass());
-  } else if (CutLoops || PeelLoops > 0) {
-    // -- cut loops to turn a program into loop-free program
-    assert(LowerSwitch && "Lower switch must be enabled");
-    pm_wrapper.add(llvm::createLowerSwitchPass());
-    pm_wrapper.add(llvm::createLoopSimplifyPass());
-    pm_wrapper.add(llvm::createLoopSimplifyCFGPass());
-    pm_wrapper.add(llvm_seahorn::createLoopRotatePass(/*1023*/));
-    pm_wrapper.add(llvm::createLCSSAPass());
-    if (PeelLoops > 0)
-      pm_wrapper.add(seahorn::createLoopPeelerPass(PeelLoops));
-    if (CutLoops) {
-      pm_wrapper.add(seahorn::createBackEdgeCutterPass());
-      // -- disabled. back-edge-cutter should be more robust
-      // pm_wrapper.add(seahorn::createCutLoopsPass());
-    }
-    // pm_wrapper.add (new seahorn::RemoveUnreachableBlocksPass ());
-  }
-  // checking for simple instances of memory safety. WIP
-  else if (SimpleMemoryChecks) {
-    pm_wrapper.add(llvm::createPromoteMemoryToRegisterPass());
-    pm_wrapper.add(seahorn::createSimpleMemoryCheckPass());
-  }
-  // null deref check. WIP. Not used.
-  else if (NullChecks) {
-    pm_wrapper.add(seahorn::createLowerCstExprPass());
-    pm_wrapper.add(seahorn::createNullCheckPass());
-  } else if (FatBoundsCheck) {
-    initializeFatBufferBoundsCheckPass(Registry);
-    pm_wrapper.add(seahorn::createFatBufferBoundsCheckPass());
-  } else if (LowerIsDeref) {
-    pm_wrapper.add(seahorn::createLowerIsDerefPass());
-  } else if (AddBranchSentinelOpt) {
-    initializeAddBranchSentinelPassPass(Registry);
-    pm_wrapper.add(seahorn::createAddBranchSentinelPassPass());
-  } else if (ExternalizeFns) {
-    // -- Externalize some user-selected functions
-    pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
-  } else if (CrabLowerIsDeref) {
-    // -- prerequisite 1 : Lower constant expressions to instructions
-    pm_wrapper.add(seahorn::createLowerCstExprPass());
-    pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-    // -- prerequisite 2 : Run Name Values Pass
-    pm_wrapper.add(seahorn::createNameValuesPass());
-    // -- attempt to lower any left sea.is_dereferenceable()
-    // First pass is attempted by using LLVM Memory Builtins to compute
-    // the requested size of access <= object size.
-    pm_wrapper.add(seahorn::createLowerIsDerefPass());
-    // Second pass is using Crab Analysis to compute size and offset
-    // invariants for each pointer.
-    // Note that, another prerequisite: Sea-DSA analysis is run inside
-    // the below LLVM pass.
-    pm_wrapper.add(seahorn::createCrabLowerIsDerefPass());
-  }
-  // default pre-processing pipeline
-  else {
-    // -- Externalize some user-selected functions
-    pm_wrapper.add(seahorn::createExternalizeFunctionsPass());
-
-    // -- Replace main function by entry point.
-    pm_wrapper.add(seahorn::createDummyMainFunctionPass());
-
-    // -- promote verifier specific functions to special names
-    pm_wrapper.add(seahorn::createPromoteVerifierCallsPass());
-
-    // -- promote top-level mallocs to alloca
-    pm_wrapper.add(seahorn::createPromoteMallocPass());
-
-    // -- turn loads from _Bool from truc to sgt
-    if (PromoteBoolLoads)
-      pm_wrapper.add(seahorn::createPromoteBoolLoadsPass());
-
-    if (KillVaArg)
-      pm_wrapper.add(seahorn::createKillVarArgFnPass());
-
-    if (StripExtern)
-      pm_wrapper.add(seahorn::createStripUselessDeclarationsPass());
-
-    // -- mark entry points of all functions
-    pm_wrapper.add(seahorn::createMarkFnEntryPass());
-
-    // turn all functions internal so that we can inline them if requested
-    auto PreserveMain = [=](const llvm::GlobalValue &GV) {
-      return GV.getName() == "main" || GV.getName() == "bcmp";
-    };
-    pm_wrapper.add(llvm::createInternalizePass(PreserveMain));
-
-    if (LowerInvoke) {
-      // -- lower invoke's
-      pm_wrapper.add(llvm::createLowerInvokePass());
-      // cleanup after lowering invoke's
-      pm_wrapper.add(llvm::createCFGSimplificationPass());
-    }
-
-    // -- resolve indirect calls
-    if (DevirtualizeFuncs) {
-      pm_wrapper.add(seadsa::createRemovePtrToIntPass());
-      pm_wrapper.add(llvm::createWholeProgramDevirtPass(nullptr, nullptr));
-      pm_wrapper.add(seahorn::createDevirtualizeFunctionsPass());
-    }
-
-    // -- externalize uses of address-taken functions
-    if (ExternalizeAddrTakenFuncs)
-      pm_wrapper.add(seahorn::createExternalizeAddressTakenFunctionsPass());
-
-    // kill internal unused code
-    pm_wrapper.add(llvm::createGlobalDCEPass()); // kill unused internal global
-
-    // -- global optimizations
-    pm_wrapper.add(llvm::createGlobalOptimizerPass());
-
-    // -- explicitly initialize globals in the beginning of main()
-    if (LowerGlobalInitializers)
-      pm_wrapper.add(seahorn::createLowerGvInitializersPass());
-
-    // -- SSA
-    pm_wrapper.add(llvm::createPromoteMemoryToRegisterPass());
-
-    if (NondetInit)
-      // -- Turn undef into nondet
-      pm_wrapper.add(seahorn::createNondetInitPass());
-
-    // -- Promote memcpy to loads-and-stores for easier alias analysis.
-    pm_wrapper.add(seahorn::createPromoteMemcpyPass());
-
-    // -- cleanup after SSA
-    pm_wrapper.add(seahorn::createInstCombine());
-    pm_wrapper.add(llvm::createCFGSimplificationPass());
-
-    // -- break aggregates
-    // XXX: createScalarReplAggregatesPass is not defined in llvm 5.0
-    // pm_wrapper.add(llvm::createScalarReplAggregatesPass(
-    //     SROA_Threshold, true, SROA_StructMemThreshold,
-    //     SROA_ArrayElementThreshold, SROA_ScalarLoadThreshold));
-    pm_wrapper.add(llvm::createSROAPass());
-    if (NondetInit)
-      // -- Turn undef into nondet (undef are created by SROA when it calls
-      //     mem2reg)
-      pm_wrapper.add(seahorn::createNondetInitPass());
-
-    // -- cleanup after break aggregates
-    pm_wrapper.add(seahorn::createInstCombine());
-    pm_wrapper.add(llvm::createCFGSimplificationPass());
-
-    // eliminate unused calls to verifier.nondet() functions
-    pm_wrapper.add(seahorn::createDeadNondetElimPass());
-
-    if (LowerSwitch)
-      pm_wrapper.add(llvm::createLowerSwitchPass());
-
-    pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-    // Superseded by DCE in LLVM12
-    // pm_wrapper.add(llvm::createDeadInstEliminationPass());
-    pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
-
-    if (!KeepArithOverflow)
-      // lower arithmetic with overflow intrinsics
-      pm_wrapper.add(seahorn::createLowerArithWithOverflowIntrinsicsPass());
-    // lower libc++abi functions
-    pm_wrapper.add(seahorn::createLowerLibCxxAbiFunctionsPass());
-
-    // cleanup after lowering
-    pm_wrapper.add(seahorn::createInstCombine());
-    pm_wrapper.add(llvm::createCFGSimplificationPass());
-
-    if (UnfoldLoopsForDsa) {
-      // --- help DSA to be more precise
-#ifdef HAVE_LLVM_SEAHORN
-      pm_wrapper.add(llvm_seahorn::createFakeLatchExitPass());
-#endif
-      pm_wrapper.add(seahorn::createUnfoldLoopForDsaPass());
-    }
-
-    if (SimplifyPointerLoops) {
-      // --- simplify loops that iterate over pointers
-      pm_wrapper.add(seahorn::createSimplifyPointerLoopsPass());
-    }
-
-    // XXX: AG: Should not be part of standard pipeline
-    if (AbstractMemory) {
-      // -- abstract memory load/stores pointer operands with
-      // -- non-deterministic values
-      pm_wrapper.add(seahorn::createAbstractMemoryPass());
-      // -- abstract memory pass generates a lot of dead load/store
-      // -- instructions
-      pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-      // Superseded by DCE in LLVM12
-      // pm_wrapper.add(llvm::createDeadInstEliminationPass());
-    }
-
-    // AG: Used for inconsistency analysis
-    // XXX Should be moved out of standard pp pipeline
-    if (LowerAssert) {
-      pm_wrapper.add(seahorn::createLowerAssertPass());
-      // LowerAssert might generate some dead code
-      pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-      // Superseded by DCE in LLVM12
-      // pm_wrapper.add(llvm::createDeadInstEliminationPass());
-    }
-    pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
-
-    // -- request seaopt to inline all functions
-    if (InlineAll || Kernel || KernelDebug) {
-      pm_wrapper.add(llvm_seahorn::createSeaAnnotation2MetadataLegacyPass());
-      pm_wrapper.add(seahorn::createMarkInternalInlinePass());
-    } else {
-      // mark memory allocator/deallocators to be inlined
-      if (InlineAllocFn)
-        pm_wrapper.add(seahorn::createMarkInternalAllocOrDeallocInlinePass());
-      // mark constructors to be inlined
-      if (InlineConstructFn)
-        pm_wrapper.add(
-            seahorn::createMarkInternalConstructOrDestructInlinePass());
-    }
-
-    // run inliner pass
-    if (InlineAll || InlineAllocFn || InlineConstructFn || Kernel ||
-        KernelDebug) {
-      pm_wrapper.add(llvm::createAlwaysInlinerLegacyPass());
-      pm_wrapper.add(
-          llvm::createGlobalDCEPass()); // kill unused internal global
-      pm_wrapper.add(seahorn::createPromoteMallocPass());
-      pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
-
-      // -- Promote memcpy to loads-and-stores for easier alias analysis.
-      // -- inline can help with alignment which will help this pass
-      pm_wrapper.add(seahorn::createPromoteMemcpyPass());
-    }
-
-    // -- EVERYTHING IS MORE EXPENSIVE AFTER INLINING
-    // -- BEFORE SCHEDULING PASSES HERE, THINK WHETHER THEY BELONG BEFORE
-    // INLINE!
-    pm_wrapper.add(llvm::createDeadCodeEliminationPass());
-    // Superseded by DCE in LLVM12
-    // pm_wrapper.add(llvm::createDeadInstEliminationPass());
-    pm_wrapper.add(llvm::createGlobalDCEPass()); // kill unused internal global
-    pm_wrapper.add(llvm::createUnifyFunctionExitNodesPass());
-
-    // -- moves loop initialization up
-    // AG: After inline because cheap and loop initialization is moved higher up
-    if (SymbolizeLoops)
-      pm_wrapper.add(seahorn::createSymbolizeConstantLoopBoundsPass());
-
-    // AG: Maybe should be moved before inline. Not used as far as I know.
-    if (EnumVerifierCalls)
-      pm_wrapper.add(seahorn::createEnumVerifierCallsPass());
-
-    pm_wrapper.add(seahorn::createRemoveUnreachableBlocksPass());
-    pm_wrapper.add(seahorn::createPromoteMallocPass());
-    pm_wrapper.add(llvm::createGlobalDCEPass()); // kill unused internal global
-
-    // -- Enable function slicing
-    // AG: NOT USED. Not part of std pipeline
-    pm_wrapper.add(seahorn::createSliceFunctionsPass());
-
-    // AG: Dangerous. Promotes verifier.assume() to llvm.assume()
-    if (PromoteAssumptions)
-      pm_wrapper.add(seahorn::createPromoteSeahornAssumePass());
-  }
-
-  if (NameValues)
-    pm_wrapper.add(seahorn::createNameValuesPass());
-
-  if (InstNamer)
-    pm_wrapper.add(llvm::createInstructionNamerPass());
-
-  if (StripDebug)
-    pm_wrapper.add(llvm::createStripDeadDebugInfoPass());
-
-  // --- verify if an undefined value can be read
-  pm_wrapper.add(seahorn::createCanReadUndefPass());
-  // --- verify if bitcode is well-formed
-  pm_wrapper.add(llvm::createVerifierPass());
-
-  if (!OutputFilename.empty()) {
-    if (OutputAssembly)
-      pm_wrapper.add(createPrintModulePass(output->os()));
-    else
-      pm_wrapper.add(createBitcodeWriterPass(output->os()));
-  }
-
-  pm_wrapper.run(*module.get());
 
   if (PrintStats)
     seahorn::Stats::PrintBrunch(llvm::outs());

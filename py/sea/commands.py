@@ -255,13 +255,13 @@ def get_sea_horn_dsa (opts):
 
 class Seapp(sea.LimitedCmd):
     def __init__(self, quiet=False, internalize=False, strip_extern=False,
-                 keep_lib_fn=False, kernel=False, kernel_debug=False, list_ops=False):
+                 keep_lib_fn=False, kernel=False, kernel_exec=False, list_ops=False):
         super(Seapp, self).__init__('pp', 'Pre-processing', allow_extra=True)
         self._internalize = internalize
         self._strip_extern = strip_extern
         self._keep_lib_fn = keep_lib_fn
         self._kernel = kernel
-        self._kernel_debug = kernel_debug
+        self._kernel_exec = kernel_exec
         self._list_ops = list_ops
 
     @property
@@ -329,6 +329,8 @@ class Seapp(sea.LimitedCmd):
         ap.add_argument ('--i2c-driver', dest='i2c_driver', help='Specify a i2c_driver to validate',
                          type=str, metavar='str,..')
         ap.add_argument ('--out-ll', dest='out_ll', help='Output file for kernel LLVM IR emission',
+                         type=str, default=None, metavar='str')
+        ap.add_argument ('--driver-list', dest='driver_list', help='Driver list',
                          type=str, default=None, metavar='str')
 
         ap.add_argument ('--externalize-addr-taken-functions',
@@ -425,11 +427,14 @@ class Seapp(sea.LimitedCmd):
 
         if self._kernel:
             argv.append ('--kernel')
-        if self._kernel_debug:
-            argv.append ('--kernel-debug')
+        if self._kernel_exec:
+            argv.append ('--kernel-exec')
 
         if self._list_ops:
             argv.append ('--list-ops=file_operations,platform_driver,dsa_switch_ops,i2c_driver')
+
+        if args.driver_list:
+            argv.append ('--driver-list={0}'.format(args.driver_list))
 
         if args.out_ll:
             argv.append('--kernel-out-ll={0}'.format(args.out_ll))
@@ -1764,10 +1769,9 @@ Spf = sea.SeqCmd('spf', 'clang|add-branch-sentinel|fat-bnd-check|fe|unroll|cut-l
                  [Clang(), AddBranchSentinel(), FatBoundsCheck()] + FrontEnd.cmds + [Unroll(), CutLoops(), Seaopt(), Seahorn(solve=True)])
 Kernel = sea.SeqCmd('kernel', 'Linux kernel verification: alias for pp|ms|opt|horn --solve',
                  [Seapp(kernel=True), MixedSem(), Seaopt(), Seahorn(solve=True)])
-KernelDebug = sea.SeqCmd('kernel-debug', 'Linux kernel debug: alias for pp|ms|opt|horn --solve',
-                 [Seapp(kernel_debug=True), MixedSem(), Seaopt(), Seahorn(solve=True)])
-ExeKernel = sea.SeqCmd ('exe-kernel', 'alias for clang|pp --strip-extern|pp --internalize|wmem|rmtf|linkrt',
-                  [Seapp(strip_extern=True, keep_lib_fn=True, kernel=True),
-                   Seapp(internalize=True), WrapMem(), RemoveTargetFeatures(), LinkRt()])
+KernelExec = sea.SeqCmd('kernel-exec', 'Linux kernel execution: alias for pp|ms|opt|horn --solve',
+                 [Seapp(kernel_exec=True), MixedSem(), Seaopt(), Seahorn(solve=True)])
 ListKernelOps = sea.SeqCmd('list-kernel-ops', 'list device driver operations in the kernel.',
-                [Seapp(kernel=True, list_ops=True)])
+                 [Seapp(kernel=True, list_ops=True)])
+KernelPP = sea.SeqCmd('kernelpp', 'Preprocess the Linux kernel',
+                 [Seapp(kernel=True)])
