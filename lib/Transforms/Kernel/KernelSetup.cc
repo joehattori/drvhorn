@@ -662,29 +662,29 @@ private:
     BasicBlock *cmpChar = BasicBlock::Create(ctx, "", wrapper);
     BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
 
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
-    B.CreateBr(loop);
+    IRBuilder<> b(entry);
+    Value *it = b.CreateAlloca(i32Type);
+    b.CreateStore(b.getInt32(0), it);
+    b.CreateBr(loop);
 
-    B.SetInsertPoint(loop);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
-    Value *strPtr = B.CreateGEP(i8Type, str, loadedIt);
-    Value *curChar = B.CreateLoad(i8Type, strPtr);
-    Value *isNull = B.CreateICmpEQ(curChar, B.getInt8(0));
-    B.CreateCondBr(isNull, retZero, cmpChar);
+    b.SetInsertPoint(loop);
+    Value *loadedIt = b.CreateLoad(i32Type, it);
+    Value *strPtr = b.CreateGEP(i8Type, str, loadedIt);
+    Value *curChar = b.CreateLoad(i8Type, strPtr);
+    Value *isNull = b.CreateICmpEQ(curChar, b.getInt8(0));
+    b.CreateCondBr(isNull, retZero, cmpChar);
 
-    B.SetInsertPoint(retZero);
-    Value *null = B.CreateIntToPtr(B.getInt32(0), i8Type->getPointerTo());
-    B.CreateRet(null);
+    b.SetInsertPoint(retZero);
+    Value *null = b.CreateIntToPtr(b.getInt32(0), i8Type->getPointerTo());
+    b.CreateRet(null);
 
-    B.SetInsertPoint(cmpChar);
-    Value *isHit = B.CreateICmpEQ(curChar, B.CreateTrunc(chr, i8Type));
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateCondBr(isHit, ret, loop);
+    b.SetInsertPoint(cmpChar);
+    Value *isHit = b.CreateICmpEQ(curChar, b.CreateTrunc(chr, i8Type));
+    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
+    b.CreateCondBr(isHit, ret, loop);
 
-    B.SetInsertPoint(ret);
-    B.CreateRet(strPtr);
+    b.SetInsertPoint(ret);
+    b.CreateRet(strPtr);
 
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
