@@ -180,15 +180,16 @@ public:
   HandleDevices() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    Function *devNodeGetter = handleDeviceNodeFinders(m);
+    Function *updateIndex = buildUpdateIndex(m);
+    Function *devNodeGetter = handleDeviceNodeFinders(m, updateIndex);
     handleFwnodePut(m);
     handleFwnodeFinders(m, devNodeGetter);
-    handleFindDevice(m);
+    handleFindDevice(m, updateIndex);
     Function *devInit = handleDeviceInitialize(m);
     Function *devAdd = handleDeviceAdd(m, devInit);
     handleDeviceDel(m);
     handleDeviceLinkAdd(m);
-    handleDeviceAllocation(m, devInit);
+    handleDeviceAllocation(m, devInit, updateIndex);
     handleDevmFunctions(m);
     handleCDevDeviceAdd(m, devAdd);
     handleCDevDeviceAPIs(m);
@@ -202,7 +203,7 @@ public:
     stubFwnodeConnectionFindMatch(m);
     stubFwnodeConnectionFindMatches(m);
 
-    handleCpufreqGet(m);
+    handleCpufreqGet(m, updateIndex);
     return true;
   }
 
@@ -214,6 +215,32 @@ public:
   }
 
 private:
+  Function *buildUpdateIndex(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
+    Type *voidTy = Type::getVoidTy(ctx);
+    FunctionType *ft =
+        FunctionType::get(voidTy, {i64Ty, i64Ty->getPointerTo()}, false);
+    Function *f = Function::Create(ft, GlobalVariable::InternalLinkage,
+                                   "drvhorn.update_index", m);
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    Value *ndCond = b.CreateCall(ndBool);
+    b.CreateCondBr(ndCond, body, ret);
+
+    b.SetInsertPoint(body);
+    b.CreateStore(f->getArg(0), f->getArg(1));
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    b.CreateRetVoid();
+    return f;
+  }
+
   struct StorageGlobals {
     GlobalVariable *storage;
     GlobalVariable *curIndex;
@@ -221,7 +248,7 @@ private:
   };
 
   // returns the device node generator function
-  Function *handleDeviceNodeFinders(Module &m) {
+  Function *handleDeviceNodeFinders(Module &m, Function *updateIndex) {
     struct FinderInfo {
       StringRef name;
       Optional<size_t> putNodeIndex;
@@ -253,7 +280,8 @@ private:
     Constant *ofNodeGet = m.getFunction("of_node_get");
     Function *ofNodePut = m.getFunction("of_node_put");
     StructType *devNodeType = getDeviceNodeType();
-    Function *deviceNodeGetter = buildDeviceNodeGetter(m, devNodeType);
+    Function *deviceNodeGetter =
+        buildDeviceNodeGetter(m, devNodeType, updateIndex);
     for (const FinderInfo &info : finders) {
       Function *f = m.getFunction(info.name);
       if (!f)
@@ -300,11 +328,11 @@ private:
     return deviceNodeGetter;
   }
 
-  Function *buildDeviceNodeGetter(Module &m, StructType *devNodeType) {
+  Function *buildDeviceNodeGetter(Module &m, StructType *devNodeType,
+                                  Function *updateIndex) {
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     StructType *krefType = cast<StructType>(
         krefInit->getArg(0)->getType()->getPointerElementType());
-    Function *updateIndex = m.getFunction("drvhorn.update_index");
     Function *ndBool = getOrCreateNdIntFn(m, 1);
     Function *f = Function::Create(
         FunctionType::get(devNodeType->getPointerTo(), false),
@@ -644,7 +672,7 @@ private:
     }
   }
 
-  void handleFindDevice(Module &m) {
+  void handleFindDevice(Module &m, Function *updateIndex) {
     const DenseMap<const GlobalVariable *, StructType *> &clsOrBusToDevType =
         clsOrBusToDeviceMap(m);
     LLVMContext &ctx = m.getContext();
@@ -663,7 +691,8 @@ private:
         }
         const SmallVector<Value *> &devIndices =
             gepIndicesToStruct(surroundingDevType, deviceType).getValue();
-        Function *devGetter = deviceGetter(m, surroundingDevType, devIndices);
+        Function *devGetter =
+            deviceGetter(m, surroundingDevType, devIndices, updateIndex);
         IRBuilder<> b(call);
         Value *replace = b.CreateCall(devGetter);
         if (replace->getType() != call->getType())
@@ -869,7 +898,8 @@ private:
 #define KOBJECT_KREF_INDEX 6
 #define KOBJECT_ISINIT_INDEX 7
   Function *deviceGetter(Module &m, StructType *surroundingDevType,
-                         const SmallVector<Value *> &devIndices) {
+                         const SmallVector<Value *> &devIndices,
+                         Function *updateIndex) {
     std::string fnName =
         "drvhorn.device_getter." + surroundingDevType->getName().str();
     if (Function *f = m.getFunction(fnName))
@@ -896,7 +926,6 @@ private:
     Function *ndBool = getOrCreateNdIntFn(m, 1);
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     Function *krefGet = m.getFunction("drvhorn.kref_get");
-    Function *updateIndex = m.getFunction("drvhorn.update_index");
 
     IRBuilder<> b(entry);
     CallInst *ndCond = b.CreateCall(ndBool);
@@ -1002,7 +1031,8 @@ private:
     return f;
   }
 
-  void handleDeviceAllocation(Module &m, Function *devInit) {
+  void handleDeviceAllocation(Module &m, Function *devInit,
+                              Function *updateIndex) {
     if (!devInit)
       return;
     Function *alloc = getOrCreateAlloc(m);
@@ -1012,7 +1042,7 @@ private:
       if (!allocatedDevType)
         continue;
       Function *devAlloc = getOrCreateDeviceAllocator(
-          m, allocatedDevType, allocatedDevType->getName().str());
+          m, allocatedDevType, updateIndex, allocatedDevType->getName().str());
       IRBuilder<> b(call);
       CallInst *newCall = b.CreateCall(devAlloc);
       Value *replace = b.CreateBitCast(newCall, call->getType());
@@ -1073,12 +1103,12 @@ private:
   }
 
   Function *getOrCreateDeviceAllocator(Module &m, StructType *elemType,
+                                       Function *updateIndex,
                                        std::string suffix) {
     std::string fnName = "drvhorn.device_alloc." + suffix;
     if (Function *f = m.getFunction(fnName))
       return f;
     Function *ndBool = getOrCreateNdIntFn(m, 1);
-    Function *updateIndex = m.getFunction("drvhorn.update_index");
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     StorageGlobals globals = getStorageAndIndex(m, elemType, suffix);
@@ -1312,14 +1342,13 @@ private:
   }
 
   // TODO: implement in a different file or rename this file.
-  void handleCpufreqGet(Module &m) {
+  void handleCpufreqGet(Module &m, Function *updateIndex) {
     Function *f = m.getFunction("cpufreq_cpu_get");
     if (!f)
       return;
     f->deleteBody();
     f->setName("drvhorn.cpufreq_cpu_get");
     Function *ndBool = getOrCreateNdIntFn(m, 1);
-    Function *updateIndex = m.getFunction("drvhorn.update_index");
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     StructType *policyType =

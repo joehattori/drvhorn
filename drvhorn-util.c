@@ -10,7 +10,6 @@
 #include <linux/phy.h>
 #include <base/base.h>
 
-extern _Bool nd_bool();
 extern char nd_char();
 extern int nd_int();
 extern unsigned nd_uint();
@@ -78,11 +77,6 @@ u64 __DRVHORN_util_read_u64(u8 *addr) { return *(u64 *)addr; }
 u32 __DRVHORN_util_read_u32(u8 *addr) { return *(u32 *)addr; }
 u16 __DRVHORN_util_read_u16(u8 *addr) { return *(u16 *)addr; }
 u8 __DRVHORN_util_read_u8(u8 *addr) { return *addr; }
-
-void __DRVHORN_update_index(long long int index, long long int *target_index) {
-  if (nd_bool())
-    *target_index = index;
-}
 
 static void klist_children_get(struct klist_node *n)
 {
