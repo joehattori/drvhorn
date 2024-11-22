@@ -20,6 +20,11 @@ public:
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
+    Function *setup = getSetupFn(m);
+    if (!setup) {
+      errs() << "No probe function found for " << dsaSwitchOpsName << "\n";
+      return false;
+    }
     Function *main = Function::Create(
         FunctionType::get(i32Ty, false),
         GlobalValue::LinkageTypes::ExternalLinkage, "main", &m);
@@ -27,7 +32,6 @@ public:
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    Function *setup = getSetupFn(m);
     buildEntryBlock(m, setup, entry, fail, ret);
     buildFailBlock(m, fail, ret);
     buildRetBlock(m, ret);
@@ -71,10 +75,10 @@ private:
     Value *devPtr = b.CreateAlloca(deviceType);
     PointerType *krefPtrType =
         cast<PointerType>(krefInit->getArg(0)->getType());
-    GlobalVariable *globalKref = new GlobalVariable(
-        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(krefPtrType),
-        "drvhorn.kref.struct.dsa_switch");
+    GlobalVariable *globalKref =
+        new GlobalVariable(m, krefPtrType, false, GlobalValue::PrivateLinkage,
+                           ConstantPointerNull::get(krefPtrType),
+                           "drvhorn.kref.struct.dsa_switch");
     Value *krefPtr =
         b.CreateGEP(deviceType, devPtr,
                     {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),

@@ -24,13 +24,17 @@ public:
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
+    Function *probe = getProbeFn(m);
+    if (!probe) {
+      errs() << "No probe function found for " << platformDriverName << "\n";
+      return false;
+    }
     Function *main = Function::Create(FunctionType::get(i32Ty, false),
                                       GlobalValue::ExternalLinkage, "main", &m);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", main);
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    Function *probe = getProbeFn(m);
     buildEntryBlock(m, probe, entry, fail, ret);
     buildFailBlock(m, fail, ret);
     buildRetBlock(m, ret);
@@ -80,19 +84,15 @@ private:
     Type *i64Ty = Type::getInt64Ty(ctx);
     Value *devPtr =
         b.CreateInBoundsGEP(pdevType, pdev,
-                            {
-                                ConstantInt::get(i64Ty, 0),
-                                ConstantInt::get(i32Ty, pDevDeviceGEPIndex),
-                            },
+                            {ConstantInt::get(i64Ty, 0),
+                             ConstantInt::get(i32Ty, pDevDeviceGEPIndex)},
                             "device");
     StructType *devType =
         cast<StructType>(devPtr->getType()->getPointerElementType());
     Value *krefPtr = b.CreateInBoundsGEP(devType, devPtr,
-                                         {
-                                             ConstantInt::get(i64Ty, 0),
-                                             ConstantInt::get(i32Ty, 0),
-                                             ConstantInt::get(i32Ty, 6),
-                                         },
+                                         {ConstantInt::get(i64Ty, 0),
+                                          ConstantInt::get(i32Ty, 0),
+                                          ConstantInt::get(i32Ty, 6)},
                                          "kref");
     b.CreateCall(krefInit, krefPtr);
     b.CreateStore(krefPtr, globalKref);
@@ -100,10 +100,8 @@ private:
     // setup driver_data
     Value *driverDataPtr =
         b.CreateInBoundsGEP(devType, devPtr,
-                            {
-                                ConstantInt::get(i64Ty, 0),
-                                ConstantInt::get(i32Ty, deviceDriverDataIndex),
-                            },
+                            {ConstantInt::get(i64Ty, 0),
+                             ConstantInt::get(i32Ty, deviceDriverDataIndex)},
                             "driver_data");
     Constant *driverDataSize = ConstantInt::get(i64Ty, 0x1000);
     AllocaInst *driverData = b.CreateAlloca(i8Ty, driverDataSize);

@@ -36,7 +36,7 @@ public:
     unsigned int counter = 0;
     if (!outLLFileName.empty()) {
       std::error_code ec;
-      raw_fd_ostream fileOs(outLLFileName, ec, sys::fs::CD_OpenAlways);
+      raw_fd_ostream fileOs(outLLFileName, ec, sys::fs::CD_CreateAlways);
       m.setModuleInlineAsm("");
       m.print(fileOs, nullptr);
       fileOs.close();

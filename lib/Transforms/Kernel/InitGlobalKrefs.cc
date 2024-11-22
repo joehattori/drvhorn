@@ -53,8 +53,10 @@ public:
     }
     b.CreateRetVoid();
 
-    Function *main = m.getFunction("main");
-    callPreludeInMain(main, prelude);
+    if (Function *main = m.getFunction("main")) {
+      callPreludeInMain(main, prelude);
+      changed = true;
+    }
     return changed;
   }
 

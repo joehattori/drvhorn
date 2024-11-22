@@ -30,7 +30,6 @@ public:
     stubAllocationFunctions(m, allocStub);
     stubKernelFunctions(m);
     handleKrefAPIs(m);
-    killFree(m);
     handleKmemCache(m, allocStub);
 
     handleCallRcu(m);
@@ -46,6 +45,7 @@ public:
 
     handleCpuPossibleMask(m);
 
+    ignoreFunctions(m);
     renameDrvhornFunctions(m);
     return true;
   }
@@ -229,13 +229,13 @@ private:
     }
   }
 
-  void killFree(Module &m) {
-    std::string freeFuncNames[] = {
+  void ignoreFunctions(Module &m) {
+    StringRef names[] = {
         "kfree",
         "vfree",
         "free_percpu",
     };
-    for (const std::string &name : freeFuncNames) {
+    for (StringRef name : names) {
       if (Function *orig = m.getFunction(name)) {
         orig->deleteBody();
       }
@@ -449,17 +449,17 @@ private:
       Value *dst = wrapper->getArg(0);
       Value *src = wrapper->getArg(1);
       Value *size = wrapper->getArg(2);
-      IRBuilder<> B(block);
-      B.CreateMemCpy(dst, MaybeAlign(), src, MaybeAlign(), size);
+      IRBuilder<> b(block);
+      b.CreateMemCpy(dst, MaybeAlign(), src, MaybeAlign(), size);
       switch (info.returnType) {
       case RetType::Void:
-        B.CreateRetVoid();
+        b.CreateRetVoid();
         break;
       case RetType::Len:
-        B.CreateRet(size);
+        b.CreateRet(size);
         break;
       case RetType::Dest:
-        B.CreateRet(dst);
+        b.CreateRet(dst);
         break;
       }
       f->replaceAllUsesWith(wrapper);
@@ -479,9 +479,9 @@ private:
     Value *dst = wrapper->getArg(0);
     Value *src = wrapper->getArg(1);
     Value *size = wrapper->getArg(2);
-    IRBuilder<> B(block);
-    B.CreateMemMove(dst, MaybeAlign(), src, MaybeAlign(), size);
-    B.CreateRet(dst);
+    IRBuilder<> b(block);
+    b.CreateMemMove(dst, MaybeAlign(), src, MaybeAlign(), size);
+    b.CreateRet(dst);
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
   }
@@ -506,37 +506,37 @@ private:
     BasicBlock *copyBody = BasicBlock::Create(ctx, "", wrapper);
     BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
 
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
-    B.CreateBr(skipCond);
+    IRBuilder<> b(entry);
+    Value *it = b.CreateAlloca(i32Type);
+    b.CreateStore(b.getInt32(0), it);
+    b.CreateBr(skipCond);
 
-    B.SetInsertPoint(skipCond);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
-    Value *dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
-    Value *dstChar = B.CreateLoad(i8Type, dstPtr);
-    B.CreateCondBr(B.CreateICmpEQ(dstChar, B.getInt8(0)), copyCond, skipBody);
+    b.SetInsertPoint(skipCond);
+    Value *loadedIt = b.CreateLoad(i32Type, it);
+    Value *dstPtr = b.CreateGEP(i8Type, dst, loadedIt);
+    Value *dstChar = b.CreateLoad(i8Type, dstPtr);
+    b.CreateCondBr(b.CreateICmpEQ(dstChar, b.getInt8(0)), copyCond, skipBody);
 
-    B.SetInsertPoint(skipBody);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateBr(skipCond);
+    b.SetInsertPoint(skipBody);
+    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
+    b.CreateBr(skipCond);
 
-    B.SetInsertPoint(copyCond);
-    loadedIt = B.CreateLoad(i32Type, it);
-    Value *srcPtr = B.CreateGEP(i8Type, src, loadedIt);
-    Value *srcChar = B.CreateLoad(i8Type, srcPtr);
-    Value *isEnd = B.CreateICmpEQ(srcChar, B.getInt8(0));
-    B.CreateCondBr(isEnd, end, copyBody);
+    b.SetInsertPoint(copyCond);
+    loadedIt = b.CreateLoad(i32Type, it);
+    Value *srcPtr = b.CreateGEP(i8Type, src, loadedIt);
+    Value *srcChar = b.CreateLoad(i8Type, srcPtr);
+    Value *isEnd = b.CreateICmpEQ(srcChar, b.getInt8(0));
+    b.CreateCondBr(isEnd, end, copyBody);
 
-    B.SetInsertPoint(copyBody);
-    loadedIt = B.CreateLoad(i32Type, it);
-    dstPtr = B.CreateGEP(i8Type, dst, loadedIt);
-    B.CreateStore(srcChar, dstPtr);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateBr(copyCond);
+    b.SetInsertPoint(copyBody);
+    loadedIt = b.CreateLoad(i32Type, it);
+    dstPtr = b.CreateGEP(i8Type, dst, loadedIt);
+    b.CreateStore(srcChar, dstPtr);
+    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
+    b.CreateBr(copyCond);
 
-    B.SetInsertPoint(end);
-    B.CreateRet(dst);
+    b.SetInsertPoint(end);
+    b.CreateRet(dst);
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
   }
@@ -560,32 +560,32 @@ private:
     BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
     BasicBlock *retNonZero = BasicBlock::Create(ctx, "", wrapper);
 
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
-    B.CreateBr(loop);
+    IRBuilder<> b(entry);
+    Value *it = b.CreateAlloca(i32Type);
+    b.CreateStore(b.getInt32(0), it);
+    b.CreateBr(loop);
 
-    B.SetInsertPoint(loop);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
-    Value *s1Ptr = B.CreateGEP(i8Type, s1, loadedIt);
-    Value *s2Ptr = B.CreateGEP(i8Type, s2, loadedIt);
-    Value *s1Char = B.CreateLoad(i8Type, s1Ptr);
-    Value *s2Char = B.CreateLoad(i8Type, s2Ptr);
-    B.CreateCondBr(B.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
+    b.SetInsertPoint(loop);
+    Value *loadedIt = b.CreateLoad(i32Type, it);
+    Value *s1Ptr = b.CreateGEP(i8Type, s1, loadedIt);
+    Value *s2Ptr = b.CreateGEP(i8Type, s2, loadedIt);
+    Value *s1Char = b.CreateLoad(i8Type, s1Ptr);
+    Value *s2Char = b.CreateLoad(i8Type, s2Ptr);
+    b.CreateCondBr(b.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
 
-    B.SetInsertPoint(retNonZero);
-    Value *ret = B.CreateSelect(B.CreateICmpULT(s1Char, s2Char), B.getInt32(-1),
-                                B.getInt32(1));
-    B.CreateRet(ret);
+    b.SetInsertPoint(retNonZero);
+    Value *ret = b.CreateSelect(b.CreateICmpULT(s1Char, s2Char), b.getInt32(-1),
+                                b.getInt32(1));
+    b.CreateRet(ret);
 
-    B.SetInsertPoint(loopEnd);
-    Value *isEnd = B.CreateICmpEQ(s1Char, B.getInt8(0));
-    loadedIt = B.CreateLoad(i32Type, it);
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateCondBr(isEnd, retZero, loop);
+    b.SetInsertPoint(loopEnd);
+    Value *isEnd = b.CreateICmpEQ(s1Char, b.getInt8(0));
+    loadedIt = b.CreateLoad(i32Type, it);
+    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
+    b.CreateCondBr(isEnd, retZero, loop);
 
-    B.SetInsertPoint(retZero);
-    B.CreateRet(B.getInt32(0));
+    b.SetInsertPoint(retZero);
+    b.CreateRet(b.getInt32(0));
 
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();
@@ -611,33 +611,33 @@ private:
     BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
     BasicBlock *retNonZero = BasicBlock::Create(ctx, "", wrapper);
 
-    IRBuilder<> B(entry);
-    Value *it = B.CreateAlloca(i32Type);
-    B.CreateStore(B.getInt32(0), it);
-    B.CreateBr(loop);
+    IRBuilder<> b(entry);
+    Value *it = b.CreateAlloca(i32Type);
+    b.CreateStore(b.getInt32(0), it);
+    b.CreateBr(loop);
 
-    B.SetInsertPoint(loop);
-    Value *loadedIt = B.CreateLoad(i32Type, it);
-    Value *s1Ptr = B.CreateGEP(i8Type, s1, loadedIt);
-    Value *s2Ptr = B.CreateGEP(i8Type, s2, loadedIt);
-    Value *s1Char = B.CreateLoad(i8Type, s1Ptr);
-    Value *s2Char = B.CreateLoad(i8Type, s2Ptr);
-    B.CreateCondBr(B.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
+    b.SetInsertPoint(loop);
+    Value *loadedIt = b.CreateLoad(i32Type, it);
+    Value *s1Ptr = b.CreateGEP(i8Type, s1, loadedIt);
+    Value *s2Ptr = b.CreateGEP(i8Type, s2, loadedIt);
+    Value *s1Char = b.CreateLoad(i8Type, s1Ptr);
+    Value *s2Char = b.CreateLoad(i8Type, s2Ptr);
+    b.CreateCondBr(b.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
 
-    B.SetInsertPoint(retNonZero);
-    Value *ret = B.CreateSelect(B.CreateICmpULT(s1Char, s2Char), B.getInt32(-1),
-                                B.getInt32(1));
-    B.CreateRet(ret);
+    b.SetInsertPoint(retNonZero);
+    Value *ret = b.CreateSelect(b.CreateICmpULT(s1Char, s2Char), b.getInt32(-1),
+                                b.getInt32(1));
+    b.CreateRet(ret);
 
-    B.SetInsertPoint(loopEnd);
-    loadedIt = B.CreateLoad(i32Type, it);
-    Value *isNull = B.CreateICmpEQ(s1Char, B.getInt8(0));
-    Value *isEnd = B.CreateOr(isNull, B.CreateICmpUGE(loadedIt, size));
-    B.CreateStore(B.CreateAdd(loadedIt, B.getInt32(1)), it);
-    B.CreateCondBr(isEnd, retZero, loop);
+    b.SetInsertPoint(loopEnd);
+    loadedIt = b.CreateLoad(i32Type, it);
+    Value *isNull = b.CreateICmpEQ(s1Char, b.getInt8(0));
+    Value *isEnd = b.CreateOr(isNull, b.CreateICmpUGE(loadedIt, size));
+    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
+    b.CreateCondBr(isEnd, retZero, loop);
 
-    B.SetInsertPoint(retZero);
-    B.CreateRet(B.getInt32(0));
+    b.SetInsertPoint(retZero);
+    b.CreateRet(b.getInt32(0));
 
     f->replaceAllUsesWith(wrapper);
     f->eraseFromParent();

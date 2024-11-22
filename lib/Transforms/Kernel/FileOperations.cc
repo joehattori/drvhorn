@@ -24,7 +24,7 @@ public:
     if (!open) {
       errs() << "No open function found for struct file_operations "
              << fileOpName << "\n";
-      std::exit(1);
+      return false;
     }
     constructMain(m, open);
     return true;

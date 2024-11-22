@@ -20,6 +20,11 @@ public:
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
+    Function *probe = getProbeFn(m);
+    if (!probe) {
+      errs() << "No probe function found for " << i2cDriverName << "\n";
+      return false;
+    }
     Function *main = Function::Create(
         FunctionType::get(i32Ty, false),
         GlobalValue::LinkageTypes::ExternalLinkage, "main", &m);
@@ -27,7 +32,6 @@ public:
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    Function *probe = getProbeFn(m);
     buildEntryBlock(m, probe, entry, fail, ret);
     buildFailBlock(m, fail, ret);
     buildRetBlock(m, ret);
