@@ -192,6 +192,8 @@ public:
     handleDevmFunctions(m);
     handleCDevDeviceAdd(m, devAdd);
     handleCDevDeviceAPIs(m);
+    handleDeviceWakeupEnable(m);
+    handleDeviceWakeupDisable(m);
 
     handleOfParsePhandleWithArgs(m, devNodeGetter);
     handleOfPhandleIteratorNext(m, devNodeGetter);
@@ -527,7 +529,7 @@ private:
 
   void handleCDevDeviceAPIs(Module &m) {
     StringRef names[] = {
-      "cdev_device_del",
+        "cdev_device_del",
     };
     for (StringRef name : names) {
       Function *f = m.getFunction(name);
@@ -536,6 +538,69 @@ private:
       f->deleteBody();
       f->setName("drvhorn." + name);
     }
+  }
+
+  void handleDeviceWakeupEnable(Module &m) {
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    Function *enable = m.getFunction("device_wakeup_enable");
+    if (!enable)
+      return;
+    enable->deleteBody();
+    enable->setName("drvhorn.device_wakeup_enable");
+    Function *getDevice = m.getFunction("get_device");
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", enable);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", enable);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", enable);
+    Value *dev = enable->getArg(0);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+
+    IRBuilder<> b(entry);
+    Value *cond = b.CreateCall(ndBool);
+    b.CreateCondBr(cond, body, ret);
+
+    b.SetInsertPoint(body);
+    if (dev->getType() != getDevice->getArg(0)->getType())
+      dev = b.CreateBitCast(dev, getDevice->getArg(0)->getType());
+    b.CreateCall(getDevice, dev);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *phi = b.CreatePHI(i32Ty, 2);
+    phi->addIncoming(ConstantInt::get(i32Ty, -EINVAL), entry);
+    phi->addIncoming(ConstantInt::get(i32Ty, 0), body);
+    b.CreateRet(phi);
+  }
+
+  void handleDeviceWakeupDisable(Module &m) {
+    Function *disable = m.getFunction("device_wakeup_disable");
+    if (!disable)
+      return;
+    disable->deleteBody();
+    disable->setName("drvhorn.device_wakeup_disable");
+    Function *putDevice = m.getFunction("put_device");
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", disable);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", disable);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", disable);
+    Value *dev = disable->getArg(0);
+    IntegerType *i32Ty = Type::getInt32Ty(ctx);
+
+    IRBuilder<> b(entry);
+    Value *isNull = b.CreateIsNull(dev);
+    b.CreateCondBr(isNull, ret, body);
+
+    b.SetInsertPoint(body);
+    if (dev->getType() != putDevice->getArg(0)->getType())
+      dev = b.CreateBitCast(dev, putDevice->getArg(0)->getType());
+    b.CreateCall(putDevice, dev);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *phi = b.CreatePHI(i32Ty, 2);
+    phi->addIncoming(ConstantInt::get(i32Ty, -EINVAL), entry);
+    phi->addIncoming(ConstantInt::get(i32Ty, 0), body);
+    b.CreateRet(phi);
   }
 
 #define DL_FLAG_AUTOREMOVE_SUPPLIER (1 << 4)
