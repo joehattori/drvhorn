@@ -65,10 +65,15 @@ private:
 
   void buildFail(Module &m, Function *checker) {
     Function *fail = m.getFunction("drvhorn.fail");
-    Type *krefType = checker->getArg(0)->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
+    StructType *krefType = StructType::getTypeByName(ctx, "struct.kref");
+
     IRBuilder<> b(blk);
+    if (fail->arg_size()) {
+      Argument *instance = fail->arg_begin();
+      checkInstance(instance, b, ctx, krefType, checker);
+    }
 
     static const std::string storagePrefix = "drvhorn.storage.";
     for (GlobalVariable &gv : m.globals()) {
@@ -93,6 +98,31 @@ private:
     }
 
     b.CreateRetVoid();
+  }
+
+  void checkInstance(Argument *instance, IRBuilder<> &b, LLVMContext &ctx,
+                     StructType *krefType, Function *checker) {
+    StructType *instanceType =
+        cast<StructType>(instance->getType()->getPointerElementType());
+    StructType *devType = StructType::getTypeByName(ctx, "struct.device");
+    Value *deviceGEP = nullptr;
+    if (embedsStruct(instanceType, devType)) {
+      deviceGEP = b.CreateInBoundsGEP(
+          instanceType, instance,
+          gepIndicesToStruct(instanceType, devType).getValue());
+    } else if (embedsStruct(instanceType, devType->getPointerTo())) {
+      Value *devicePtrGEP = b.CreateInBoundsGEP(
+          instanceType, instance,
+          gepIndicesToStruct(instanceType, devType->getPointerTo()).getValue());
+      deviceGEP = b.CreateLoad(devicePtrGEP->getType()->getPointerElementType(),
+                               devicePtrGEP);
+    }
+    if (deviceGEP) {
+      Value *krefGEP = b.CreateInBoundsGEP(
+          deviceGEP->getType()->getPointerElementType(), deviceGEP,
+          gepIndicesToStruct(devType, krefType).getValue());
+      b.CreateCall(checker, krefGEP);
+    }
   }
 
   Function *genAssertFunction(Module &m, Function *checker,

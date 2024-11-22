@@ -248,15 +248,23 @@ bool embedsStruct(const StructType *s, const Type *target) {
   return false;
 }
 
-void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret) {
+void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret,
+                    Value *instance) {
   IRBuilder<> b(fail);
   LLVMContext &ctx = m.getContext();
   Type *voidTy = Type::getVoidTy(ctx);
-  FunctionType *fnType = FunctionType::get(voidTy, false);
+  FunctionType *fnType;
+  if (instance)
+    fnType = FunctionType::get(voidTy, instance->getType(), false);
+  else
+    fnType = FunctionType::get(voidTy, false);
   // devresReleaseFn and failFn are filled later in AssertKrefs.cc
   Function *failFn = Function::Create(fnType, GlobalValue::ExternalLinkage,
                                       "drvhorn.fail", &m);
-  b.CreateCall(failFn);
+  if (instance)
+    b.CreateCall(failFn, instance);
+  else
+    b.CreateCall(failFn);
   b.CreateBr(ret);
 }
 

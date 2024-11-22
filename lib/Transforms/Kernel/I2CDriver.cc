@@ -32,8 +32,8 @@ public:
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    buildEntryBlock(m, probe, entry, fail, ret);
-    buildFailBlock(m, fail, ret);
+    Value *instance = buildEntryBlock(m, probe, entry, fail, ret);
+    buildFailBlock(m, fail, ret, instance);
     buildRetBlock(m, ret);
 
     return true;
@@ -51,8 +51,8 @@ private:
     return dyn_cast_or_null<Function>(probe);
   }
 
-  void buildEntryBlock(Module &m, Function *probe, BasicBlock *entry,
-                       BasicBlock *fail, BasicBlock *ret) {
+  Value *buildEntryBlock(Module &m, Function *probe, BasicBlock *entry,
+                         BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
     StructType *i2cClientType =
         cast<StructType>(probe->getArg(0)->getType()->getPointerElementType());
@@ -60,6 +60,7 @@ private:
     CallInst *call = b.CreateCall(probe, i2cClient);
     Value *isZero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
     b.CreateCondBr(isZero, ret, fail);
+    return i2cClient;
   }
 
   Value *setupI2CClient(Module &m, IRBuilder<> &b, StructType *i2cClientType) {
@@ -67,12 +68,6 @@ private:
     StructType *deviceType = StructType::getTypeByName(ctx, "struct.device");
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    PointerType *krefPtrType =
-        cast<PointerType>(krefInit->getArg(0)->getType());
-    GlobalVariable *globalKref = new GlobalVariable(
-        m, krefPtrType, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        ConstantPointerNull::get(krefPtrType),
-        "drvhorn.kref.struct.i2c_client");
     SmallVector<Value *> gepIndices(
         gepIndicesToStruct(i2cClientType, deviceType).getValue());
     AllocaInst *i2cClient = b.CreateAlloca(i2cClientType);
@@ -80,7 +75,6 @@ private:
     gepIndices.push_back(ConstantInt::get(i32Ty, 6));
     Value *krefPtr = b.CreateInBoundsGEP(i2cClientType, i2cClient, gepIndices);
     b.CreateCall(krefInit, krefPtr);
-    b.CreateStore(krefPtr, globalKref);
     return i2cClient;
   }
 };

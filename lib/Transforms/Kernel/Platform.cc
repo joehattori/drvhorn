@@ -35,8 +35,8 @@ public:
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    buildEntryBlock(m, probe, entry, fail, ret);
-    buildFailBlock(m, fail, ret);
+    Value *instance = buildEntryBlock(m, probe, entry, fail, ret);
+    buildFailBlock(m, fail, ret, instance);
     buildRetBlock(m, ret);
 
     return true;
@@ -55,8 +55,8 @@ private:
     return dyn_cast_or_null<Function>(probe);
   }
 
-  void buildEntryBlock(Module &m, Function *probe, BasicBlock *entry,
-                       BasicBlock *fail, BasicBlock *ret) {
+  Value *buildEntryBlock(Module &m, Function *probe, BasicBlock *entry,
+                         BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
     Type *pdevType = probe->getArg(0)->getType()->getPointerElementType();
     Value *pdev = allocType(m, b, pdevType);
@@ -64,21 +64,13 @@ private:
     CallInst *call = b.CreateCall(probe, pdev);
     Value *zero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
     b.CreateCondBr(zero, ret, fail);
+    return pdev;
   }
 
   void setupPDev(Module &m, IRBuilder<> &b, Value *pdev) {
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     Type *pdevType = pdev->getType()->getPointerElementType();
     LLVMContext &ctx = m.getContext();
-    Type *krefType = krefInit->getArg(0)->getType()->getPointerElementType();
-    PointerType *krefPtrType = krefType->getPointerTo();
-    StringRef kobjName = "drvhorn.kref.struct.platform_device";
-    Value *globalKref = m.getGlobalVariable(kobjName, true);
-    if (!globalKref) {
-      globalKref =
-          new GlobalVariable(m, krefPtrType, false, GlobalValue::PrivateLinkage,
-                             ConstantPointerNull::get(krefPtrType), kobjName);
-    }
     Type *i8Ty = Type::getInt8Ty(ctx);
     Type *i32Ty = Type::getInt32Ty(ctx);
     Type *i64Ty = Type::getInt64Ty(ctx);
@@ -95,7 +87,6 @@ private:
                                           ConstantInt::get(i32Ty, 6)},
                                          "kref");
     b.CreateCall(krefInit, krefPtr);
-    b.CreateStore(krefPtr, globalKref);
 
     // setup driver_data
     Value *driverDataPtr =

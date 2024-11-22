@@ -32,7 +32,7 @@ public:
     target->setCallingConv(CallingConv::C);
 
     buildEntryBlock(m, target, entry, fail, ret);
-    buildFailBlock(m, fail, ret);
+    buildFailBlock(m, fail, ret, nullptr);
     buildRetBlock(m, ret);
     return true;
   }

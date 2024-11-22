@@ -20,6 +20,6 @@ llvm::Type *getGEPType(llvm::StructType *s,
                        llvm::ArrayRef<llvm::Value *> indices);
 bool embedsStruct(const llvm::StructType *s, const llvm::Type *target);
 void buildFailBlock(llvm::Module &m, llvm::BasicBlock *fail,
-                    llvm::BasicBlock *ret);
+                    llvm::BasicBlock *ret, llvm::Value *instance);
 void buildRetBlock(llvm::Module &m, llvm::BasicBlock *ret);
 } // namespace seahorn

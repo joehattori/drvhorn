@@ -51,13 +51,13 @@ private:
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    buildEntryBlock(m, open, entry, fail, ret);
-    buildFailBlock(m, fail, ret);
+    Value *instance = buildEntryBlock(m, open, entry, fail, ret);
+    buildFailBlock(m, fail, ret, instance);
     buildRetBlock(m, ret);
   }
 
-  void buildEntryBlock(Module &m, Function *open, BasicBlock *entry,
-                       BasicBlock *fail, BasicBlock *ret) {
+  Value *buildEntryBlock(Module &m, Function *open, BasicBlock *entry,
+                         BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
     Type *i32Ty = Type::getInt32Ty(m.getContext());
 
@@ -91,7 +91,7 @@ private:
       break;
     default:
       errs() << "TODO: multiple kref\n";
-      return;
+      return nullptr;
     }
 
     Type *filePtrType = open->getArg(1)->getType();
@@ -99,6 +99,7 @@ private:
     CallInst *call = b.CreateCall(open->getFunctionType(), open, {inode, file});
     Value *notZero = b.CreateICmpNE(call, ConstantInt::get(i32Ty, 0));
     b.CreateCondBr(notZero, fail, ret);
+    return file;
   }
 
   SmallVector<const Value *> getIPrivatePtrs(const Argument *arg,

@@ -32,8 +32,8 @@ public:
     BasicBlock *fail = BasicBlock::Create(ctx, "fail", main);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", main);
 
-    buildEntryBlock(m, setup, entry, fail, ret);
-    buildFailBlock(m, fail, ret);
+    Value *instance = buildEntryBlock(m, setup, entry, fail, ret);
+    buildFailBlock(m, fail, ret, instance);
     buildRetBlock(m, ret);
 
     return true;
@@ -52,16 +52,17 @@ private:
     return dyn_cast_or_null<Function>(setup);
   }
 
-  void buildEntryBlock(Module &m, Function *setup, BasicBlock *entry,
-                       BasicBlock *fail, BasicBlock *ret) {
+  Value *buildEntryBlock(Module &m, Function *setup, BasicBlock *entry,
+                         BasicBlock *fail, BasicBlock *ret) {
     IRBuilder<> b(entry);
     StructType *dsaSwitchType =
         cast<StructType>(setup->getArg(0)->getType()->getPointerElementType());
     Value *dsaSwitch = allocType(m, b, dsaSwitchType);
     setupDsaSwitch(m, b, dsaSwitch, dsaSwitchType);
-    CallInst *call = b.CreateCall(setup, {dsaSwitch});
+    CallInst *call = b.CreateCall(setup, dsaSwitch);
     Value *isZero = b.CreateICmpEQ(call, ConstantInt::get(call->getType(), 0));
     b.CreateCondBr(isZero, ret, fail);
+    return dsaSwitch;
   }
 
   void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch,
@@ -73,24 +74,14 @@ private:
     Type *deviceType =
         dsaSwitchType->getElementType(0)->getPointerElementType();
     Value *devPtr = b.CreateAlloca(deviceType);
-    PointerType *krefPtrType =
-        cast<PointerType>(krefInit->getArg(0)->getType());
-    GlobalVariable *globalKref =
-        new GlobalVariable(m, krefPtrType, false, GlobalValue::PrivateLinkage,
-                           ConstantPointerNull::get(krefPtrType),
-                           "drvhorn.kref.struct.dsa_switch");
     Value *krefPtr =
         b.CreateGEP(deviceType, devPtr,
                     {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
                      ConstantInt::get(i32Ty, 6)});
     b.CreateCall(krefInit, krefPtr);
-    b.CreateStore(krefPtr, globalKref);
     Value *gep =
         b.CreateGEP(dsaSwitchType, dsaSwitch,
                     {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0)});
-    if (krefPtr->getType() != gep->getType()->getPointerElementType())
-      krefPtr =
-          b.CreateBitCast(krefPtr, gep->getType()->getPointerElementType());
     b.CreateStore(devPtr, gep);
   }
 
