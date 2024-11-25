@@ -14,15 +14,14 @@ class I2CDriver : public ModulePass {
 public:
   static char ID;
 
-  I2CDriver(StringRef i2cDriverName)
-      : ModulePass(ID), i2cDriverName(i2cDriverName) {}
+  I2CDriver(StringRef name) : ModulePass(ID), name(name) {}
 
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
     Function *probe = getProbeFn(m);
     if (!probe) {
-      errs() << "No probe function found for " << i2cDriverName << "\n";
+      errs() << "No probe function found for " << name << "\n";
       return false;
     }
     Function *main = Function::Create(
@@ -42,10 +41,10 @@ public:
   virtual StringRef getPassName() const override { return "I2CDriver"; }
 
 private:
-  StringRef i2cDriverName;
+  StringRef name;
 
   Function *getProbeFn(Module &m) {
-    GlobalVariable *drv = m.getGlobalVariable(i2cDriverName, true);
+    GlobalVariable *drv = m.getGlobalVariable(name, true);
     Constant *probe =
         drv->getInitializer()->getAggregateElement(i2cDriverProbeIndex);
     return dyn_cast_or_null<Function>(probe);

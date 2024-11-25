@@ -192,7 +192,7 @@ public:
     handleDeviceAllocation(m, devInit, updateIndex);
     handleDevmFunctions(m);
     handleCDevDeviceAdd(m, devAdd);
-    handleCDevDeviceAPIs(m);
+    handleCDevDeviceDel(m);
     handleDeviceWakeupEnable(m);
     handleDeviceWakeupDisable(m);
 
@@ -555,17 +555,12 @@ private:
     b.CreateRet(v);
   }
 
-  void handleCDevDeviceAPIs(Module &m) {
-    StringRef names[] = {
-        "cdev_device_del",
-    };
-    for (StringRef name : names) {
-      Function *f = m.getFunction(name);
-      if (!f)
-        continue;
-      f->deleteBody();
-      f->setName("drvhorn." + name);
-    }
+  void handleCDevDeviceDel(Module &m) {
+    Function *f = m.getFunction("cdev_device_del");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.cdev_device_del");
   }
 
   void handleDeviceWakeupEnable(Module &m) {

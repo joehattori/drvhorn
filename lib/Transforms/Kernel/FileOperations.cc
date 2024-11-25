@@ -17,13 +17,13 @@ class FileOperations : public ModulePass {
 public:
   static char ID;
 
-  FileOperations(StringRef name) : ModulePass(ID) { fileOpName = name; }
+  FileOperations(StringRef name) : ModulePass(ID), name(name) {}
 
   bool runOnModule(Module &m) override {
     Function *open = getOpenFunc(m);
     if (!open) {
-      errs() << "No open function found for struct file_operations "
-             << fileOpName << "\n";
+      errs() << "No open function found for struct file_operations " << name
+             << "\n";
       return false;
     }
     constructMain(m, open);
@@ -31,11 +31,11 @@ public:
   }
 
 private:
-  StringRef fileOpName;
+  StringRef name;
   DenseMap<const Type *, Function *> ndfn;
 
   Function *getOpenFunc(Module &m) {
-    GlobalVariable *fileOp = m.getNamedGlobal(fileOpName);
+    GlobalVariable *fileOp = m.getNamedGlobal(name);
     Constant *open =
         fileOp->getInitializer()->getAggregateElement(fileOpOpenIndex);
     return dyn_cast_or_null<Function>(open);

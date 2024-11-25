@@ -18,15 +18,14 @@ class PlatformDriver : public ModulePass {
 public:
   static char ID;
 
-  PlatformDriver(StringRef platformDriverName)
-      : ModulePass(ID), platformDriverName(platformDriverName) {}
+  PlatformDriver(StringRef name) : ModulePass(ID), name(name) {}
 
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
     Function *probe = getProbeFn(m);
     if (!probe) {
-      errs() << "No probe function found for " << platformDriverName << "\n";
+      errs() << "No probe function found for " << name << "\n";
       return false;
     }
     Function *main = Function::Create(FunctionType::get(i32Ty, false),
@@ -45,11 +44,11 @@ public:
   virtual StringRef getPassName() const override { return "PlatformDriver"; }
 
 private:
-  StringRef platformDriverName;
+  StringRef name;
   DenseMap<const Type *, Function *> ndfn;
 
   Function *getProbeFn(Module &m) {
-    GlobalVariable *drv = m.getGlobalVariable(platformDriverName, true);
+    GlobalVariable *drv = m.getGlobalVariable(name, true);
     Constant *probe =
         drv->getInitializer()->getAggregateElement(platformDriverProbeIndex);
     return dyn_cast_or_null<Function>(probe);

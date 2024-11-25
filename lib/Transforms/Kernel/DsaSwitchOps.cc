@@ -14,15 +14,14 @@ class DsaSwitchOps : public ModulePass {
 public:
   static char ID;
 
-  DsaSwitchOps(StringRef dsaSwitchOpsName)
-      : ModulePass(ID), dsaSwitchOpsName(dsaSwitchOpsName) {}
+  DsaSwitchOps(StringRef name) : ModulePass(ID), name(name) {}
 
   bool runOnModule(Module &m) override {
     LLVMContext &ctx = m.getContext();
     Type *i32Ty = Type::getInt32Ty(ctx);
     Function *setup = getSetupFn(m);
     if (!setup) {
-      errs() << "No probe function found for " << dsaSwitchOpsName << "\n";
+      errs() << "No probe function found for " << name << "\n";
       return false;
     }
     Function *main = Function::Create(
@@ -42,11 +41,11 @@ public:
   virtual StringRef getPassName() const override { return "DsaSwitchOps"; }
 
 private:
-  StringRef dsaSwitchOpsName;
+  StringRef name;
   DenseMap<const Type *, Function *> ndfn;
 
   Function *getSetupFn(Module &m) {
-    GlobalVariable *drv = m.getGlobalVariable(dsaSwitchOpsName, true);
+    GlobalVariable *drv = m.getGlobalVariable(name, true);
     Constant *setup =
         drv->getInitializer()->getAggregateElement(dsaSwitchOpsSetupIndex);
     return dyn_cast_or_null<Function>(setup);
