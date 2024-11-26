@@ -65,6 +65,8 @@ private:
 
   void buildFail(Module &m, Function *checker) {
     Function *fail = m.getFunction("drvhorn.fail");
+    if (!fail)
+      return;
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "entry", fail);
     StructType *krefType = StructType::getTypeByName(ctx, "struct.kref");

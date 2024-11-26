@@ -30,6 +30,8 @@ public:
     return true;
   }
 
+  virtual StringRef getPassName() const override { return "FileOperations"; }
+
 private:
   StringRef name;
   DenseMap<const Type *, Function *> ndfn;
@@ -74,11 +76,10 @@ private:
     populateFields(m, b, iPrivate, fields);
     Function *krefInit = m.getFunction("drvhorn.kref_init");
     Type *krefType = krefInit->getArg(0)->getType()->getPointerElementType();
-    GlobalVariable *globalKref =
-        new GlobalVariable(m, krefType->getPointerTo(), false,
-                           GlobalValue::LinkageTypes::PrivateLinkage,
-                           ConstantPointerNull::get(krefType->getPointerTo()),
-                           "drvhorn.kref.struct.file_operations");
+    GlobalVariable *globalKref = new GlobalVariable(
+        m, krefType->getPointerTo(), false, GlobalValue::PrivateLinkage,
+        ConstantPointerNull::get(krefType->getPointerTo()),
+        "drvhorn.kref.struct.file_operations");
     SmallVector<Value *, 8> krefPtrs =
         embeddedKrefPtrs(m, b, iPrivate, fields, krefType);
     switch (krefPtrs.size()) {
@@ -152,8 +153,11 @@ private:
           if (gep->getNumIndices() != 1)
             continue;
           ConstantInt *idx = dyn_cast<ConstantInt>(gep->getOperand(1));
+          if (!idx)
+            continue;
           uint64_t fieldIdx = idx->getZExtValue();
-          fields[fieldIdx] = getActualIPrivateFieldType(gep);
+          if (Type *t = getActualIPrivateFieldType(gep))
+            fields[fieldIdx] = t;
         }
       }
     }
@@ -227,27 +231,30 @@ private:
     for (const auto &field : fields) {
       uint64_t idx = field.first;
       Type *fieldType = field.second;
-      if (StructType *structType =
-              dyn_cast<StructType>(fieldType->getPointerElementType())) {
-        Value *fieldPtrAddr =
-            b.CreateGEP(i8Type, iPrivate, ConstantInt::get(i64Type, idx));
-        Value *fieldPtr =
-            b.CreateBitCast(fieldPtrAddr, fieldType->getPointerTo());
-        Value *fieldValue = b.CreateLoad(fieldType, fieldPtr);
+      if (!fieldType->isPointerTy())
+        continue;
+      StructType *structType =
+          dyn_cast<StructType>(fieldType->getPointerElementType());
+      if (!structType)
+        continue;
+      Value *fieldPtrAddr =
+          b.CreateGEP(i8Type, iPrivate, ConstantInt::get(i64Type, idx));
+      Value *fieldPtr =
+          b.CreateBitCast(fieldPtrAddr, fieldType->getPointerTo());
+      Value *fieldValue = b.CreateLoad(fieldType, fieldPtr);
 
-        SmallVector<uint64_t, 8> indices =
-            indicesToKrefType(structType, krefType);
-        if (indices.empty())
-          continue;
-        SmallVector<Value *, 8> gepIndices;
-        gepIndices.push_back(ConstantInt::get(i64Type, 0));
-        for (int i = indices.size() - 1; i >= 0; i--) {
-          gepIndices.push_back(ConstantInt::get(i32Type, indices[i]));
-        }
-
-        Value *gep = b.CreateGEP(structType, fieldValue, gepIndices);
-        devicePtrs.push_back(gep);
+      SmallVector<uint64_t, 8> indices =
+          indicesToKrefType(structType, krefType);
+      if (indices.empty())
+        continue;
+      SmallVector<Value *, 8> gepIndices;
+      gepIndices.push_back(ConstantInt::get(i64Type, 0));
+      for (int i = indices.size() - 1; i >= 0; i--) {
+        gepIndices.push_back(ConstantInt::get(i32Type, indices[i]));
       }
+
+      Value *gep = b.CreateGEP(structType, fieldValue, gepIndices);
+      devicePtrs.push_back(gep);
     }
     return devicePtrs;
   }
@@ -273,14 +280,20 @@ private:
 
   void populateFields(Module &m, IRBuilder<> &b, Value *instanceAddr,
                       const DenseMap<uint64_t, Type *> &fields) {
-    Type *i8Type = Type::getInt8Ty(m.getContext());
-    Type *i64Type = Type::getInt64Ty(m.getContext());
+    LLVMContext &ctx = m.getContext();
+    Type *i8Type = Type::getInt8Ty(ctx);
+    Type *i64Type = Type::getInt64Ty(ctx);
     for (const auto &field : fields) {
+      if (!field.second->isPointerTy())
+        continue;
+      Type *fieldElemType = field.second->getPointerElementType();
+      if (isa<FunctionType>(fieldElemType))
+        continue;
       Value *idx = ConstantInt::get(i64Type, field.first);
       Value *fieldAddr = b.CreateGEP(i8Type, instanceAddr, idx);
       Value *fieldPtrDest =
           b.CreateBitCast(fieldAddr, i8Type->getPointerTo()->getPointerTo());
-      Value *fieldPtr = allocType(m, b, field.second->getPointerElementType());
+      Value *fieldPtr = allocType(m, b, fieldElemType);
       Value *casted = b.CreateBitCast(fieldPtr, i8Type->getPointerTo());
       b.CreateStore(casted, fieldPtrDest);
     }

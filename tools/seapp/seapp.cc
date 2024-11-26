@@ -8,6 +8,7 @@
 ///
 // SeaPP-- LLVM bitcode Pre-Processor for Verification
 ///
+#include <sys/stat.h>
 
 #include "llvm_seahorn/InitializePasses.h"
 #include "llvm_seahorn/Transforms/IPO.h"
@@ -854,13 +855,13 @@ int main(int argc, char **argv) {
     llvm::SmallVector<std::pair<DriverType, std::string>> drivers =
         parseDriverList(DriverList);
     const llvm::Module &m = *module.get();
+    mkdir("out-pp", 0775);
     for (std::pair<DriverType, std::string> driver : drivers) {
-      std::string out = "gen-" + driver.second + ".ll";
+      std::string out = "out-pp/" + driver.second + ".ll";
       SeaPassManagerWrapper pm_wrapper(Registry, output, driver.first,
                                        driver.second, true, out);
-      llvm::errs() << "Running driver for " << driver.second << "\n";
+      llvm::outs() << "Running driver for " << driver.second << "\n";
       std::unique_ptr<llvm::Module> clonedModule = llvm::CloneModule(m);
-      llvm::errs() << "cloned\n";
       pm_wrapper.run(*clonedModule.get());
     }
   } else {

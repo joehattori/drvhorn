@@ -414,6 +414,8 @@ public:
     return true;
   }
 
+  virtual StringRef getPassName() const override { return "HandleInlineAsm"; }
+
 private:
   DenseMap<const Type *, FunctionCallee> ndfn;
 
