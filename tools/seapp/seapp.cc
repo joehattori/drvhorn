@@ -8,7 +8,6 @@
 ///
 // SeaPP-- LLVM bitcode Pre-Processor for Verification
 ///
-#include <sys/stat.h>
 
 #include "llvm_seahorn/InitializePasses.h"
 #include "llvm_seahorn/Transforms/IPO.h"
@@ -333,6 +332,11 @@ static llvm::cl::list<std::string>
 static llvm::cl::opt<std::string>
     KernelOutLL("kernel-out-ll",
                 llvm::cl::desc("Output file for the kernel LLVM IR"),
+                llvm::cl::init(""));
+
+static llvm::cl::opt<std::string>
+    KernelOutDir("kernel-out-dir",
+                llvm::cl::desc("Output directory for the kernel LLVM IR"),
                 llvm::cl::init(""));
 
 static llvm::cl::opt<std::string> DriverList("driver-list",
@@ -855,9 +859,8 @@ int main(int argc, char **argv) {
     llvm::SmallVector<std::pair<DriverType, std::string>> drivers =
         parseDriverList(DriverList);
     const llvm::Module &m = *module.get();
-    mkdir("out-pp", 0775);
     for (std::pair<DriverType, std::string> driver : drivers) {
-      std::string out = "out-pp/" + driver.second + ".ll";
+      std::string out = KernelOutDir + "/" + driver.second + ".ll";
       SeaPassManagerWrapper pm_wrapper(Registry, output, driver.first,
                                        driver.second, true, out);
       llvm::outs() << "Running driver for " << driver.second << "\n";

@@ -332,6 +332,8 @@ class Seapp(sea.LimitedCmd):
                          type=str, default=None, metavar='str')
         ap.add_argument ('--driver-list', dest='driver_list', help='Driver list',
                          type=str, default=None, metavar='str')
+        ap.add_argument ('--out-dir', dest='out_dir', help='Driver list output dir',
+                         type=str, default='outpp', metavar='str')
 
         ap.add_argument ('--externalize-addr-taken-functions',
                          help='Externalize uses of address-taken functions',
@@ -435,6 +437,10 @@ class Seapp(sea.LimitedCmd):
 
         if args.driver_list:
             argv.append ('--driver-list={0}'.format(args.driver_list))
+
+        if args.out_dir:
+            os.makedirs(args.out_dir, exist_ok=True)
+            argv.append ('--kernel-out-dir={0}'.format(args.out_dir))
 
         if args.out_ll:
             argv.append('--kernel-out-ll={0}'.format(args.out_ll))
