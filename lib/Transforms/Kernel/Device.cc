@@ -1052,8 +1052,11 @@ private:
       return;
     Function *alloc = getOrCreateAlloc(m);
     DeviceGEPGetter getter(devInit);
+    const DenseMap<uint64_t, SmallVector<StructType *>> &structsBySize =
+        getStructsBySize(m);
     for (CallInst *call : getCalls(alloc)) {
-      StructType *allocatedDevType = getCustomDevType(m, getter, call);
+      StructType *allocatedDevType =
+          getCustomDevType(m, structsBySize, getter, call);
       if (!allocatedDevType)
         continue;
       Function *devAlloc = getOrCreateDeviceAllocator(
@@ -1066,8 +1069,20 @@ private:
     }
   }
 
-  StructType *getCustomDevType(Module &m, DeviceGEPGetter &getter,
-                               CallInst *call) {
+  DenseMap<uint64_t, SmallVector<StructType *>> getStructsBySize(Module &m) {
+    DenseMap<uint64_t, SmallVector<StructType *>> res;
+    DataLayout dl(&m);
+    for (StructType *st : m.getIdentifiedStructTypes()) {
+      uint64_t size = dl.getTypeAllocSize(st);
+      res[size].push_back(st);
+    }
+    return res;
+  }
+
+  StructType *getCustomDevType(
+      Module &m,
+      const DenseMap<uint64_t, SmallVector<StructType *>> &structsBySize,
+      DeviceGEPGetter &getter, CallInst *call) {
     DataLayout dl(&m);
     LLVMContext &ctx = m.getContext();
     StructType *devType = StructType::getTypeByName(ctx, "struct.device");
@@ -1083,9 +1098,7 @@ private:
     Optional<SmallVector<uint64_t>> indices = getter.getGEPIndices(call);
     if (!indices.hasValue())
       return nullptr;
-    for (StructType *st : m.getIdentifiedStructTypes()) {
-      if (dl.getTypeAllocSize(st) != size)
-        continue;
+    for (StructType *st : structsBySize.lookup(size)) {
       if (hasDeviceAtIndices(st, *indices, devType))
         return st;
     }
