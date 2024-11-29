@@ -521,10 +521,10 @@ private:
     return {storage, index, targetIndex};
   }
 
-  // devm functions are handled in Devm.cc
   void handleDevmFunctions(Module &m) {
+    handleDevmAddAction(m);
+
     StringRef names[] = {
-        "__devm_add_action",
         "__devres_alloc_node",
         "devres_add",
     };
@@ -536,6 +536,26 @@ private:
       f->deleteBody();
       f->setName("drvhorn." + name);
       f->addFnAttr(attr);
+    }
+  }
+
+  void handleDevmAddAction(Module &m) {
+    Function *f = m.getFunction("__devm_add_action");
+    if (!f)
+      return;
+    for (CallInst *call : getCalls(f)) {
+      Function *action =
+          dyn_cast<Function>(call->getArgOperand(1)->stripPointerCasts());
+      if (!action)
+        continue;
+      Value *data = call->getArgOperand(2);
+
+      IRBuilder<> b(call);
+      if (action->getArg(0)->getType() != data->getType())
+        data = b.CreateBitCast(data, action->getArg(0)->getType());
+      b.CreateCall(action, data);
+      call->replaceAllUsesWith(b.getInt32(0));
+      call->eraseFromParent();
     }
   }
 
