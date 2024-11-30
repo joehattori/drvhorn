@@ -105,7 +105,7 @@ private:
             .getValue();
     Value *ofNodeGEP =
         b.CreateInBoundsGEP(devType, devPtr, devNodeIndices, "of_node");
-    Function *devNodeGetter = m.getFunction("drvhorn.gen_device_node");
+    Function *devNodeGetter = m.getFunction("drvhorn.gen.devnode");
     Value *ofNode = b.CreateCall(devNodeGetter);
     if (ofNode->getType() != ofNodeGEP->getType()->getPointerElementType())
       ofNode = b.CreateBitCast(ofNode,
