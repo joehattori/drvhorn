@@ -191,7 +191,7 @@ public:
     Function *devInit = handleDeviceInitialize(m);
     Function *devAdd = handleDeviceAdd(m, devInit);
     handleDeviceDel(m);
-    handleDeviceLinkAdd(m);
+    handleDeviceLink(m);
     handleDeviceAllocation(m, devInit, updateIndex);
     handleDevmFunctions(m);
     handleCDevDeviceAdd(m, devAdd);
@@ -655,7 +655,61 @@ private:
 
 #define DL_FLAG_AUTOREMOVE_SUPPLIER (1 << 4)
 #define DL_FLAG_AUTOPROBE_CONSUMER (1 << 5)
+  void handleDeviceLink(Module &m) {
+    handleDeviceLinkAdd(m);
+    handleDeviceLinkDel(m);
+    handleDeviceLinkRemove(m);
+  }
+
+#define DEVLINK_SUPPLIER_INDEX 0
+#define DEVLINK_CONSUMER_INDEX 2
   void handleDeviceLinkAdd(Module &m) {
+    Function *f = m.getFunction("device_link_add");
+    if (!f)
+      return;
+    handleDeviceLinkAddAutoremoveCall(m, f);
+    f->deleteBody();
+    f->setName("drvhorn.device_link_add");
+
+    Argument *consumer = f->getArg(0);
+    Argument *supplier = f->getArg(1);
+
+    Type *devlinkType = f->getReturnType()->getPointerElementType();
+    LLVMContext &ctx = m.getContext();
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    Value *ndCond = b.CreateCall(ndBool);
+    b.CreateCondBr(ndCond, body, ret);
+
+    b.SetInsertPoint(body);
+    AllocaInst *link = b.CreateAlloca(devlinkType);
+    Value *supplierGEP = b.CreateInBoundsGEP(
+        devlinkType, link, {b.getInt64(0), b.getInt32(DEVLINK_SUPPLIER_INDEX)});
+    Value *consumerGEP = b.CreateInBoundsGEP(
+        devlinkType, link, {b.getInt64(0), b.getInt32(DEVLINK_CONSUMER_INDEX)});
+    if (supplier->getType()->getPointerTo() != supplierGEP->getType())
+      supplierGEP =
+          b.CreateBitCast(supplierGEP, supplier->getType()->getPointerTo());
+    if (consumer->getType()->getPointerTo() != consumerGEP->getType())
+      consumerGEP =
+          b.CreateBitCast(consumerGEP, consumer->getType()->getPointerTo());
+    b.CreateStore(supplier, supplierGEP);
+    b.CreateStore(consumer, consumerGEP);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *retPhi = b.CreatePHI(devlinkType->getPointerTo(), 2);
+    retPhi->addIncoming(ConstantPointerNull::get(devlinkType->getPointerTo()),
+                        entry);
+    retPhi->addIncoming(link, body);
+    b.CreateRet(retPhi);
+  }
+
+  void handleDeviceLinkAddAutoremoveCall(Module &m, Function *devlinkAdd) {
     auto isAutoremove = [](CallInst *devLinkAddCall) -> bool {
       ConstantInt *flags =
           dyn_cast<ConstantInt>(devLinkAddCall->getArgOperand(2));
@@ -665,11 +719,8 @@ private:
              (DL_FLAG_AUTOREMOVE_SUPPLIER | DL_FLAG_AUTOPROBE_CONSUMER);
     };
 
-    Function *f = m.getFunction("device_link_add");
-    if (!f)
-      return;
     Function *ndBool = getOrCreateNdIntFn(m, 1);
-    for (CallInst *call : getCalls(f)) {
+    for (CallInst *call : getCalls(devlinkAdd)) {
       if (!isAutoremove(call))
         continue;
       SmallVector<ICmpInst *, 8> icmps;
@@ -692,6 +743,60 @@ private:
       }
       call->eraseFromParent();
     }
+  }
+
+  void handleDeviceLinkDel(Module &m) {
+    Function *f = m.getFunction("device_link_del");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.device_link_del");
+
+    LLVMContext &ctx = m.getContext();
+    Function *putDevice = m.getFunction("put_device");
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    Argument *link = f->getArg(0);
+    Type *devlinkType = link->getType()->getPointerElementType();
+
+    IRBuilder<> b(entry);
+    Value *supplierGEP = b.CreateInBoundsGEP(
+        devlinkType, link, {b.getInt64(0), b.getInt32(DEVLINK_SUPPLIER_INDEX)});
+    Value *consumerGEP = b.CreateInBoundsGEP(
+        devlinkType, link, {b.getInt64(0), b.getInt32(DEVLINK_CONSUMER_INDEX)});
+    Type *devPtrType = putDevice->getArg(0)->getType();
+    if (supplierGEP->getType() != devPtrType->getPointerTo())
+      supplierGEP = b.CreateBitCast(supplierGEP, devPtrType->getPointerTo());
+    if (consumerGEP->getType() != devPtrType->getPointerTo())
+      consumerGEP = b.CreateBitCast(consumerGEP, devPtrType->getPointerTo());
+    Value *supplier = b.CreateLoad(devPtrType, supplierGEP);
+    Value *consumer = b.CreateLoad(devPtrType, consumerGEP);
+    b.CreateCall(putDevice, supplier);
+    b.CreateCall(putDevice, consumer);
+    b.CreateRetVoid();
+  }
+
+  void handleDeviceLinkRemove(Module &m) {
+    Function *f = m.getFunction("device_link_remove");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.device_link_remove");
+
+    LLVMContext &ctx = m.getContext();
+    Function *putDevice = m.getFunction("put_device");
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    Value *consumer = f->getArg(0);
+    Value *supplier = f->getArg(1);
+    Type *devPtrType = putDevice->getArg(0)->getType();
+
+    IRBuilder<> b(entry);
+    if (consumer->getType() != devPtrType)
+      consumer = b.CreateBitCast(consumer, devPtrType);
+    if (supplier->getType() != devPtrType)
+      supplier = b.CreateBitCast(supplier, devPtrType);
+    b.CreateCall(putDevice, consumer);
+    b.CreateCall(putDevice, supplier);
+    b.CreateRetVoid();
   }
 
   void handleFindDevice(Module &m, Function *updateIndex) {
