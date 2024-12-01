@@ -67,8 +67,9 @@ struct Filter : public InstVisitor<Filter, bool> {
 public:
   Filter(Module &m) {
     const DenseSet<const CallInst *> &ignoreList = trivialFwnodeGetters(m);
-    buildStartingPoint(m, ignoreList);
+    buildGenerators(m, ignoreList);
     buildTargetArgs(m);
+    // buildIndirectTargetArgs(m);
 
     for (Function &f : m) {
       // First, track return insts.
@@ -137,7 +138,7 @@ public:
   bool visitPtrToIntInst(PtrToIntInst &ptrToInt) { return false; }
 
   bool visitCallInst(CallInst &call) {
-    bool isTarget = startingPoints.count(&call);
+    bool isTarget = refcountGenerators.count(&call);
     if (Function *f = extractCalledFunction(call)) {
       bool isDevm = f->hasFnAttribute("drvhorn.devm");
       if (isDevm) {
@@ -202,7 +203,7 @@ public:
   }
 
 private:
-  DenseSet<const CallInst *> startingPoints;
+  DenseSet<const CallInst *> refcountGenerators;
   DenseSet<const Argument *> targetArgs;
   DenseSet<const Instruction *> targets;
   DenseSet<const Value *> underlyingTargetPtrs;
@@ -244,7 +245,13 @@ private:
         return false;
     }
     if (const Argument *arg = dyn_cast<Argument>(v)) {
-      return targetArgs.count(arg);
+      if (targetArgs.count(arg))
+        return true;
+      SmallVector<const Value *> underlyingVals;
+      getUnderlyingObjects(store.getValueOperand(), underlyingVals, nullptr, 0);
+      return any_of(underlyingVals, [this](const Value *v) {
+        return refcountGenerators.count(dyn_cast<CallInst>(v));
+      });
     }
     return underlyingTargetPtrs.count(v) || underlyingRetPtrs.count(v) ||
            underlyingTargetArgsPtrs.count(v);
@@ -305,14 +312,14 @@ private:
       for (const CallInst *call : getCalls(f)) {
         if (ignoreList.contains(call))
           continue;
-        startingPoints.insert(call);
+        refcountGenerators.insert(call);
         workList.push_back(call->getFunction());
       }
     }
   }
 
-  void buildStartingPoint(const Module &m,
-                          const DenseSet<const CallInst *> &ignoreList) {
+  void buildGenerators(const Module &m,
+                       const DenseSet<const CallInst *> &ignoreList) {
     DenseSet<const Function *> visited;
     SmallVector<const Function *> workList;
     for (const Function &f : m) {
@@ -327,8 +334,29 @@ private:
       for (const CallInst *call : getCalls(f)) {
         if (ignoreList.contains(call))
           continue;
-        startingPoints.insert(call);
+        refcountGenerators.insert(call);
         workList.push_back(call->getFunction());
+      }
+    }
+  }
+
+  void buildIndirectTargetArgs(const Module &m) {
+    for (const Function &f : m) {
+      for (const Instruction &inst : instructions(f)) {
+        if (const StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+          const Value *val = store->getValueOperand();
+          if (const Argument *arg = dyn_cast<Argument>(
+                  getUnderlyingObject(store->getPointerOperand()))) {
+            SmallVector<const Value *> underlyingVals;
+            getUnderlyingObjects(val, underlyingVals, nullptr, 0);
+            bool isGen = any_of(underlyingVals, [this](const Value *v) {
+              return isa<CallInst>(v) &&
+                     refcountGenerators.count(cast<CallInst>(v));
+            });
+            if (isGen)
+              targetArgs.insert(arg);
+          }
+        }
       }
     }
   }
@@ -336,8 +364,7 @@ private:
   void buildTargetArgs(Module &m) {
     buildKrefTargetArgs(m);
     for (const Argument *arg : targetArgs) {
-      const Function *f = arg->getParent();
-      for (const CallInst *call : getCalls(f)) {
+      for (const CallInst *call : getCalls(arg->getParent())) {
         if (const Value *v = call->getArgOperand(arg->getArgNo())) {
           SmallVector<const Value *> objs;
           getUnderlyingObjects(v, objs, nullptr, 0);
