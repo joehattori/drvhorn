@@ -28,7 +28,6 @@ public:
     m.setModuleInlineAsm("");
     Function *allocStub = getOrCreateAlloc(m);
     stubAllocationFunctions(m, allocStub);
-    stubKernelFunctions(m);
     handleKrefAPIs(m);
     handleKmemCache(m, allocStub);
 
@@ -36,17 +35,9 @@ public:
     handleDevErrProbeCalls(m);
     handleIsErr(m);
 
-    // handleMemset(m);
-    handleMemCpy(m);
-    handleMemMove(m);
-    // handleStrCat(M);
-    // handleStrNCmp(M);
-    handleStrChr(m);
-
     handleCpuPossibleMask(m);
 
     ignoreFunctions(m);
-    renameDrvhornFunctions(m);
     return true;
   }
 
@@ -87,24 +78,6 @@ private:
         call->replaceAllUsesWith(replace);
         call->eraseFromParent();
       }
-    }
-  }
-
-  void stubKernelFunctions(Module &m) {
-    std::string mallocFns[] = {"strcpy",  "strncpy", "strlen",
-                               "strnlen", "strcmp",  "strncmp"};
-    for (const std::string &name : mallocFns) {
-      Function *orig = m.getFunction(name);
-      if (!orig)
-        continue;
-      std::string stubName = "__DRVHORN_" + name;
-      Function *stub = m.getFunction(stubName);
-      if (!stub) {
-        errs() << "stub not found: " << stubName << "\n";
-        std::exit(1);
-      }
-      orig->replaceAllUsesWith(stub);
-      orig->eraseFromParent();
     }
   }
 
@@ -310,24 +283,6 @@ private:
     }
   }
 
-  void renameDrvhornFunctions(Module &m) {
-    for (Function &f : m) {
-      if (f.getName().startswith("__DRVHORN_")) {
-        StringRef realName = f.getName().substr(10);
-        std::string newName = "drvhorn." + realName.str();
-        f.setName(newName);
-      }
-    }
-
-    for (GlobalVariable &gv : m.globals()) {
-      if (gv.getName().startswith("__DRVHORN_")) {
-        StringRef realName = gv.getName().substr(10);
-        std::string newName = "drvhorn." + realName.str();
-        gv.setName(newName);
-      }
-    }
-  }
-
   void handleCallRcu(Module &m) {
     LLVMContext &ctx = m.getContext();
     std::string name = "call_rcu";
@@ -402,292 +357,6 @@ private:
     for (Instruction *inst : toRemove) {
       inst->eraseFromParent();
     }
-  }
-
-  void handleMemset(Module &m) {
-    if (Function *llvmMemset = m.getFunction("llvm.memset.p0i8.i64")) {
-      Function *memsetFn = m.getFunction("__DRVHORN_memset");
-      if (!memsetFn) {
-        errs() << "__DRVHORN_memset not found\n";
-        std::exit(1);
-      }
-      llvmMemset->replaceAllUsesWith(memsetFn);
-      llvmMemset->eraseFromParent();
-    }
-  }
-
-  void handleMemCpy(Module &m) {
-    enum RetType {
-      Void,
-      Len,
-      Dest,
-    };
-
-    struct MemcpyInfo {
-      std::string name;
-      RetType returnType;
-    };
-
-    LLVMContext &ctx = m.getContext();
-    MemcpyInfo memcpyFuncNames[] = {
-        MemcpyInfo{"memcpy", RetType::Dest},
-        MemcpyInfo{"memcpy_fromio", RetType::Void},
-        MemcpyInfo{"memcpy_toio", RetType::Void},
-        MemcpyInfo{"_copy_user_ll", RetType::Len},
-        MemcpyInfo{"_copy_user_ll_nocache_nozero", RetType::Len},
-        MemcpyInfo{"_copy_to_user", RetType::Len},
-        MemcpyInfo{"_copy_from_user", RetType::Len},
-    };
-    for (const MemcpyInfo &info : memcpyFuncNames) {
-      Function *f = m.getFunction(info.name);
-      if (!f)
-        continue;
-      std::string wrapperName = info.name + "_wrapper";
-      Function *wrapper = Function::Create(
-          f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-      BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-      Value *dst = wrapper->getArg(0);
-      Value *src = wrapper->getArg(1);
-      Value *size = wrapper->getArg(2);
-      IRBuilder<> b(block);
-      b.CreateMemCpy(dst, MaybeAlign(), src, MaybeAlign(), size);
-      switch (info.returnType) {
-      case RetType::Void:
-        b.CreateRetVoid();
-        break;
-      case RetType::Len:
-        b.CreateRet(size);
-        break;
-      case RetType::Dest:
-        b.CreateRet(dst);
-        break;
-      }
-      f->replaceAllUsesWith(wrapper);
-      f->eraseFromParent();
-    }
-  }
-
-  void handleMemMove(Module &m) {
-    LLVMContext &ctx = m.getContext();
-    Function *f = m.getFunction("memmove");
-    if (!f)
-      return;
-    std::string wrapperName = "memmove_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-    BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-    Value *dst = wrapper->getArg(0);
-    Value *src = wrapper->getArg(1);
-    Value *size = wrapper->getArg(2);
-    IRBuilder<> b(block);
-    b.CreateMemMove(dst, MaybeAlign(), src, MaybeAlign(), size);
-    b.CreateRet(dst);
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrCat(Module &m) {
-    Function *f = m.getFunction("strcat");
-    if (!f)
-      return;
-    LLVMContext &ctx = m.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strcat_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-    Value *dst = wrapper->getArg(0);
-    Value *src = wrapper->getArg(1);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *skipCond = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *skipBody = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *copyCond = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *copyBody = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *end = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> b(entry);
-    Value *it = b.CreateAlloca(i32Type);
-    b.CreateStore(b.getInt32(0), it);
-    b.CreateBr(skipCond);
-
-    b.SetInsertPoint(skipCond);
-    Value *loadedIt = b.CreateLoad(i32Type, it);
-    Value *dstPtr = b.CreateGEP(i8Type, dst, loadedIt);
-    Value *dstChar = b.CreateLoad(i8Type, dstPtr);
-    b.CreateCondBr(b.CreateICmpEQ(dstChar, b.getInt8(0)), copyCond, skipBody);
-
-    b.SetInsertPoint(skipBody);
-    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
-    b.CreateBr(skipCond);
-
-    b.SetInsertPoint(copyCond);
-    loadedIt = b.CreateLoad(i32Type, it);
-    Value *srcPtr = b.CreateGEP(i8Type, src, loadedIt);
-    Value *srcChar = b.CreateLoad(i8Type, srcPtr);
-    Value *isEnd = b.CreateICmpEQ(srcChar, b.getInt8(0));
-    b.CreateCondBr(isEnd, end, copyBody);
-
-    b.SetInsertPoint(copyBody);
-    loadedIt = b.CreateLoad(i32Type, it);
-    dstPtr = b.CreateGEP(i8Type, dst, loadedIt);
-    b.CreateStore(srcChar, dstPtr);
-    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
-    b.CreateBr(copyCond);
-
-    b.SetInsertPoint(end);
-    b.CreateRet(dst);
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrCmp(Module &m) {
-    Function *f = m.getFunction("strcmp");
-    if (!f)
-      return;
-    LLVMContext &ctx = m.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strcmp_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-    Value *s1 = wrapper->getArg(0);
-    Value *s2 = wrapper->getArg(1);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *retNonZero = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> b(entry);
-    Value *it = b.CreateAlloca(i32Type);
-    b.CreateStore(b.getInt32(0), it);
-    b.CreateBr(loop);
-
-    b.SetInsertPoint(loop);
-    Value *loadedIt = b.CreateLoad(i32Type, it);
-    Value *s1Ptr = b.CreateGEP(i8Type, s1, loadedIt);
-    Value *s2Ptr = b.CreateGEP(i8Type, s2, loadedIt);
-    Value *s1Char = b.CreateLoad(i8Type, s1Ptr);
-    Value *s2Char = b.CreateLoad(i8Type, s2Ptr);
-    b.CreateCondBr(b.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
-
-    b.SetInsertPoint(retNonZero);
-    Value *ret = b.CreateSelect(b.CreateICmpULT(s1Char, s2Char), b.getInt32(-1),
-                                b.getInt32(1));
-    b.CreateRet(ret);
-
-    b.SetInsertPoint(loopEnd);
-    Value *isEnd = b.CreateICmpEQ(s1Char, b.getInt8(0));
-    loadedIt = b.CreateLoad(i32Type, it);
-    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
-    b.CreateCondBr(isEnd, retZero, loop);
-
-    b.SetInsertPoint(retZero);
-    b.CreateRet(b.getInt32(0));
-
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrNCmp(Module &m) {
-    Function *f = m.getFunction("strncmp");
-    if (!f)
-      return;
-    LLVMContext &ctx = m.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strncmp_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-    Value *s1 = wrapper->getArg(0);
-    Value *s2 = wrapper->getArg(1);
-    Value *size = wrapper->getArg(2);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loopEnd = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *retNonZero = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> b(entry);
-    Value *it = b.CreateAlloca(i32Type);
-    b.CreateStore(b.getInt32(0), it);
-    b.CreateBr(loop);
-
-    b.SetInsertPoint(loop);
-    Value *loadedIt = b.CreateLoad(i32Type, it);
-    Value *s1Ptr = b.CreateGEP(i8Type, s1, loadedIt);
-    Value *s2Ptr = b.CreateGEP(i8Type, s2, loadedIt);
-    Value *s1Char = b.CreateLoad(i8Type, s1Ptr);
-    Value *s2Char = b.CreateLoad(i8Type, s2Ptr);
-    b.CreateCondBr(b.CreateICmpNE(s1Char, s2Char), retNonZero, loopEnd);
-
-    b.SetInsertPoint(retNonZero);
-    Value *ret = b.CreateSelect(b.CreateICmpULT(s1Char, s2Char), b.getInt32(-1),
-                                b.getInt32(1));
-    b.CreateRet(ret);
-
-    b.SetInsertPoint(loopEnd);
-    loadedIt = b.CreateLoad(i32Type, it);
-    Value *isNull = b.CreateICmpEQ(s1Char, b.getInt8(0));
-    Value *isEnd = b.CreateOr(isNull, b.CreateICmpUGE(loadedIt, size));
-    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
-    b.CreateCondBr(isEnd, retZero, loop);
-
-    b.SetInsertPoint(retZero);
-    b.CreateRet(b.getInt32(0));
-
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
-  }
-
-  void handleStrChr(Module &m) {
-    Function *f = m.getFunction("strchr");
-    if (!f)
-      return;
-    LLVMContext &ctx = m.getContext();
-    Type *i8Type = Type::getInt8Ty(ctx);
-    Type *i32Type = Type::getInt32Ty(ctx);
-    std::string wrapperName = "strchr_wrapper";
-    Function *wrapper = Function::Create(
-        f->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-    Value *str = wrapper->getArg(0);
-    Value *chr = wrapper->getArg(1);
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *loop = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *retZero = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *cmpChar = BasicBlock::Create(ctx, "", wrapper);
-    BasicBlock *ret = BasicBlock::Create(ctx, "", wrapper);
-
-    IRBuilder<> b(entry);
-    Value *it = b.CreateAlloca(i32Type);
-    b.CreateStore(b.getInt32(0), it);
-    b.CreateBr(loop);
-
-    b.SetInsertPoint(loop);
-    Value *loadedIt = b.CreateLoad(i32Type, it);
-    Value *strPtr = b.CreateGEP(i8Type, str, loadedIt);
-    Value *curChar = b.CreateLoad(i8Type, strPtr);
-    Value *isNull = b.CreateICmpEQ(curChar, b.getInt8(0));
-    b.CreateCondBr(isNull, retZero, cmpChar);
-
-    b.SetInsertPoint(retZero);
-    Value *null = b.CreateIntToPtr(b.getInt32(0), i8Type->getPointerTo());
-    b.CreateRet(null);
-
-    b.SetInsertPoint(cmpChar);
-    Value *isHit = b.CreateICmpEQ(curChar, b.CreateTrunc(chr, i8Type));
-    b.CreateStore(b.CreateAdd(loadedIt, b.getInt32(1)), it);
-    b.CreateCondBr(isHit, ret, loop);
-
-    b.SetInsertPoint(ret);
-    b.CreateRet(strPtr);
-
-    f->replaceAllUsesWith(wrapper);
-    f->eraseFromParent();
   }
 
   void handleCpuPossibleMask(Module &m) {
