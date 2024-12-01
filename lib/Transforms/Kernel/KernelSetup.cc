@@ -28,7 +28,7 @@ public:
     m.setModuleInlineAsm("");
     Function *allocStub = getOrCreateAlloc(m);
     stubAllocationFunctions(m, allocStub);
-    handleKrefAPIs(m);
+    handleKrefAndKobjectAPIs(m);
     handleKmemCache(m, allocStub);
 
     handleCallRcu(m);
@@ -86,105 +86,78 @@ private:
     return krefInit->getArg(0)->getType()->getPointerElementType();
   }
 
-  Function *buildKrefInit(Module &m) {
+  Function *buildKrefInit(Module &m, Type *krefType) {
     LLVMContext &ctx = m.getContext();
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Type *krefTy = getKrefTy(m);
     FunctionType *krefInitTy = FunctionType::get(
-        Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
+        Type::getVoidTy(ctx), krefType->getPointerTo(), false);
     Function *krefInit = Function::Create(
         krefInitTy, GlobalValue::ExternalLinkage, "drvhorn.kref_init", &m);
-    BasicBlock *block = BasicBlock::Create(ctx, "", krefInit);
-    IRBuilder<> b(block);
+    BasicBlock *blk = BasicBlock::Create(ctx, "", krefInit);
+    IRBuilder<> b(blk);
     Value *gep = b.CreateInBoundsGEP(
-        krefTy, krefInit->getArg(0),
-        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
-    b.CreateStore(ConstantInt::get(i32Ty, 1), gep);
+        krefType, krefInit->getArg(0),
+        {b.getInt64(0), b.getInt32(0), b.getInt32(0), b.getInt32(0)});
+    b.CreateStore(b.getInt32(1), gep);
     b.CreateRetVoid();
 
     return krefInit;
   }
 
-  Function *buildKrefGet(Module &m) {
+  Function *buildKrefGet(Module &m, Type *krefType) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Type *krefTy = getKrefTy(m);
     FunctionType *krefGetTy = FunctionType::get(
-        Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
+        Type::getVoidTy(ctx), krefType->getPointerTo(), false);
     Function *krefGet = Function::Create(
         krefGetTy, GlobalValue::InternalLinkage, "drvhorn.kref_get", &m);
-    BasicBlock *block = BasicBlock::Create(ctx, "", krefGet);
-    IRBuilder<> b(block);
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", krefGet);
+    IRBuilder<> b(blk);
     Value *gep = b.CreateInBoundsGEP(
-        krefTy, krefGet->getArg(0),
-        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+        krefType, krefGet->getArg(0),
+        {b.getInt64(0), b.getInt32(0), b.getInt32(0), b.getInt32(0)});
     LoadInst *load = b.CreateLoad(i32Ty, gep);
-    Value *add = b.CreateAdd(load, ConstantInt::get(i32Ty, 1));
+    Value *add = b.CreateAdd(load, b.getInt32(1));
     b.CreateStore(add, gep);
     b.CreateRetVoid();
     return krefGet;
   }
 
-  Function *buildKrefPut(Module &m) {
+  Function *buildKrefPut(Module &m, Type *krefType) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Type *krefTy = getKrefTy(m);
-    FunctionType *releaseTy = FunctionType::get(
-        Type::getVoidTy(ctx), {krefTy->getPointerTo()}, false);
-    FunctionType *krefPutTy = FunctionType::get(
-        i32Ty, {krefTy->getPointerTo(), releaseTy->getPointerTo()}, false);
+    FunctionType *krefPutTy =
+        FunctionType::get(i32Ty, krefType->getPointerTo(), false);
     Function *krefPut = Function::Create(
         krefPutTy, GlobalValue::InternalLinkage, "drvhorn.kref_put", &m);
-    BasicBlock *entry = BasicBlock::Create(ctx, "entry", krefPut);
-    BasicBlock *release = BasicBlock::Create(ctx, "release", krefPut);
-    BasicBlock *ret = BasicBlock::Create(ctx, "ret", krefPut);
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", krefPut);
 
-    IRBuilder<> b(entry);
+    IRBuilder<> b(blk);
     Argument *krefPtr = krefPut->getArg(0);
     Value *gep = b.CreateInBoundsGEP(
-        krefTy, krefPtr,
-        {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-         ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 0)});
+        krefType, krefPtr,
+        {b.getInt64(0), b.getInt32(0), b.getInt32(0), b.getInt32(0)});
     LoadInst *load = b.CreateLoad(i32Ty, gep);
-    Value *sub = b.CreateSub(load, ConstantInt::get(i32Ty, 1));
+    Value *sub = b.CreateSub(load, b.getInt32(1));
     b.CreateStore(sub, gep);
-    Value *isZero = b.CreateICmpEQ(sub, ConstantInt::get(i32Ty, 0));
-    b.CreateCondBr(isZero, release, ret);
-
-    b.SetInsertPoint(release);
-    b.CreateCall(releaseTy, krefPut->getArg(1), krefPtr);
-    b.CreateBr(ret);
-
-    b.SetInsertPoint(ret);
+    Value *isZero = b.CreateICmpEQ(sub, b.getInt32(0));
     Value *retVal = b.CreateZExt(isZero, i32Ty);
     b.CreateRet(retVal);
 
     return krefPut;
   }
 
-  void handleKrefAPIs(Module &m) {
-    Function *krefInit = buildKrefInit(m);
-    Function *krefGet = buildKrefGet(m);
-    Function *krefPut = buildKrefPut(m);
+  void handleKrefAndKobjectAPIs(Module &m) {
+    Type *krefType = getKrefTy(m);
+    Function *krefInit = buildKrefInit(m, krefType);
+    Function *krefGet = buildKrefGet(m, krefType);
+    Function *krefPut = buildKrefPut(m, krefType);
 
     auto replaceCalls = [](Function *orig, Function *newFn) {
       for (CallInst *call : getCalls(orig)) {
-        SmallVector<Value *> args;
-        for (unsigned i = 0; i < newFn->arg_size(); i++) {
-          Type *argType = newFn->getArg(i)->getType();
-          Value *arg = i < call->arg_size() ? call->getArgOperand(i)
-                                            : Constant::getNullValue(argType);
-          if (arg->getType() != argType) {
-            arg = new BitCastInst(arg, argType, "", call);
-          }
-          args.push_back(arg);
-        }
-        CallInst *newCall = CallInst::Create(newFn, args, "", call);
+        IRBuilder<> b(call);
+        if (!call->arg_size())
+          continue;
+        CallInst *newCall = b.CreateCall(newFn, call->getArgOperand(0));
         call->replaceAllUsesWith(newCall);
         call->eraseFromParent();
       }
@@ -200,6 +173,62 @@ private:
         replaceCalls(&f, krefPut);
       }
     }
+
+    buildKobjGet(m, krefGet, krefType);
+    buildKobjPut(m, krefPut, krefType);
+    // TODO: implement kobject_get_unless_zero
+  }
+
+  void buildKobjGet(Module &m, Function *krefGet, Type *krefType) {
+    Function *kobjGet = m.getFunction("kobject_get");
+    if (!kobjGet || !kobjGet->empty())
+      return;
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", kobjGet);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", kobjGet);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", kobjGet);
+    Argument *kobj = kobjGet->getArg(0);
+    StructType *kobjType =
+        cast<StructType>(kobj->getType()->getPointerElementType());
+
+    IRBuilder<> b(entry);
+    Value *isNull = b.CreateIsNull(kobj);
+    b.CreateCondBr(isNull, ret, body);
+
+    b.SetInsertPoint(body);
+    Value *krefGEP = b.CreateInBoundsGEP(
+        kobjType, kobj, gepIndicesToStruct(kobjType, krefType).getValue());
+    b.CreateCall(krefGet, krefGEP);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    b.CreateRet(kobj);
+  }
+
+  void buildKobjPut(Module &m, Function *krefPut, Type *krefType) {
+    Function *kobjPut = m.getFunction("kobject_put");
+    if (!kobjPut || !kobjPut->empty())
+      return;
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", kobjPut);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", kobjPut);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", kobjPut);
+    Argument *kobj = kobjPut->getArg(0);
+    StructType *kobjType =
+        cast<StructType>(kobj->getType()->getPointerElementType());
+
+    IRBuilder<> b(entry);
+    Value *isNull = b.CreateIsNull(kobj);
+    b.CreateCondBr(isNull, ret, body);
+
+    b.SetInsertPoint(body);
+    Value *krefGEP = b.CreateInBoundsGEP(
+        kobjType, kobj, gepIndicesToStruct(kobjType, krefType).getValue());
+    b.CreateCall(krefPut, krefGEP);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    b.CreateRetVoid();
   }
 
   void ignoreFunctions(Module &m) {
