@@ -269,6 +269,7 @@ private:
         {"of_get_child_by_name", None, 0},
         {"of_get_next_child", 1, 0},
         {"of_get_next_available_child", 1, 0},
+        {"of_get_parent", None, 0},
     };
 
     LLVMContext &ctx = m.getContext();
