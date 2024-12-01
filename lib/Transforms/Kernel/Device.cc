@@ -187,7 +187,7 @@ public:
     Function *devNodeGetter = handleDeviceNodeFinders(m, updateIndex);
     handleFwnodePut(m);
     handleFwnodeFinders(m, devNodeGetter);
-    handleFindDevice(m, updateIndex);
+    handleDeviceFinders(m, updateIndex);
     Function *devInit = handleDeviceInitialize(m);
     Function *devAdd = handleDeviceAdd(m, devInit);
     handleDeviceDel(m);
@@ -801,12 +801,13 @@ private:
     b.CreateRetVoid();
   }
 
-  void handleFindDevice(Module &m, Function *updateIndex) {
+  void handleDeviceFinders(Module &m, Function *updateIndex) {
     const DenseMap<const GlobalVariable *, StructType *> &clsOrBusToDevType =
         clsOrBusToDeviceMap(m);
     SmallVector<GetElementPtrInst *> containerOfs;
     DenseMap<CallInst *, Value *> findCallToSurroundingDevPtr;
-    for (StringRef name : {"class_find_device", "bus_find_device"}) {
+    for (StringRef name : {"class_find_device", "bus_find_device",
+                           "device_create_with_groups"}) {
       Function *finder = m.getFunction(name);
       if (!finder)
         continue;
