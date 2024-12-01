@@ -43,6 +43,8 @@ struct Acceptor : public InstVisitor<Acceptor> {
     }
   }
 
+  void visitCallInst(CallInst &call) {}
+
   void visitLoadInst(LoadInst &load) {
     Value *ptr = load.getPointerOperand();
     targets.insert(&load);
