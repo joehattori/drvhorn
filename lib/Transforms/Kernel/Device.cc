@@ -282,6 +282,7 @@ private:
       if (!f)
         continue;
       f->deleteBody();
+      f->setName("drvhorn." + info.name);
 
       StructType *devNodeType =
           cast<StructType>(f->getReturnType()->getPointerElementType());
