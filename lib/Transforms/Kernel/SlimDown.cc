@@ -134,9 +134,6 @@ public:
     return isTarget;
   }
 
-  // ignore ptrtoint
-  bool visitPtrToIntInst(PtrToIntInst &ptrToInt) { return false; }
-
   bool visitCallInst(CallInst &call) {
     bool isTarget = refcountGenerators.count(&call);
     if (Function *f = extractCalledFunction(call)) {
