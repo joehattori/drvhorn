@@ -1017,7 +1017,8 @@ private:
     } else if (Argument *arg = dyn_cast<Argument>(argBase)) {
       return nullptr;
     } else {
-      errs() << "TODO: getSurroundingDevTyps " << *argBase << "\n";
+      errs() << "TODO: getSurroundingDevTyps " << *argBase << " in "
+             << call->getFunction()->getName() << "\n";
       std::exit(1);
     }
     return clsOrBusToDevType.lookup(gv);
