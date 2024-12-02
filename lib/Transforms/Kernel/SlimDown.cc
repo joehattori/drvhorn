@@ -46,9 +46,14 @@ struct Acceptor : public InstVisitor<Acceptor> {
   void visitCallInst(CallInst &call) {}
 
   void visitLoadInst(LoadInst &load) {
-    Value *ptr = load.getPointerOperand();
     targets.insert(&load);
-    underlyingLoadedPtrs.insert(getUnderlyingObject(ptr));
+    Value *ptr = load.getPointerOperand();
+    Value *v = getUnderlyingObject(ptr);
+    if (GlobalVariable *gv = dyn_cast<GlobalVariable>(v)) {
+      if (!gv->getName().startswith("drvhorn."))
+        return;
+    }
+    underlyingLoadedPtrs.insert(v);
     visitValue(ptr);
   }
 
@@ -217,11 +222,39 @@ private:
       isTarget = visit(inst);
     } else if (BasicBlock *blk = dyn_cast<BasicBlock>(val)) {
       isTarget = visit(blk->getTerminator());
-    } else if (isa<Constant, Argument>(val)) {
+    } else if (Constant *c = dyn_cast<Constant>(val)) {
+      isTarget = visitConstant(c);
+    } else if (isa<Argument>(val)) {
       isTarget = true;
     }
     cache[val] = isTarget;
     return isTarget;
+  }
+
+  bool visitConstant(Constant *c) {
+    if (GlobalVariable *gv = dyn_cast<GlobalVariable>(c)) {
+      return visitGlobalVariable(gv);
+    }
+    return true;
+  }
+
+  bool visitGlobalVariable(GlobalVariable *gv) {
+    if (gv->getName().startswith("drvhorn."))
+      return true;
+    StructType *krefType =
+        StructType::getTypeByName(gv->getContext(), "struct.kref");
+    return embedsStructIndirect(gv->getValueType(), krefType);
+  }
+
+  bool embedsStructIndirect(Type *type, Type *inner) {
+    if (ArrayType *arr = dyn_cast<ArrayType>(type)) {
+      return embedsStructIndirect(arr->getElementType(), inner);
+    } else if (PointerType *ptr = dyn_cast<PointerType>(type)) {
+      return embedsStructIndirect(ptr->getElementType(), inner);
+    } else if (StructType *st = dyn_cast<StructType>(type)) {
+      return embedsStruct(st, inner);
+    }
+    return false;
   }
 
   void recordInst(Instruction *inst) {
@@ -237,8 +270,7 @@ private:
             dyn_cast<StructType>(v->getType()->getPointerElementType())) {
       StructType *deviceType = StructType::getTypeByName(
           store.getModule()->getContext(), "struct.device");
-      bool isDevice = embedsStruct(baseType, deviceType);
-      if (isDevice)
+      if (embedsStruct(baseType, deviceType))
         return false;
     }
     if (const Argument *arg = dyn_cast<Argument>(v)) {
