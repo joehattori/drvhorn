@@ -1008,7 +1008,7 @@ private:
       Module &m, CallInst *call,
       const DenseMap<const GlobalVariable *, StructType *> &clsOrBusToDevType) {
     Value *argBase = call->getArgOperand(0)->stripPointerCasts();
-    GlobalVariable *gv;
+    GlobalVariable *gv = nullptr;
     if (GlobalVariable *g = dyn_cast<GlobalVariable>(argBase)) {
       gv = g;
     } else if (LoadInst *load = dyn_cast<LoadInst>(argBase)) {
@@ -1016,6 +1016,21 @@ private:
           load->getPointerOperand()->stripPointerCasts());
     } else if (Argument *arg = dyn_cast<Argument>(argBase)) {
       return nullptr;
+    } else if (CallInst *c = dyn_cast<CallInst>(argBase)) {
+      Function *f = extractCalledFunction(c);
+      if (!f->getName().equals("class_create")) {
+        errs() << "TODO: getSurroundingDevTyps call " << *c << "\n";
+        std::exit(1);
+      }
+      for (User *u : c->users()) {
+        if (StoreInst *store = dyn_cast<StoreInst>(u)) {
+          if (GlobalVariable *g = dyn_cast<GlobalVariable>(
+                  store->getPointerOperand()->stripPointerCasts())) {
+            gv = g;
+            break;
+          }
+        }
+      }
     } else {
       errs() << "TODO: getSurroundingDevTyps " << *argBase << " in "
              << call->getFunction()->getName() << "\n";
