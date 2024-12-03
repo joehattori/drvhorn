@@ -154,6 +154,13 @@ public:
           acceptor.visitValue(argVal);
         }
       }
+
+      if (f->hasFnAttribute("drvhorn.fwnode")) {
+        // ACPI handles refercount differently, so simply ignore them.
+        if (call.getFunction()->getName().contains("acpi_")) {
+          isTarget = false;
+        }
+      }
     }
     if (isTarget) {
       recordInst(&call);

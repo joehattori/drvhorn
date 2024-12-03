@@ -184,10 +184,11 @@ public:
 
   bool runOnModule(Module &m) override {
     Function *updateIndex = buildUpdateIndex(m);
+    Attribute fwnodeAttr = Attribute::get(m.getContext(), "drvhorn.fwnode");
     Function *devNodeGetter = handleDeviceNodeFinders(m, updateIndex);
-    handleFwnodeGet(m);
-    Function *fwnodePutter = handleFwnodePut(m);
-    handleFwnodeFinders(m, devNodeGetter, fwnodePutter);
+    handleFwnodeGet(m, fwnodeAttr);
+    Function *fwnodePutter = handleFwnodePut(m, fwnodeAttr);
+    handleFwnodeFinders(m, devNodeGetter, fwnodePutter, fwnodeAttr);
     handleDeviceFinders(m, updateIndex);
     Function *devInit = handleDeviceInitialize(m);
     Function *devAdd = handleDeviceAdd(m, devInit);
@@ -334,11 +335,13 @@ private:
   }
 
 #define DEVNODE_FWNODE_INDEX 3
-  void handleFwnodeGet(Module &m) {
+  void handleFwnodeGet(Module &m, Attribute attr) {
     Function *f = m.getFunction("fwnode_handle_get");
     if (!f)
       return;
     f->deleteBody();
+    f->setName("drvhorn.fwnode_get");
+    f->addFnAttr(attr);
 
     Argument *fwnode = f->getArg(0);
     LLVMContext &ctx = m.getContext();
@@ -355,12 +358,14 @@ private:
     b.CreateRet(fwnode);
   }
 
-  Function *handleFwnodePut(Module &m) {
+  Function *handleFwnodePut(Module &m, Attribute attr) {
     Function *f = m.getFunction("fwnode_handle_put");
     if (!f)
       return nullptr;
     f->deleteBody();
     f->setName("drvhorn.fwnode_put");
+    f->addFnAttr(attr);
+
     Argument *fwnode = f->getArg(0);
     LLVMContext &ctx = m.getContext();
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
@@ -391,7 +396,7 @@ private:
   }
 
   void handleFwnodeFinders(Module &m, Function *devNodeGetter,
-                           Function *fwnodePutter) {
+                           Function *fwnodePutter, Attribute attr) {
     struct FinderInfo {
       StringRef name;
       Optional<unsigned> putIndex;
@@ -428,6 +433,7 @@ private:
         continue;
       f->deleteBody();
       f->setName("drvhorn.fwnode_getter." + info.name);
+      f->addFnAttr(attr);
 
       BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
       BasicBlock *body = BasicBlock::Create(ctx, "body", f);
