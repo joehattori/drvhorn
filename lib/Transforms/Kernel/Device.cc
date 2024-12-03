@@ -185,8 +185,9 @@ public:
   bool runOnModule(Module &m) override {
     Function *updateIndex = buildUpdateIndex(m);
     Function *devNodeGetter = handleDeviceNodeFinders(m, updateIndex);
-    handleFwnodePut(m);
-    handleFwnodeFinders(m, devNodeGetter);
+    handleFwnodeGet(m);
+    Function *fwnodePutter = handleFwnodePut(m);
+    handleFwnodeFinders(m, devNodeGetter, fwnodePutter);
     handleDeviceFinders(m, updateIndex);
     Function *devInit = handleDeviceInitialize(m);
     Function *devAdd = handleDeviceAdd(m, devInit);
@@ -333,10 +334,31 @@ private:
   }
 
 #define DEVNODE_FWNODE_INDEX 3
-  void handleFwnodePut(Module &m) {
-    Function *f = m.getFunction("fwnode_handle_put");
+  void handleFwnodeGet(Module &m) {
+    Function *f = m.getFunction("fwnode_handle_get");
     if (!f)
       return;
+    f->deleteBody();
+
+    Argument *fwnode = f->getArg(0);
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+    Function *ofNodeGet = m.getFunction("of_node_get");
+
+    IRBuilder<> b(blk);
+    Value *devNode =
+        b.CreateInBoundsGEP(fwnode->getType()->getPointerElementType(), fwnode,
+                            {b.getInt64(-1), b.getInt32(4)});
+    if (ofNodeGet->getArg(0)->getType() != devNode->getType())
+      devNode = b.CreateBitCast(devNode, ofNodeGet->getArg(0)->getType());
+    b.CreateCall(ofNodeGet, devNode);
+    b.CreateRet(fwnode);
+  }
+
+  Function *handleFwnodePut(Module &m) {
+    Function *f = m.getFunction("fwnode_handle_put");
+    if (!f)
+      return nullptr;
     f->deleteBody();
     f->setName("drvhorn.fwnode_put");
     Argument *fwnode = f->getArg(0);
@@ -356,17 +378,20 @@ private:
     // to_of_node() was translated to something like this:
     //   getelementptr %struct.fwnode_handle, %struct.fwnode_handle* %0, i64 -1,
     //   i32 4
-    Value *devNode = b.CreateGEP(fwnode->getType()->getPointerElementType(),
-                                 fwnode, {b.getInt64(-1), b.getInt32(4)});
+    Value *devNode =
+        b.CreateInBoundsGEP(fwnode->getType()->getPointerElementType(), fwnode,
+                            {b.getInt64(-1), b.getInt32(4)});
     devNode = b.CreateBitCast(devNode, devNodeType->getPointerTo());
     b.CreateCall(ofNodePut, devNode);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
     b.CreateRetVoid();
+    return f;
   }
 
-  void handleFwnodeFinders(Module &m, Function *devNodeGetter) {
+  void handleFwnodeFinders(Module &m, Function *devNodeGetter,
+                           Function *fwnodePutter) {
     struct FinderInfo {
       StringRef name;
       Optional<unsigned> putIndex;
@@ -382,7 +407,6 @@ private:
         {"device_get_next_child_node", 1},
         {"fwnode_get_named_child_node", None},
         {"device_get_named_child_node", None},
-        {"fwnode_handle_get", None},
         {"fwnode_graph_get_next_endpoint", 1},
         {"fwnode_graph_get_port_parent", None},
         {"fwnode_graph_get_remote_port_parent", None},
@@ -391,7 +415,6 @@ private:
         {"fwnode_graph_get_endpoint_by_id", None},
     };
     LLVMContext &ctx = m.getContext();
-    Function *putter = m.getFunction("drvhorn.fwnode_put");
     Type *devNodePtrType = devNodeGetter->getReturnType();
     FunctionType *ofNodeGetType =
         FunctionType::get(devNodePtrType, devNodePtrType, false);
@@ -413,9 +436,9 @@ private:
       IRBuilder<> b(entry);
       if (info.putIndex.hasValue()) {
         Value *prev = f->getArg(*info.putIndex);
-        if (putter->getArg(0)->getType() != prev->getType())
-          prev = b.CreateBitCast(prev, putter->getArg(0)->getType());
-        b.CreateCall(putter, prev);
+        if (fwnodePutter->getArg(0)->getType() != prev->getType())
+          prev = b.CreateBitCast(prev, fwnodePutter->getArg(0)->getType());
+        b.CreateCall(fwnodePutter, prev);
       }
       Value *devNode = b.CreateCall(devNodeGetter);
       Value *isNull = b.CreateIsNull(devNode);
