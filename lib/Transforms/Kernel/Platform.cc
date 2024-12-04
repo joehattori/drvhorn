@@ -4,15 +4,15 @@
 #include "llvm/Pass.h"
 
 #include "seahorn/Analysis/SeaBuiltinsInfo.hh"
+#include "seahorn/Transforms/Kernel/SetupEntrypoint.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;
 
 namespace seahorn {
 
-static unsigned platformDriverProbeIndex = 0;
-static unsigned pDevDeviceGEPIndex = 3;
-static unsigned deviceDriverDataIndex = 8;
+#define PDEV_PROBE_INDEX 0u
+#define PDEV_DEVICE_GEP_INDEX 3
 
 class PlatformDriver : public ModulePass {
 public:
@@ -50,7 +50,7 @@ private:
   Function *getProbeFn(Module &m) {
     GlobalVariable *drv = m.getGlobalVariable(name, true);
     Constant *probe =
-        drv->getInitializer()->getAggregateElement(platformDriverProbeIndex);
+        drv->getInitializer()->getAggregateElement(PDEV_PROBE_INDEX);
     return dyn_cast_or_null<Function>(probe);
   }
 
@@ -67,50 +67,10 @@ private:
   }
 
   void setupPDev(Module &m, IRBuilder<> &b, Value *pdev) {
-    Function *krefInit = m.getFunction("drvhorn.kref_init");
-    Type *pdevType = pdev->getType()->getPointerElementType();
-    LLVMContext &ctx = m.getContext();
-    Type *i8Ty = Type::getInt8Ty(ctx);
-    Type *i32Ty = Type::getInt32Ty(ctx);
-    Type *i64Ty = Type::getInt64Ty(ctx);
-    Value *devPtr =
-        b.CreateInBoundsGEP(pdevType, pdev,
-                            {ConstantInt::get(i64Ty, 0),
-                             ConstantInt::get(i32Ty, pDevDeviceGEPIndex)},
-                            "device");
-    StructType *devType =
-        cast<StructType>(devPtr->getType()->getPointerElementType());
-    Value *krefPtr = b.CreateInBoundsGEP(devType, devPtr,
-                                         {ConstantInt::get(i64Ty, 0),
-                                          ConstantInt::get(i32Ty, 0),
-                                          ConstantInt::get(i32Ty, 6)},
-                                         "kref");
-    b.CreateCall(krefInit, krefPtr);
-
-    // setup driver_data
-    Value *driverDataPtr =
-        b.CreateInBoundsGEP(devType, devPtr,
-                            {ConstantInt::get(i64Ty, 0),
-                             ConstantInt::get(i32Ty, deviceDriverDataIndex)},
-                            "driver_data");
-    Constant *driverDataSize = ConstantInt::get(i64Ty, 0x1000);
-    AllocaInst *driverData = b.CreateAlloca(i8Ty, driverDataSize);
-    b.CreateStore(driverData, driverDataPtr);
-
-    // setup of_node
-    const SmallVector<Value *> &devNodeIndices =
-        gepIndicesToStruct(devType,
-                           StructType::getTypeByName(ctx, "struct.device_node")
-                               ->getPointerTo())
-            .getValue();
-    Value *ofNodeGEP =
-        b.CreateInBoundsGEP(devType, devPtr, devNodeIndices, "of_node");
-    Function *devNodeGetter = m.getFunction("drvhorn.gen.devnode");
-    Value *ofNode = b.CreateCall(devNodeGetter);
-    if (ofNode->getType() != ofNodeGEP->getType()->getPointerElementType())
-      ofNode = b.CreateBitCast(ofNode,
-                               ofNodeGEP->getType()->getPointerElementType());
-    b.CreateStore(ofNode, ofNodeGEP);
+    Value *devPtr = b.CreateInBoundsGEP(
+        pdev->getType()->getPointerElementType(), pdev,
+        {b.getInt64(0), b.getInt32(PDEV_DEVICE_GEP_INDEX)}, "device");
+    setupDevicePtr(m, b, devPtr);
   }
 
   Value *allocType(Module &m, IRBuilder<> &b, Type *type) {

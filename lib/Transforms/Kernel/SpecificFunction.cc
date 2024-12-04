@@ -2,6 +2,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 
+#include "seahorn/Transforms/Kernel/SetupEntrypoint.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;

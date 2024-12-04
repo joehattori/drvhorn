@@ -5,6 +5,7 @@
 #include "llvm/Pass.h"
 
 #include "seahorn/Analysis/SeaBuiltinsInfo.hh"
+#include "seahorn/Transforms/Kernel/SetupEntrypoint.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;

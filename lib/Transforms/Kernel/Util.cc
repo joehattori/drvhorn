@@ -247,30 +247,4 @@ bool embedsStruct(const StructType *s, const Type *target) {
   }
   return false;
 }
-
-void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret,
-                    Value *instance) {
-  IRBuilder<> b(fail);
-  LLVMContext &ctx = m.getContext();
-  Type *voidTy = Type::getVoidTy(ctx);
-  FunctionType *fnType;
-  if (instance)
-    fnType = FunctionType::get(voidTy, instance->getType(), false);
-  else
-    fnType = FunctionType::get(voidTy, false);
-  // devresReleaseFn and failFn are filled later in AssertKrefs.cc
-  Function *failFn = Function::Create(fnType, GlobalValue::ExternalLinkage,
-                                      "drvhorn.fail", &m);
-  if (instance)
-    b.CreateCall(failFn, instance);
-  else
-    b.CreateCall(failFn);
-  b.CreateBr(ret);
-}
-
-void buildRetBlock(Module &m, BasicBlock *ret) {
-  IRBuilder<> b(ret);
-  Type *i32Ty = Type::getInt32Ty(m.getContext());
-  b.CreateRet(ConstantInt::get(i32Ty, 0));
-}
 } // namespace seahorn

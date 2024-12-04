@@ -2,13 +2,14 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 
+#include "seahorn/Transforms/Kernel/SetupEntrypoint.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;
 
 namespace seahorn {
 
-static unsigned dsaSwitchOpsSetupIndex = 4;
+#define DSA_SWITCH_OPS_SETUP_INDEX 4u
 
 class DsaSwitchOps : public ModulePass {
 public:
@@ -47,7 +48,7 @@ private:
   Function *getSetupFn(Module &m) {
     GlobalVariable *drv = m.getGlobalVariable(name, true);
     Constant *setup =
-        drv->getInitializer()->getAggregateElement(dsaSwitchOpsSetupIndex);
+        drv->getInitializer()->getAggregateElement(DSA_SWITCH_OPS_SETUP_INDEX);
     return dyn_cast_or_null<Function>(setup);
   }
 
@@ -66,21 +67,12 @@ private:
 
   void setupDsaSwitch(Module &m, IRBuilder<> &b, Value *dsaSwitch,
                       StructType *dsaSwitchType) {
-    Function *krefInit = m.getFunction("drvhorn.kref_init");
-    LLVMContext &ctx = m.getContext();
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
     Type *deviceType =
         dsaSwitchType->getElementType(0)->getPointerElementType();
     Value *devPtr = b.CreateAlloca(deviceType);
-    Value *krefPtr =
-        b.CreateGEP(deviceType, devPtr,
-                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0),
-                     ConstantInt::get(i32Ty, 6)});
-    b.CreateCall(krefInit, krefPtr);
+    setupDevicePtr(m, b, devPtr);
     Value *gep =
-        b.CreateGEP(dsaSwitchType, dsaSwitch,
-                    {ConstantInt::get(i64Ty, 0), ConstantInt::get(i32Ty, 0)});
+        b.CreateGEP(dsaSwitchType, dsaSwitch, {b.getInt64(0), b.getInt32(0)});
     b.CreateStore(devPtr, gep);
   }
 

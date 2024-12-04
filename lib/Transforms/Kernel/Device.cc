@@ -202,8 +202,8 @@ public:
     handleDevmFunctions(m);
     handleCDevDeviceAdd(m);
     handleCDevDeviceDel(m);
-    handleDeviceWakeupEnable(m);
-    handleDeviceWakeupDisable(m);
+    handleDeviceWakeupEnable(m, checkPointAttr);
+    handleDeviceWakeupDisable(m, checkPointAttr);
 
     handleOfParsePhandleWithArgs(m, devNodeGetter);
     handleOfPhandleIteratorNext(m, devNodeGetter);
@@ -521,6 +521,7 @@ private:
     StructType *krefType = cast<StructType>(
         krefInit->getArg(0)->getType()->getPointerElementType());
     LLVMContext &ctx = m.getContext();
+    StructType *devType = StructType::getTypeByName(ctx, "struct.device");
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
     BasicBlock *body = BasicBlock::Create(ctx, "body", f);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
@@ -544,6 +545,16 @@ private:
         elemType, elem, gepIndicesToStruct(elemType, krefType).getValue());
     b.CreateCall(krefInit, krefPtr);
     Value *nxtIndex = b.CreateAdd(curIndex, b.getInt64(1));
+    if (equivTypes(elemType, devType)) {
+      StructType *devPmInfoType =
+          StructType::getTypeByName(ctx, "struct.dev_pm_info");
+      Value *pmInfoGEP = b.CreateInBoundsGEP(
+          elemType, elem, gepIndicesToStruct(elemType, devPmInfoType).getValue());
+      Value *wakeupGEP = b.CreateInBoundsGEP(
+          pmInfoGEP->getType()->getPointerElementType(), pmInfoGEP,
+          {b.getInt64(0), b.getInt32(DEVPMINFO_WAKEUP_INDEX)});
+      b.CreateStore(b.getInt16(0), wakeupGEP);
+    }
     b.CreateStore(nxtIndex, index);
     b.CreateCall(updateIndex, {curIndex, targetIndex});
     b.CreateBr(ret);
@@ -624,19 +635,23 @@ private:
     f->setName("drvhorn.cdev_device_del");
   }
 
-  void handleDeviceWakeupEnable(Module &m) {
+  void handleDeviceWakeupEnable(Module &m, Attribute checkPointAttr) {
     Function *ndBool = getOrCreateNdIntFn(m, 1);
     Function *enable = m.getFunction("device_wakeup_enable");
     if (!enable)
       return;
     enable->deleteBody();
     enable->setName("drvhorn.device_wakeup_enable");
-    Function *getDevice = m.getFunction("get_device");
+    enable->addFnAttr(checkPointAttr);
     LLVMContext &ctx = m.getContext();
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", enable);
     BasicBlock *body = BasicBlock::Create(ctx, "body", enable);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", enable);
     Value *dev = enable->getArg(0);
+    StructType *devType =
+        cast<StructType>(dev->getType()->getPointerElementType());
+    StructType *devPmInfoType =
+        StructType::getTypeByName(ctx, "struct.dev_pm_info");
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
 
     IRBuilder<> b(entry);
@@ -644,9 +659,12 @@ private:
     b.CreateCondBr(cond, body, ret);
 
     b.SetInsertPoint(body);
-    if (dev->getType() != getDevice->getArg(0)->getType())
-      dev = b.CreateBitCast(dev, getDevice->getArg(0)->getType());
-    b.CreateCall(getDevice, dev);
+    Value *devPmInfoGEP = b.CreateInBoundsGEP(
+        devType, dev, gepIndicesToStruct(devType, devPmInfoType).getValue());
+    Value *wakeupGEP = b.CreateInBoundsGEP(
+        devPmInfoGEP->getType()->getPointerElementType(), devPmInfoGEP,
+        {b.getInt64(0), b.getInt32(DEVPMINFO_WAKEUP_INDEX)});
+    b.CreateStore(b.getInt16(1), wakeupGEP);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
@@ -656,18 +674,22 @@ private:
     b.CreateRet(phi);
   }
 
-  void handleDeviceWakeupDisable(Module &m) {
+  void handleDeviceWakeupDisable(Module &m, Attribute checkPointAttr) {
     Function *disable = m.getFunction("device_wakeup_disable");
     if (!disable)
       return;
     disable->deleteBody();
     disable->setName("drvhorn.device_wakeup_disable");
-    Function *putDevice = m.getFunction("put_device");
+    disable->addFnAttr(checkPointAttr);
     LLVMContext &ctx = m.getContext();
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", disable);
     BasicBlock *body = BasicBlock::Create(ctx, "body", disable);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", disable);
     Value *dev = disable->getArg(0);
+    StructType *devType =
+        cast<StructType>(dev->getType()->getPointerElementType());
+    StructType *devPmInfoType =
+        StructType::getTypeByName(ctx, "struct.dev_pm_info");
     IntegerType *i32Ty = Type::getInt32Ty(ctx);
 
     IRBuilder<> b(entry);
@@ -675,9 +697,12 @@ private:
     b.CreateCondBr(isNull, ret, body);
 
     b.SetInsertPoint(body);
-    if (dev->getType() != putDevice->getArg(0)->getType())
-      dev = b.CreateBitCast(dev, putDevice->getArg(0)->getType());
-    b.CreateCall(putDevice, dev);
+    Value *devPmInfoGEP = b.CreateInBoundsGEP(
+        devType, dev, gepIndicesToStruct(devType, devPmInfoType).getValue());
+    Value *wakeupGEP = b.CreateInBoundsGEP(
+        devPmInfoGEP->getType()->getPointerElementType(), devPmInfoGEP,
+        {b.getInt64(0), b.getInt32(DEVPMINFO_WAKEUP_INDEX)});
+    b.CreateStore(b.getInt16(0), wakeupGEP);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);

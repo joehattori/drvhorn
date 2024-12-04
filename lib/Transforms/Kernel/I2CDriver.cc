@@ -2,13 +2,14 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 
+#include "seahorn/Transforms/Kernel/SetupEntrypoint.hh"
 #include "seahorn/Transforms/Kernel/Util.hh"
 
 using namespace llvm;
 
 namespace seahorn {
 
-static unsigned i2cDriverProbeIndex = 1;
+#define I2C_PROBE_INDEX 1
 
 class I2CDriver : public ModulePass {
 public:
@@ -46,7 +47,7 @@ private:
   Function *getProbeFn(Module &m) {
     GlobalVariable *drv = m.getGlobalVariable(name, true);
     Constant *probe =
-        drv->getInitializer()->getAggregateElement(i2cDriverProbeIndex);
+        drv->getInitializer()->getAggregateElement(I2C_PROBE_INDEX);
     return dyn_cast_or_null<Function>(probe);
   }
 
@@ -65,15 +66,11 @@ private:
   Value *setupI2CClient(Module &m, IRBuilder<> &b, StructType *i2cClientType) {
     LLVMContext &ctx = m.getContext();
     StructType *deviceType = StructType::getTypeByName(ctx, "struct.device");
-    Function *krefInit = m.getFunction("drvhorn.kref_init");
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    SmallVector<Value *> gepIndices(
-        gepIndicesToStruct(i2cClientType, deviceType).getValue());
     AllocaInst *i2cClient = b.CreateAlloca(i2cClientType);
-    gepIndices.push_back(ConstantInt::get(i32Ty, 0));
-    gepIndices.push_back(ConstantInt::get(i32Ty, 6));
-    Value *krefPtr = b.CreateInBoundsGEP(i2cClientType, i2cClient, gepIndices);
-    b.CreateCall(krefInit, krefPtr);
+    Value *devicePtr = b.CreateInBoundsGEP(
+        i2cClientType, i2cClient,
+        gepIndicesToStruct(i2cClientType, deviceType).getValue());
+    setupDevicePtr(m, b, devicePtr);
     return i2cClient;
   }
 };

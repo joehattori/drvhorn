@@ -19,4 +19,5 @@ add_llvm_library(SeaTransformsKernel DISABLE_LLVM_LINK_LLVM_DYLIB
   ListOps.cc
   HandleInlineAsm.cc
   AssertKrefs.cc
+  SetupEntrypoint.cc
   )

@@ -17,8 +17,7 @@ public:
 
   bool runOnModule(Module &m) override {
     Function *krefChecker = buildKrefChecker(m);
-    Function *rawcountChecker = buildRawcountChecker(m);
-    buildFail(m, krefChecker, rawcountChecker);
+    buildFail(m, krefChecker);
     return true;
   }
 
@@ -64,21 +63,25 @@ private:
     return f;
   }
 
-  Function *buildRawcountChecker(Module &m) {
+  Function *getOrBuildRawcountChecker(Module &m, IntegerType *iTy,
+                                      uint64_t correctCount) {
+    std::string name =
+        "drvhorn.assert_rawcount.i" + std::to_string(iTy->getBitWidth());
+    if (Function *f = m.getFunction(name))
+      return f;
     LLVMContext &ctx = m.getContext();
     SeaBuiltinsInfo &sbi = getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
     Function *errFn = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
-    IntegerType *i8Ty = Type::getInt8Ty(ctx);
-    Function *f = Function::Create(
-        FunctionType::get(Type::getVoidTy(ctx), i8Ty, false),
-        GlobalValue::PrivateLinkage, "drvhorn.assert_zero", &m);
+    Function *f =
+        Function::Create(FunctionType::get(Type::getVoidTy(ctx), iTy, false),
+                         GlobalValue::PrivateLinkage, name, &m);
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
     BasicBlock *err = BasicBlock::Create(ctx, "err", f);
     BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
 
     IRBuilder<> b(entry);
     Argument *val = f->getArg(0);
-    Value *equals = b.CreateICmpEQ(val, ConstantInt::get(i8Ty, 1));
+    Value *equals = b.CreateICmpEQ(val, ConstantInt::get(iTy, correctCount));
     b.CreateCondBr(equals, ret, err);
 
     b.SetInsertPoint(err);
@@ -90,7 +93,7 @@ private:
     return f;
   }
 
-  void buildFail(Module &m, Function *krefChecker, Function *rawcountChecker) {
+  void buildFail(Module &m, Function *krefChecker) {
     Function *fail = m.getFunction("drvhorn.fail");
     if (!fail)
       return;
@@ -101,7 +104,7 @@ private:
     IRBuilder<> b(blk);
     if (fail->arg_size()) {
       Argument *instance = fail->arg_begin();
-      checkInstance(instance, b, ctx, krefType, krefChecker, rawcountChecker);
+      checkInstance(m, instance, b, ctx, krefType, krefChecker);
     }
 
     static const std::string storagePrefix = "drvhorn.storage.";
@@ -110,8 +113,8 @@ private:
         StringRef suffix = gv.getName().substr(storagePrefix.size());
         GlobalVariable *targetIndex =
             m.getGlobalVariable("drvhorn.target_index." + suffix.str(), true);
-        Function *f = genAssertFunction(m, krefChecker, rawcountChecker, gv,
-                                        targetIndex, suffix);
+        Function *f =
+            genAssertFunction(m, krefChecker, gv, targetIndex, suffix);
         b.CreateCall(f);
       } else if (gv.getName().startswith("drvhorn.kref.")) {
         Type *type = gv.getValueType();
@@ -130,9 +133,9 @@ private:
     b.CreateRetVoid();
   }
 
-  void checkInstance(Argument *instance, IRBuilder<> &b, LLVMContext &ctx,
-                     StructType *krefType, Function *krefChecker,
-                     Function *rawcountChecker) {
+  void checkInstance(Module &m, Argument *instance, IRBuilder<> &b,
+                     LLVMContext &ctx, StructType *krefType,
+                     Function *krefChecker) {
     StructType *instanceType =
         cast<StructType>(instance->getType()->getPointerElementType());
     StructType *devType = StructType::getTypeByName(ctx, "struct.device");
@@ -148,21 +151,24 @@ private:
       deviceGEP = b.CreateLoad(devicePtrGEP->getType()->getPointerElementType(),
                                devicePtrGEP);
     }
-    if (deviceGEP) {
-      Value *krefGEP = b.CreateInBoundsGEP(
-          deviceGEP->getType()->getPointerElementType(), deviceGEP,
-          gepIndicesToStruct(devType, krefType).getValue());
-      b.CreateCall(krefChecker, krefGEP);
-    }
+    if (!deviceGEP)
+      return;
+    devType = cast<StructType>(deviceGEP->getType()->getPointerElementType());
+    Value *krefGEP = b.CreateInBoundsGEP(
+        devType, deviceGEP, gepIndicesToStruct(devType, krefType).getValue());
+    b.CreateCall(krefChecker, krefGEP);
+    Function *checker = getOrBuildAssertWakeup(m, devType);
+    b.CreateCall(checker, deviceGEP);
   }
 
   Function *genAssertFunction(Module &m, Function *checker,
-                              Function *rawcountChecker,
                               GlobalVariable &storage,
                               GlobalVariable *targetIndex, StringRef suffix) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
     IntegerType *i8Ty = Type::getInt8Ty(ctx);
+    StructType *devType = StructType::getTypeByName(ctx, "struct.device");
+    Function *rawcountChecker = getOrBuildRawcountChecker(m, i8Ty, 1);
     Function *f =
         Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
                          GlobalValue::ExternalLinkage,
@@ -201,9 +207,40 @@ private:
       LoadInst *count = b.CreateLoad(i8Ty, countGEP);
       b.CreateCall(rawcountChecker, count);
     }
+    if (equivTypes(elemType, devType)) {
+      Function *checker = getOrBuildAssertWakeup(m, elemType);
+      b.CreateCall(checker, elem);
+    }
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
+    b.CreateRetVoid();
+    return f;
+  }
+
+  Function *getOrBuildAssertWakeup(Module &m, StructType *devType) {
+    std::string name = "drvhorn.assert_wakeup." + devType->getName().str();
+    if (Function *f = m.getFunction(name))
+      return f;
+    LLVMContext &ctx = m.getContext();
+    IntegerType *i16Ty = Type::getInt16Ty(ctx);
+    Function *f = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), devType->getPointerTo(), false),
+        GlobalValue::PrivateLinkage, name, &m);
+    Function *rawcountChecker = getOrBuildRawcountChecker(m, i16Ty, 0);
+    StructType *devPmInfoType =
+        StructType::getTypeByName(ctx, "struct.dev_pm_info");
+    Value *dev = f->getArg(0);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+
+    IRBuilder<> b(entry);
+    Value *pmInfoGEP = b.CreateInBoundsGEP(
+        devType, dev, gepIndicesToStruct(devType, devPmInfoType).getValue());
+    Value *wakeupGEP = b.CreateInBoundsGEP(
+        pmInfoGEP->getType()->getPointerElementType(), pmInfoGEP,
+        {b.getInt64(0), b.getInt32(DEVPMINFO_WAKEUP_INDEX)});
+    LoadInst *wakeup = b.CreateLoad(i16Ty, wakeupGEP);
+    b.CreateCall(rawcountChecker, wakeup);
     b.CreateRetVoid();
     return f;
   }
