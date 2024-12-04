@@ -863,7 +863,7 @@ int main(int argc, char **argv) {
       std::string out = KernelOutDir + "/" + driver.second + ".ll";
       SeaPassManagerWrapper pm_wrapper(Registry, output, driver.first,
                                        driver.second, true, out);
-      llvm::outs() << "Running driver for " << driver.second << "\n";
+      llvm::outs() << "Generating LLVM IR for " << driver.second << "\n";
       std::unique_ptr<llvm::Module> clonedModule = llvm::CloneModule(m);
       pm_wrapper.run(*clonedModule.get());
     }
