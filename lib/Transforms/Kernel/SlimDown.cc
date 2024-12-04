@@ -514,7 +514,7 @@ public:
 
     sliceModule(m);
     runDCEPasses(m, 10);
-    replaceReturnedConstIntToPtr(m);
+    replaceConstIntToPtrToNull(m);
     removeNotCalledFunctions(m);
     runDCEPasses(m, 20);
     return true;
@@ -672,7 +672,7 @@ private:
   }
 
   // ERR_PTR should be replaced with null
-  void replaceReturnedConstIntToPtr(Module &m) {
+  void replaceConstIntToPtrToNull(Module &m) {
     auto isConstIntToPtr = [](Value *v) {
       ConstantExpr *ce = dyn_cast<ConstantExpr>(v);
       return ce && ce->getOpcode() == Instruction::IntToPtr;
@@ -680,12 +680,12 @@ private:
 
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
-        if (PHINode *phi = dyn_cast<PHINode>(&inst)) {
-          for (Value *v : phi->incoming_values()) {
-            if (isConstIntToPtr(v)) {
-              Value *null = Constant::getNullValue(v->getType());
-              v->replaceAllUsesWith(null);
-            }
+        if (isa<StoreInst>(inst))
+          continue;
+        for (Value *v : inst.operands()) {
+          if (isConstIntToPtr(v)) {
+            Value *null = Constant::getNullValue(v->getType());
+            v->replaceAllUsesWith(null);
           }
         }
       }
