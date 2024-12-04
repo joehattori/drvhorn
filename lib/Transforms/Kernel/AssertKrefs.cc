@@ -16,8 +16,9 @@ public:
   AssertKrefs() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    Function *checker = buildKrefChecker(m);
-    buildFail(m, checker);
+    Function *krefChecker = buildKrefChecker(m);
+    Function *rawcountChecker = buildRawcountChecker(m);
+    buildFail(m, krefChecker, rawcountChecker);
     return true;
   }
 
@@ -63,7 +64,33 @@ private:
     return f;
   }
 
-  void buildFail(Module &m, Function *checker) {
+  Function *buildRawcountChecker(Module &m) {
+    LLVMContext &ctx = m.getContext();
+    SeaBuiltinsInfo &sbi = getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
+    Function *errFn = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
+    IntegerType *i8Ty = Type::getInt8Ty(ctx);
+    Function *f = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), i8Ty, false),
+        GlobalValue::PrivateLinkage, "drvhorn.assert_zero", &m);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *err = BasicBlock::Create(ctx, "err", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    Argument *val = f->getArg(0);
+    Value *equals = b.CreateICmpEQ(val, ConstantInt::get(i8Ty, 1));
+    b.CreateCondBr(equals, ret, err);
+
+    b.SetInsertPoint(err);
+    b.CreateCall(errFn);
+    b.CreateUnreachable();
+
+    b.SetInsertPoint(ret);
+    b.CreateRetVoid();
+    return f;
+  }
+
+  void buildFail(Module &m, Function *krefChecker, Function *rawcountChecker) {
     Function *fail = m.getFunction("drvhorn.fail");
     if (!fail)
       return;
@@ -74,7 +101,7 @@ private:
     IRBuilder<> b(blk);
     if (fail->arg_size()) {
       Argument *instance = fail->arg_begin();
-      checkInstance(instance, b, ctx, krefType, checker);
+      checkInstance(instance, b, ctx, krefType, krefChecker, rawcountChecker);
     }
 
     static const std::string storagePrefix = "drvhorn.storage.";
@@ -83,7 +110,8 @@ private:
         StringRef suffix = gv.getName().substr(storagePrefix.size());
         GlobalVariable *targetIndex =
             m.getGlobalVariable("drvhorn.target_index." + suffix.str(), true);
-        Function *f = genAssertFunction(m, checker, gv, targetIndex, suffix);
+        Function *f = genAssertFunction(m, krefChecker, rawcountChecker, gv,
+                                        targetIndex, suffix);
         b.CreateCall(f);
       } else if (gv.getName().startswith("drvhorn.kref.")) {
         Type *type = gv.getValueType();
@@ -95,7 +123,7 @@ private:
               type, &gv,
               gepIndicesToStruct(cast<StructType>(type), krefType).getValue());
         }
-        b.CreateCall(checker, krefPtr);
+        b.CreateCall(krefChecker, krefPtr);
       }
     }
 
@@ -103,7 +131,8 @@ private:
   }
 
   void checkInstance(Argument *instance, IRBuilder<> &b, LLVMContext &ctx,
-                     StructType *krefType, Function *checker) {
+                     StructType *krefType, Function *krefChecker,
+                     Function *rawcountChecker) {
     StructType *instanceType =
         cast<StructType>(instance->getType()->getPointerElementType());
     StructType *devType = StructType::getTypeByName(ctx, "struct.device");
@@ -123,16 +152,17 @@ private:
       Value *krefGEP = b.CreateInBoundsGEP(
           deviceGEP->getType()->getPointerElementType(), deviceGEP,
           gepIndicesToStruct(devType, krefType).getValue());
-      b.CreateCall(checker, krefGEP);
+      b.CreateCall(krefChecker, krefGEP);
     }
   }
 
   Function *genAssertFunction(Module &m, Function *checker,
+                              Function *rawcountChecker,
                               GlobalVariable &storage,
                               GlobalVariable *targetIndex, StringRef suffix) {
     LLVMContext &ctx = m.getContext();
     IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    StructType *deviceType = StructType::getTypeByName(ctx, "struct.device");
+    IntegerType *i8Ty = Type::getInt8Ty(ctx);
     Function *f =
         Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
                          GlobalValue::ExternalLinkage,
@@ -160,51 +190,18 @@ private:
     } else {
       elemType = cast<StructType>(storageType->getElementType());
     }
-    if (equivTypes(elemType, deviceType)) {
-      Function *devChecker = deviceChecker(m, elemType);
-      b.CreateCall(devChecker, elem);
+    if (embedsStruct(elemType, krefType)) {
+      Value *krefPtr = b.CreateInBoundsGEP(
+          elemType, elem, gepIndicesToStruct(elemType, krefType).getValue());
+      b.CreateCall(checker, krefPtr);
+    } else {
+      // If it does not embed kref, it should be struct.fwnode_handle
+      Value *countGEP = b.CreateInBoundsGEP(
+          elemType, elem, {b.getInt64(0), b.getInt32(FWNODE_REFCOUNT_INDEX)});
+      LoadInst *count = b.CreateLoad(i8Ty, countGEP);
+      b.CreateCall(rawcountChecker, count);
     }
-    Value *krefPtr = b.CreateInBoundsGEP(
-        elemType, elem, gepIndicesToStruct(elemType, krefType).getValue());
-    b.CreateCall(checker, krefPtr);
     b.CreateBr(ret);
-
-    b.SetInsertPoint(ret);
-    b.CreateRetVoid();
-    return f;
-  }
-
-  Function *deviceChecker(Module &m, StructType *devType) {
-    std::string name =
-        "drvhorn.assert_dev_is_deleted." + devType->getName().str();
-    if (Function *f = m.getFunction(name))
-      return f;
-    LLVMContext &ctx = m.getContext();
-    Function *f = Function::Create(
-        FunctionType::get(Type::getVoidTy(ctx), devType->getPointerTo(), false),
-        GlobalValue::ExternalLinkage, name, &m);
-    IntegerType *i8Ty = Type::getInt8Ty(ctx);
-    IntegerType *i32Ty = Type::getInt32Ty(ctx);
-    IntegerType *i64Ty = Type::getInt64Ty(ctx);
-    Argument *dev = f->getArg(0);
-    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
-    BasicBlock *err = BasicBlock::Create(ctx, "err", f);
-    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
-
-    IRBuilder<> b(entry);
-    Value *isAddedGEP = b.CreateInBoundsGEP(devType, dev,
-                                            {ConstantInt::get(i64Ty, 0),
-                                             ConstantInt::get(i32Ty, 0),
-                                             ConstantInt::get(i32Ty, 7)});
-    Value *isAdded = b.CreateLoad(i8Ty, isAddedGEP);
-    Value *isZero = b.CreateICmpEQ(isAdded, ConstantInt::get(i8Ty, 0));
-    b.CreateCondBr(isZero, ret, err);
-
-    b.SetInsertPoint(err);
-    SeaBuiltinsInfo &sbi = getAnalysis<SeaBuiltinsInfoWrapperPass>().getSBI();
-    Function *error = sbi.mkSeaBuiltinFn(SeaBuiltinsOp::ERROR, m);
-    b.CreateCall(error);
-    b.CreateUnreachable();
 
     b.SetInsertPoint(ret);
     b.CreateRetVoid();

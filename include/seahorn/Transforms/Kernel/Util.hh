@@ -3,6 +3,8 @@
 #include "llvm/IR/Instructions.h"
 
 namespace seahorn {
+#define FWNODE_REFCOUNT_INDEX 5
+
 llvm::StringRef getStructName(llvm::StringRef name);
 bool equivTypes(const llvm::Type *t1, const llvm::Type *t2);
 const llvm::Function *extractCalledFunction(const llvm::CallInst *call);

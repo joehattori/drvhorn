@@ -248,9 +248,12 @@ private:
   bool visitGlobalVariable(GlobalVariable *gv) {
     if (gv->getName().startswith("drvhorn."))
       return true;
-    StructType *krefType =
-        StructType::getTypeByName(gv->getContext(), "struct.kref");
-    return embedsStructIndirect(gv->getValueType(), krefType);
+    LLVMContext &ctx = gv->getContext();
+    StructType *krefType = StructType::getTypeByName(ctx, "struct.kref");
+    PointerType *devPtrType =
+        StructType::getTypeByName(ctx, "struct.device")->getPointerTo();
+    return embedsStructIndirect(gv->getValueType(), krefType) ||
+           embedsStructIndirect(gv->getValueType(), devPtrType);
   }
 
   bool embedsStructIndirect(Type *type, Type *inner) {

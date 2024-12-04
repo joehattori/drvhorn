@@ -184,19 +184,23 @@ public:
 
   bool runOnModule(Module &m) override {
     Function *updateIndex = buildUpdateIndex(m);
-    Attribute fwnodeAttr = Attribute::get(m.getContext(), "drvhorn.fwnode");
-    Function *devNodeGetter = handleDeviceNodeFinders(m, updateIndex);
+    LLVMContext &ctx = m.getContext();
+    Attribute fwnodeAttr = Attribute::get(ctx, "drvhorn.fwnode");
+    Attribute checkPointAttr = Attribute::get(ctx, "drvhorn.checkpoint");
+
+    Function *devNodeGetter =
+        handleDeviceNodeFinders(m, updateIndex, checkPointAttr);
     handleFwnodeGet(m, fwnodeAttr);
-    Function *fwnodePutter = handleFwnodePut(m, fwnodeAttr);
-    handleFwnodeFinders(m, devNodeGetter, fwnodePutter, fwnodeAttr);
-    handleDeviceFinders(m, updateIndex);
+    Function *fwnodePutter = handleFwnodePut(m, fwnodeAttr, checkPointAttr);
+    handleFwnodeFinders(m, fwnodePutter, updateIndex, fwnodeAttr,
+                        checkPointAttr);
+    handleDeviceFinders(m, updateIndex, checkPointAttr);
     Function *devInit = handleDeviceInitialize(m);
-    Function *devAdd = handleDeviceAdd(m, devInit);
-    handleDeviceDel(m);
+    killDeviceAddDel(m);
     handleDeviceLink(m);
-    handleDeviceAllocation(m, devInit, updateIndex);
+    handleDeviceAllocation(m, devInit, updateIndex, checkPointAttr);
     handleDevmFunctions(m);
-    handleCDevDeviceAdd(m, devAdd);
+    handleCDevDeviceAdd(m);
     handleCDevDeviceDel(m);
     handleDeviceWakeupEnable(m);
     handleDeviceWakeupDisable(m);
@@ -208,7 +212,7 @@ public:
     stubFwnodeConnectionFindMatch(m);
     stubFwnodeConnectionFindMatches(m);
 
-    handleCpufreqGet(m, updateIndex);
+    handleCpufreqGet(m, updateIndex, checkPointAttr);
     return true;
   }
 
@@ -253,7 +257,8 @@ private:
   };
 
   // returns the device node generator function
-  Function *handleDeviceNodeFinders(Module &m, Function *updateIndex) {
+  Function *handleDeviceNodeFinders(Module &m, Function *updateIndex,
+                                    Attribute checkPointAttr) {
     struct FinderInfo {
       StringRef name;
       Optional<size_t> putNodeIndex;
@@ -278,7 +283,6 @@ private:
     Constant *ofNodeGet = m.getFunction("of_node_get");
     Function *ofNodePut = m.getFunction("of_node_put");
     Function *devNodeGetter = nullptr;
-    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
     for (const FinderInfo &info : finders) {
       Function *f = m.getFunction(info.name);
       if (!f)
@@ -289,8 +293,8 @@ private:
       StructType *devNodeType =
           cast<StructType>(f->getReturnType()->getPointerElementType());
       if (!devNodeGetter) {
-        devNodeGetter =
-            buildStorageElemGenerator(m, devNodeType, updateIndex, {}, attr);
+        devNodeGetter = buildStorageElemGenerator(m, devNodeType, updateIndex,
+                                                  {}, checkPointAttr);
         devNodeGetter->setName("drvhorn.gen.devnode");
       }
       BasicBlock *earlyReturn = info.returnIfNullArgIndex.hasValue()
@@ -334,7 +338,6 @@ private:
     return devNodeGetter;
   }
 
-#define DEVNODE_FWNODE_INDEX 3
   void handleFwnodeGet(Module &m, Attribute attr) {
     Function *f = m.getFunction("fwnode_handle_get");
     if (!f)
@@ -346,57 +349,47 @@ private:
     Argument *fwnode = f->getArg(0);
     LLVMContext &ctx = m.getContext();
     BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
-    Function *ofNodeGet = m.getFunction("of_node_get");
+    IntegerType *i8Type = Type::getInt8Ty(ctx);
 
     IRBuilder<> b(blk);
-    Value *devNode =
+    Value *countGEP =
         b.CreateInBoundsGEP(fwnode->getType()->getPointerElementType(), fwnode,
-                            {b.getInt64(-1), b.getInt32(4)});
-    if (ofNodeGet->getArg(0)->getType() != devNode->getType())
-      devNode = b.CreateBitCast(devNode, ofNodeGet->getArg(0)->getType());
-    b.CreateCall(ofNodeGet, devNode);
+                            {b.getInt64(0), b.getInt32(FWNODE_REFCOUNT_INDEX)});
+    LoadInst *count = b.CreateLoad(i8Type, countGEP);
+    Value *newCount = b.CreateAdd(count, b.getInt8(1));
+    b.CreateStore(newCount, countGEP);
     b.CreateRet(fwnode);
   }
 
-  Function *handleFwnodePut(Module &m, Attribute attr) {
+  Function *handleFwnodePut(Module &m, Attribute fwnodeAttr,
+                            Attribute checkPointAttr) {
     Function *f = m.getFunction("fwnode_handle_put");
     if (!f)
       return nullptr;
     f->deleteBody();
     f->setName("drvhorn.fwnode_put");
-    f->addFnAttr(attr);
+    f->addFnAttr(fwnodeAttr);
+    f->addFnAttr(checkPointAttr);
 
     Argument *fwnode = f->getArg(0);
     LLVMContext &ctx = m.getContext();
-    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
-    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
-    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
-    Function *ofNodePut = m.getFunction("of_node_put");
-    StructType *devNodeType = cast<StructType>(
-        ofNodePut->getArg(0)->getType()->getPointerElementType());
+    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+    IntegerType *i8Type = Type::getInt8Ty(ctx);
 
-    IRBuilder<> b(entry);
-    Value *isNull = b.CreateIsNull(fwnode);
-    b.CreateCondBr(isNull, ret, body);
-
-    b.SetInsertPoint(body);
-    // to_of_node() was translated to something like this:
-    //   getelementptr %struct.fwnode_handle, %struct.fwnode_handle* %0, i64 -1,
-    //   i32 4
-    Value *devNode =
+    IRBuilder<> b(blk);
+    Value *countGEP =
         b.CreateInBoundsGEP(fwnode->getType()->getPointerElementType(), fwnode,
-                            {b.getInt64(-1), b.getInt32(4)});
-    devNode = b.CreateBitCast(devNode, devNodeType->getPointerTo());
-    b.CreateCall(ofNodePut, devNode);
-    b.CreateBr(ret);
-
-    b.SetInsertPoint(ret);
+                            {b.getInt64(0), b.getInt32(FWNODE_REFCOUNT_INDEX)});
+    LoadInst *count = b.CreateLoad(i8Type, countGEP);
+    Value *newCount = b.CreateSub(count, b.getInt8(1));
+    b.CreateStore(newCount, countGEP);
     b.CreateRetVoid();
     return f;
   }
 
-  void handleFwnodeFinders(Module &m, Function *devNodeGetter,
-                           Function *fwnodePutter, Attribute attr) {
+  void handleFwnodeFinders(Module &m, Function *fwnodePutter,
+                           Function *updateIndex, Attribute fwnodeAttr,
+                           Attribute checkPointAttr) {
     struct FinderInfo {
       StringRef name;
       Optional<unsigned> putIndex;
@@ -420,12 +413,8 @@ private:
         {"fwnode_graph_get_endpoint_by_id", None},
     };
     LLVMContext &ctx = m.getContext();
-    Type *devNodePtrType = devNodeGetter->getReturnType();
-    FunctionType *ofNodeGetType =
-        FunctionType::get(devNodePtrType, devNodePtrType, false);
-    Constant *ofNodeGet = m.getFunction("of_node_get");
-    Constant *ofNodeGetCasted =
-        ConstantExpr::getBitCast(ofNodeGet, ofNodeGetType->getPointerTo());
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    IntegerType *i64Ty = Type::getInt64Ty(ctx);
 
     for (const FinderInfo &info : finders) {
       Function *f = m.getFunction(info.name);
@@ -433,11 +422,20 @@ private:
         continue;
       f->deleteBody();
       f->setName("drvhorn.fwnode_getter." + info.name);
-      f->addFnAttr(attr);
+      f->addFnAttr(checkPointAttr);
+      f->addFnAttr(fwnodeAttr);
 
       BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
       BasicBlock *body = BasicBlock::Create(ctx, "body", f);
       BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+      StructType *fwnodeType =
+          cast<StructType>(f->getReturnType()->getPointerElementType());
+      StorageGlobals globals =
+          getStorageAndIndex(m, fwnodeType, fwnodeType->getName().str());
+      GlobalVariable *storage = globals.storage;
+      GlobalVariable *index = globals.curIndex;
+      GlobalVariable *targetIndex = globals.targetIndex;
 
       IRBuilder<> b(entry);
       if (info.putIndex.hasValue()) {
@@ -446,15 +444,22 @@ private:
           prev = b.CreateBitCast(prev, fwnodePutter->getArg(0)->getType());
         b.CreateCall(fwnodePutter, prev);
       }
-      Value *devNode = b.CreateCall(devNodeGetter);
-      Value *isNull = b.CreateIsNull(devNode);
-      b.CreateCondBr(isNull, ret, body);
+      CallInst *ndCond = b.CreateCall(ndBool);
+      LoadInst *curIndex = b.CreateLoad(i64Ty, index);
+      Value *withinRange = b.CreateICmpULT(curIndex, b.getInt64(STORAGE_SIZE));
+      Value *cond = b.CreateAnd(ndCond, withinRange);
+      b.CreateCondBr(cond, body, ret);
 
       b.SetInsertPoint(body);
-      b.CreateCall(ofNodeGetType, ofNodeGetCasted, devNode);
-      Value *fwnode = b.CreateInBoundsGEP(
-          devNodePtrType->getPointerElementType(), devNode,
-          {b.getInt64(0), b.getInt32(DEVNODE_FWNODE_INDEX)});
+      Value *fwnode = b.CreateInBoundsGEP(storage->getValueType(), storage,
+                                          {b.getInt64(0), curIndex});
+      Value *countGEP = b.CreateInBoundsGEP(
+          fwnode->getType()->getPointerElementType(), fwnode,
+          {b.getInt64(0), b.getInt32(FWNODE_REFCOUNT_INDEX)});
+      b.CreateStore(b.getInt8(2), countGEP);
+      Value *nxtIndex = b.CreateAdd(curIndex, b.getInt64(1));
+      b.CreateStore(nxtIndex, index);
+      b.CreateCall(updateIndex, {curIndex, targetIndex});
       b.CreateBr(ret);
 
       b.SetInsertPoint(ret);
@@ -462,10 +467,7 @@ private:
       Constant *null = Constant::getNullValue(fwnode->getType());
       retPhi->addIncoming(null, entry);
       retPhi->addIncoming(fwnode, body);
-      if (retPhi->getType() == f->getReturnType())
-        b.CreateRet(retPhi);
-      else
-        b.CreateRet(b.CreateBitCast(retPhi, f->getReturnType()));
+      b.CreateRet(retPhi);
     }
   }
 
@@ -597,12 +599,13 @@ private:
     }
   }
 
-  void handleCDevDeviceAdd(Module &m, Function *devAdd) {
+  void handleCDevDeviceAdd(Module &m) {
     Function *f = m.getFunction("cdev_device_add");
     if (!f)
       return;
     f->deleteBody();
     f->setName("drvhorn.cdev_device_add");
+    Function *devAdd = m.getFunction("device_add");
     LLVMContext &ctx = m.getContext();
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
     Value *dev = f->getArg(1);
@@ -830,7 +833,8 @@ private:
     b.CreateRetVoid();
   }
 
-  void handleDeviceFinders(Module &m, Function *updateIndex) {
+  void handleDeviceFinders(Module &m, Function *updateIndex,
+                           Attribute checkPointAttr) {
     const DenseMap<const GlobalVariable *, StructType *> &clsOrBusToDevType =
         clsOrBusToDeviceMap(m);
     SmallVector<GetElementPtrInst *> containerOfs;
@@ -850,8 +854,8 @@ private:
         }
         const SmallVector<Value *> &devIndices =
             gepIndicesToStruct(surroundingDevType, devType).getValue();
-        Function *devGetter =
-            deviceGetter(m, surroundingDevType, devIndices, updateIndex);
+        Function *devGetter = deviceGetter(m, surroundingDevType, devIndices,
+                                           updateIndex, checkPointAttr);
         IRBuilder<> b(call);
         Value *replace = b.CreateCall(devGetter);
         if (replace->getType() != call->getType())
@@ -1071,9 +1075,8 @@ private:
   // returns a pointer to the surrounding device.
   Function *deviceGetter(Module &m, StructType *surroundingDevType,
                          const SmallVector<Value *> &devIndices,
-                         Function *updateIndex) {
+                         Function *updateIndex, Attribute checkPointAttr) {
     LLVMContext &ctx = m.getContext();
-    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
     Type *retType = getGEPType(surroundingDevType, devIndices);
     std::string getterName =
         "drvhorn.device_getter." + surroundingDevType->getName().str();
@@ -1082,8 +1085,8 @@ private:
     Function *getter =
         Function::Create(FunctionType::get(retType->getPointerTo(), false),
                          GlobalValue::PrivateLinkage, getterName, &m);
-    Function *gen = buildStorageElemGenerator(m, surroundingDevType,
-                                              updateIndex, devIndices, attr);
+    Function *gen = buildStorageElemGenerator(
+        m, surroundingDevType, updateIndex, devIndices, checkPointAttr);
     Constant *getDevice = m.getFunction("get_device");
     FunctionType *getDeviceType =
         FunctionType::get(gen->getReturnType(), gen->getReturnType(), false);
@@ -1103,11 +1106,11 @@ private:
 
     b.SetInsertPoint(body);
     b.CreateCall(getDeviceType, getDevice, dev);
-    Value *isInitGEP =
-        b.CreateInBoundsGEP(retType, dev,
-                            {b.getInt64(0), b.getInt32(DEV_KOBJ_INDEX),
-                             b.getInt32(KOBJECT_ISINIT_INDEX)});
-    b.CreateStore(b.getInt8(0), isInitGEP);
+    // Value *isInitGEP =
+    //     b.CreateInBoundsGEP(retType, dev,
+    //                         {b.getInt64(0), b.getInt32(DEV_KOBJ_INDEX),
+    //                          b.getInt32(KOBJECT_ISINIT_INDEX)});
+    // b.CreateStore(b.getInt8(0), isInitGEP);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
@@ -1181,21 +1184,20 @@ private:
   }
 
   void handleDeviceAllocation(Module &m, Function *devInit,
-                              Function *updateIndex) {
+                              Function *updateIndex, Attribute checkPointAttr) {
     if (!devInit)
       return;
     Function *alloc = getOrCreateAlloc(m);
     DeviceGEPGetter getter(devInit);
     const DenseMap<uint64_t, SmallVector<StructType *>> &structsBySize =
         getStructsBySize(m);
-    Attribute attr = Attribute::get(m.getContext(), "drvhorn.checkpoint");
     for (CallInst *call : getCalls(alloc)) {
       StructType *allocatedDevType =
           getCustomDevType(m, structsBySize, getter, call);
       if (!allocatedDevType)
         continue;
-      Function *devAlloc =
-          buildStorageElemGenerator(m, allocatedDevType, updateIndex, {}, attr);
+      Function *devAlloc = buildStorageElemGenerator(
+          m, allocatedDevType, updateIndex, {}, checkPointAttr);
       IRBuilder<> b(call);
       CallInst *newCall = b.CreateCall(devAlloc);
       Value *replace = b.CreateBitCast(newCall, call->getType());
@@ -1333,55 +1335,11 @@ private:
     b.CreateRet(ret);
   }
 
-  // simulate device_add() by setting the 7th field (i8) of the kobject to 0
-  // or 1.
-  Function *handleDeviceAdd(Module &m, Constant *devInit) {
-    Function *f = m.getFunction("device_add");
-    if (!f)
-      return nullptr;
-    f->deleteBody();
-    f->setName("drvhorn.device_add");
-    LLVMContext &ctx = m.getContext();
-    Function *ndBool = getOrCreateNdIntFn(m, 1);
-    Argument *dev = f->getArg(0);
-    StructType *devType =
-        cast<StructType>(dev->getType()->getPointerElementType());
-
-    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
-    IRBuilder<> b(blk);
-    Value *isAddedGEP =
-        b.CreateInBoundsGEP(devType, dev,
-                            {b.getInt64(0), b.getInt32(DEV_KOBJ_INDEX),
-                             b.getInt32(KOBJECT_ISINIT_INDEX)});
-    Value *ndVal = b.CreateCall(ndBool);
-    Value *isAdded = b.CreateSelect(ndVal, b.getInt8(1), b.getInt8(0));
-    b.CreateStore(isAdded, isAddedGEP);
-    Value *ret = b.CreateSelect(ndVal, b.getInt32(0), b.getInt32(-EINVAL));
-    b.CreateRet(ret);
-    return f;
-  }
-
-  // simulate device_del() by setting the 7th field (i8) of the kobject to 0.
-  void handleDeviceDel(Module &m) {
-    Function *f = m.getFunction("device_del");
-    if (!f)
-      return;
-    f->deleteBody();
-    f->setName("drvhorn.device_del");
-    LLVMContext &ctx = m.getContext();
-    Argument *dev = f->getArg(0);
-    StructType *devType =
-        cast<StructType>(dev->getType()->getPointerElementType());
-
-    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
-
-    IRBuilder<> b(entry);
-    Value *isAddedGEP =
-        b.CreateInBoundsGEP(devType, dev,
-                            {b.getInt64(0), b.getInt32(DEV_KOBJ_INDEX),
-                             b.getInt32(KOBJECT_ISINIT_INDEX)});
-    b.CreateStore(b.getInt8(0), isAddedGEP);
-    b.CreateRetVoid();
+  void killDeviceAddDel(Module &m) {
+    if (Function *f = m.getFunction("device_add"))
+      f->deleteBody();
+    if (Function *f = m.getFunction("device_del"))
+      f->deleteBody();
   }
 
   void stubFwnodeConnectionFindMatch(Module &m) {
@@ -1435,15 +1393,15 @@ private:
   }
 
   // TODO: implement in a different file or rename this file.
-  void handleCpufreqGet(Module &m, Function *updateIndex) {
+  void handleCpufreqGet(Module &m, Function *updateIndex,
+                        Attribute checkPointAttr) {
     Function *f = m.getFunction("cpufreq_cpu_get");
     if (!f)
       return;
     f->deleteBody();
     f->setName("drvhorn.cpufreq_cpu_get");
     LLVMContext &ctx = m.getContext();
-    Attribute attr = Attribute::get(ctx, "drvhorn.checkpoint");
-    f->addFnAttr(attr);
+    f->addFnAttr(checkPointAttr);
     StructType *policyType =
         cast<StructType>(f->getReturnType()->getPointerElementType());
 
