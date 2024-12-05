@@ -248,12 +248,18 @@ private:
   bool visitGlobalVariable(GlobalVariable *gv) {
     if (gv->getName().startswith("drvhorn."))
       return true;
+    // if the global variable is a poniter, it may be stored somewhere else,
+    // thus regard it as nondet.
+    Type *t = gv->getValueType();
+    if (t->isPointerTy()) {
+      return false;
+    }
     LLVMContext &ctx = gv->getContext();
     StructType *krefType = StructType::getTypeByName(ctx, "struct.kref");
     PointerType *devPtrType =
         StructType::getTypeByName(ctx, "struct.device")->getPointerTo();
-    return embedsStructIndirect(gv->getValueType(), krefType) ||
-           embedsStructIndirect(gv->getValueType(), devPtrType);
+    return embedsStructIndirect(t, krefType) ||
+           embedsStructIndirect(t, devPtrType);
   }
 
   bool embedsStructIndirect(Type *type, Type *inner) {
@@ -642,6 +648,12 @@ private:
     }
   }
 
+  bool isNewNondet(const Instruction &inst) {
+    if (isa<CallInst, LoadInst, StoreInst, InsertElementInst, InsertValueInst>(inst))
+      return true;
+    return false;
+  }
+
   void sliceModule(Module &m) {
     Filter filter(m);
     DenseMap<const Type *, Function *> ndvalfn;
@@ -656,7 +668,10 @@ private:
         if (filter.isTarget(&inst)) {
           retained.push_back(&inst);
         } else {
-          toRemoveInstructions.insert(&inst);
+          if (isNewNondet(inst))
+            toRemoveInstructions.insert(&inst);
+          else
+            retained.push_back(&inst);
           if (CallInst *call = dyn_cast<CallInst>(&inst)) {
             fillWriteOnlyArgs(call, toRemoveInstructions, ndvalfn);
           }
@@ -680,6 +695,9 @@ private:
 
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
+        // Instructions like
+        // store %struct.list_head*(inttoptr ...), %struct.list_head **ptr
+        // should be kept.
         if (isa<StoreInst>(inst))
           continue;
         for (Value *v : inst.operands()) {
@@ -788,7 +806,16 @@ private:
         return b.CreateCall(f);
       }
     }
-    Value *call = b.CreateAlloca(elemType);
+    Value *call;
+    if (isNullChecked(before)) {
+      Function *alloc = getOrCreateAlloc(*m);
+      DataLayout dl(m);
+      uint64_t size = dl.getTypeAllocSize(elemType);
+      Value *p = b.CreateCall(alloc, b.getInt64(size));
+      call = b.CreateBitCast(p, type);
+    } else {
+      call = b.CreateAlloca(elemType);
+    }
     if (elemType->isPointerTy()) {
       Value *value = nondetValue(elemType, before, ndvalfn);
       b.CreateStore(value, call);
@@ -796,14 +823,37 @@ private:
     return call;
   }
 
-  Function *nondetMalloc(Module *m) {
-    if (Function *f = m->getFunction("nondet.malloc"))
-      return f;
-    FunctionType *nondetMallocType =
-        FunctionType::get(Type::getInt8PtrTy(m->getContext()),
-                          Type::getInt64Ty(m->getContext()), false);
-    return Function::Create(nondetMallocType, GlobalValue::ExternalLinkage,
-                            "nondet.malloc", m);
+  bool isNullChecked(const Instruction *before) {
+    auto isNull = [](const Value *v) {
+      if (const Constant *c = dyn_cast<Constant>(v)) {
+        return c->isNullValue();
+      }
+      return false;
+    };
+
+    SmallVector<const User *> workList;
+    DenseSet<const User *> visited;
+    for (const User *user : before->users()) {
+      workList.push_back(user);
+      visited.insert(user);
+    }
+    while (!workList.empty()) {
+      const User *user = workList.pop_back_val();
+      if (const ICmpInst *cmp = dyn_cast<ICmpInst>(user)) {
+        if (cmp->getPredicate() == CmpInst::ICMP_EQ) {
+          if (isNull(cmp->getOperand(0)) || isNull(cmp->getOperand(1))) {
+            return true;
+          }
+        }
+      }
+      if (isa<BitCastOperator>(user)) {
+        for (const User *user : user->users()) {
+          if (visited.insert(user).second)
+            workList.push_back(user);
+        }
+      }
+    }
+    return false;
   }
 
   Function *getNondetValueFn(Type *retType, Module *m,

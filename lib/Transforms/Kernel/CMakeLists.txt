@@ -1,8 +1,9 @@
 add_llvm_library(SeaTransformsKernel DISABLE_LLVM_LINK_LLVM_DYLIB
   Acpi.cc
+  DsaSwitchOps.cc
   FileOperations.cc
-  KernelSetup.cc
   I2CDriver.cc
+  KernelSetup.cc
   Platform.cc
 
   Debug.cc
@@ -13,11 +14,10 @@ add_llvm_library(SeaTransformsKernel DISABLE_LLVM_LINK_LLVM_DYLIB
   NondetMalloc.cc
   IntoBinary.cc
   AssumeNonNull.cc
-  DsaSwitchOps.cc
   InitGlobalKrefs.cc
   SpecificFunction.cc
   ListOps.cc
   HandleInlineAsm.cc
   AssertKrefs.cc
   SetupEntrypoint.cc
-  )
+)
