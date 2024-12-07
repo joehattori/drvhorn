@@ -196,7 +196,7 @@ public:
                         checkPointAttr);
     handleDeviceFinders(m, updateIndex, checkPointAttr);
     Function *devInit = handleDeviceInitialize(m);
-    killDeviceAddDel(m);
+    killSomeFunctions(m);
     handleDeviceLink(m);
     handleDeviceAllocation(m, devInit, updateIndex, checkPointAttr);
     handleDevmFunctions(m);
@@ -549,7 +549,8 @@ private:
       StructType *devPmInfoType =
           StructType::getTypeByName(ctx, "struct.dev_pm_info");
       Value *pmInfoGEP = b.CreateInBoundsGEP(
-          elemType, elem, gepIndicesToStruct(elemType, devPmInfoType).getValue());
+          elemType, elem,
+          gepIndicesToStruct(elemType, devPmInfoType).getValue());
       Value *wakeupGEP = b.CreateInBoundsGEP(
           pmInfoGEP->getType()->getPointerElementType(), pmInfoGEP,
           {b.getInt64(0), b.getInt32(DEVPMINFO_WAKEUP_INDEX)});
@@ -1294,31 +1295,35 @@ private:
 
 #define OF_PHANDLE_ARG_DEVNODE_INDEX 0
   void handleOfParsePhandleWithArgs(Module &m, Function *devNodeGetter) {
-    Function *f = m.getFunction("__of_parse_phandle_with_args");
-    if (!f)
-      return;
-    f->deleteBody();
-    f->setName("drvhorn.__of_parse_phandle_with_args");
-    Argument *outArg = f->getArg(f->arg_size() - 1);
     LLVMContext &ctx = m.getContext();
     Function *krefGet = m.getFunction("drvhorn.kref_get");
     Type *krefType = krefGet->getArg(0)->getType()->getPointerElementType();
-    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
-    IRBuilder<> b(blk);
-    Value *devNode = b.CreateCall(devNodeGetter);
-    StructType *devNodeType =
-        cast<StructType>(devNode->getType()->getPointerElementType());
-    Value *krefPtr = b.CreateInBoundsGEP(
-        devNodeType, devNode,
-        gepIndicesToStruct(devNodeType, krefType).getValue());
-    b.CreateCall(krefGet, krefPtr);
-    Value *devNodeGEP = b.CreateInBoundsGEP(
-        outArg->getType()->getPointerElementType(), outArg,
-        {b.getInt64(0), b.getInt32(OF_PHANDLE_ARG_DEVNODE_INDEX)});
-    b.CreateStore(devNode, devNodeGEP);
-    Value *ok = b.CreateIsNotNull(devNode);
-    Value *ret = b.CreateSelect(ok, b.getInt32(0), b.getInt32(-EINVAL));
-    b.CreateRet(ret);
+    StringRef names[] = {"__of_parse_phandle_with_args",
+                         "of_parse_phandle_with_args_map"};
+    for (StringRef name : names) {
+      Function *f = m.getFunction(name);
+      if (!f)
+        return;
+      f->deleteBody();
+      f->setName("drvhorn." + name);
+      Argument *outArg = f->getArg(f->arg_size() - 1);
+      BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+      IRBuilder<> b(blk);
+      Value *devNode = b.CreateCall(devNodeGetter);
+      StructType *devNodeType =
+          cast<StructType>(devNode->getType()->getPointerElementType());
+      Value *krefPtr = b.CreateInBoundsGEP(
+          devNodeType, devNode,
+          gepIndicesToStruct(devNodeType, krefType).getValue());
+      b.CreateCall(krefGet, krefPtr);
+      Value *devNodeGEP = b.CreateInBoundsGEP(
+          outArg->getType()->getPointerElementType(), outArg,
+          {b.getInt64(0), b.getInt32(OF_PHANDLE_ARG_DEVNODE_INDEX)});
+      b.CreateStore(devNode, devNodeGEP);
+      Value *ok = b.CreateIsNotNull(devNode);
+      Value *ret = b.CreateSelect(ok, b.getInt32(0), b.getInt32(-EINVAL));
+      b.CreateRet(ret);
+    }
   }
 
 #define OF_PHANDLE_ITERATOR_DEVNODE_INDEX 8
@@ -1360,11 +1365,20 @@ private:
     b.CreateRet(ret);
   }
 
-  void killDeviceAddDel(Module &m) {
-    if (Function *f = m.getFunction("device_add"))
-      f->deleteBody();
-    if (Function *f = m.getFunction("device_del"))
-      f->deleteBody();
+  void killSomeFunctions(Module &m) {
+    StringRef names[] = {
+        "device_add",
+        "device_del",
+        "kobject_uevent_env",
+        "__of_translate_address",
+        "of_count_phandle_with_args",
+        "class_for_each_device",
+        "mdiobus_scan",
+    };
+    for (StringRef name : names) {
+      if (Function *f = m.getFunction(name))
+        f->deleteBody();
+    }
   }
 
   void stubFwnodeConnectionFindMatch(Module &m) {

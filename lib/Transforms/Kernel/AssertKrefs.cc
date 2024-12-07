@@ -157,8 +157,8 @@ private:
     Value *krefGEP = b.CreateInBoundsGEP(
         devType, deviceGEP, gepIndicesToStruct(devType, krefType).getValue());
     b.CreateCall(krefChecker, krefGEP);
-    Function *checker = getOrBuildAssertWakeup(m, devType);
-    b.CreateCall(checker, deviceGEP);
+    if (Function *checker = getOrBuildAssertWakeup(m, devType))
+      b.CreateCall(checker, deviceGEP);
   }
 
   Function *genAssertFunction(Module &m, Function *checker,
@@ -208,8 +208,8 @@ private:
       b.CreateCall(rawcountChecker, count);
     }
     if (equivTypes(elemType, devType)) {
-      Function *checker = getOrBuildAssertWakeup(m, elemType);
-      b.CreateCall(checker, elem);
+      if (Function *checker = getOrBuildAssertWakeup(m, elemType))
+        b.CreateCall(checker, elem);
     }
     b.CreateBr(ret);
 
@@ -219,6 +219,8 @@ private:
   }
 
   Function *getOrBuildAssertWakeup(Module &m, StructType *devType) {
+    if (!m.getFunction("drvhorn.device_wakeup_enable"))
+      return nullptr;
     std::string name = "drvhorn.assert_wakeup." + devType->getName().str();
     if (Function *f = m.getFunction(name))
       return f;

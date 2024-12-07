@@ -513,7 +513,6 @@ public:
   SlimDown() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
-    ignoreSomeFunctions(m);
     updateLinkage(m);
     removeCompilerUsed(m);
     runDCEPasses(m);
@@ -707,26 +706,6 @@ private:
           }
         }
       }
-    }
-  }
-
-  void ignoreSomeFunctions(Module &m) {
-    StringRef names[] = {
-        "slob_free",
-        "refcount_warn_saturate",
-        "__kobject_del",
-        "kobject_uevent_env",
-        "__mdiobus_register",
-        "mdiobus_unregister",
-        "__of_mdiobus_register",
-        "of_property_notify",
-        "fwnode_mdiobus_register_phy",
-        "fwnode_mdiobus_phy_device_register",
-        "class_for_each_device",
-    };
-    for (StringRef name : names) {
-      if (Function *f = m.getFunction(name))
-        f->deleteBody();
     }
   }
 

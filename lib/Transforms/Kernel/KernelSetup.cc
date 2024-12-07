@@ -30,14 +30,8 @@ public:
     stubAllocationFunctions(m, allocStub);
     handleKrefAndKobjectAPIs(m);
     handleKmemCache(m, allocStub);
-
-    handleCallRcu(m);
-    handleDevErrProbeCalls(m);
     handleIsErr(m);
-
     handleCpuPossibleMask(m);
-
-    ignoreFunctions(m);
     return true;
   }
 
@@ -231,19 +225,6 @@ private:
     b.CreateRetVoid();
   }
 
-  void ignoreFunctions(Module &m) {
-    StringRef names[] = {
-        "kfree",
-        "vfree",
-        "free_percpu",
-    };
-    for (StringRef name : names) {
-      if (Function *orig = m.getFunction(name)) {
-        orig->deleteBody();
-      }
-    }
-  }
-
   GlobalVariable *gVarOfKmemCacheAllocCall(Module &m, CallInst *call) {
     Value *cache = call->getArgOperand(0);
     if (LoadInst *load = dyn_cast<LoadInst>(cache)) {
@@ -309,39 +290,6 @@ private:
           call->replaceAllUsesWith(newMalloc);
         }
       }
-    }
-  }
-
-  void handleCallRcu(Module &m) {
-    LLVMContext &ctx = m.getContext();
-    std::string name = "call_rcu";
-    Function *orig = m.getFunction(name);
-    if (!orig)
-      return;
-    std::string wrapperName = name + "_wrapper";
-    Function *wrapper = Function::Create(
-        orig->getFunctionType(), GlobalValue::ExternalLinkage, wrapperName, &m);
-    BasicBlock *block = BasicBlock::Create(ctx, "", wrapper);
-    Value *arg = wrapper->getArg(0);
-    Value *fn = wrapper->getArg(1);
-    // rcu_callback_t
-    FunctionType *fnType =
-        FunctionType::get(Type::getVoidTy(ctx), {arg->getType()}, false);
-    FunctionCallee callee = FunctionCallee(fnType, fn);
-    CallInst::Create(callee, {arg}, "", block);
-    ReturnInst::Create(ctx, nullptr, block);
-    orig->replaceAllUsesWith(wrapper);
-    orig->eraseFromParent();
-  }
-
-  void handleDevErrProbeCalls(Module &m) {
-    Function *f = m.getFunction("dev_err_probe");
-    if (!f)
-      return;
-    for (CallInst *call : getCalls(f)) {
-      Value *err = call->getArgOperand(1);
-      call->replaceAllUsesWith(err);
-      call->eraseFromParent();
     }
   }
 
