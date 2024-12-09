@@ -1374,6 +1374,8 @@ private:
         "of_count_phandle_with_args",
         "class_for_each_device",
         "mdiobus_scan",
+        "clk_get",
+        "clk_put",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))
