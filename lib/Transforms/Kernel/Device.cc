@@ -1388,6 +1388,7 @@ private:
         "kobject_uevent_env",
         "__of_translate_address",
         "of_count_phandle_with_args",
+        "drm_of_component_match_add",
         "class_for_each_device",
         "mdiobus_scan",
         "clk_get",

@@ -584,73 +584,31 @@ private:
     }
   }
 
-  bool isLoaded(BasicBlock &blk, Instruction *after, AllocaInst *base,
-                const DenseSet<Instruction *> &toRemove) {
-    bool start = !after;
-    for (Instruction &inst : blk) {
-      if (start && !toRemove.contains(&inst)) {
-        if (LoadInst *load = dyn_cast<LoadInst>(&inst)) {
-          if (getUnderlyingObject(load->getPointerOperand()) == base)
-            return true;
-        }
-      }
-      if (&inst == after)
-        start = true;
-    }
-    return false;
-  }
-
-  bool shouldFill(Argument &arg, Value *argVal, CallInst *call,
-                  const DenseSet<Instruction *> &toRemove) {
-    if (arg.hasAttribute(Attribute::ReadOnly))
-      return false;
-    AllocaInst *base = dyn_cast<AllocaInst>(getUnderlyingObject(argVal));
-    if (!base)
-      return false;
-
-    SmallVector<BasicBlock *> workList;
-    DenseSet<BasicBlock *> visited;
-    BasicBlock *callBlk = call->getParent();
-    workList.push_back(callBlk);
-    while (!workList.empty()) {
-      BasicBlock *blk = workList.pop_back_val();
-      if (!visited.insert(blk).second)
-        continue;
-      if (isLoaded(*blk, blk == callBlk ? call : nullptr, base, toRemove))
-        return true;
-      for (BasicBlock *succ : successors(blk)) {
-        workList.push_back(succ);
-      }
-    }
-    return false;
-  }
-
   void fillWriteOnlyArgs(CallInst *call,
                          const DenseSet<Instruction *> &toRemove,
                          DenseMap<const Type *, Function *> &ndvalfn) {
     Function *f = extractCalledFunction(call);
-    if (!f)
+    if (!f || f->getName().startswith("drvhorn."))
       return;
     for (Argument &arg : f->args()) {
+      if (!arg.hasAttribute(Attribute::WriteOnly))
+        continue;
       Value *argVal = call->getArgOperand(arg.getArgNo())->stripPointerCasts();
-      if (shouldFill(arg, argVal, call, toRemove)) {
-        if (Instruction *inst = dyn_cast<Instruction>(argVal)) {
-          if (toRemove.count(inst))
-            continue;
-        }
-        Value *ndVal = nondetValue(argVal->getType()->getPointerElementType(),
-                                   call, ndvalfn);
-        ndVal->setName("arg_filler." + call->getName().str());
-        IRBuilder<> b(call);
-        b.CreateStore(ndVal, argVal);
+      if (Instruction *inst = dyn_cast<Instruction>(argVal)) {
+        if (toRemove.count(inst))
+          continue;
       }
+      Value *ndVal = nondetValue(argVal->getType()->getPointerElementType(),
+                                 call, ndvalfn);
+      ndVal->setName("arg_filler." + call->getName().str());
+      IRBuilder<> b(call);
+      b.CreateStore(ndVal, argVal);
     }
   }
 
   bool isNewNondet(const Instruction &inst) {
-    if (isa<CallInst, LoadInst, StoreInst, InsertElementInst, InsertValueInst>(inst))
-      return true;
-    return false;
+    return isa<CallInst, LoadInst, StoreInst, InsertElementInst,
+               InsertValueInst>(inst);
   }
 
   void sliceModule(Module &m) {
@@ -667,12 +625,12 @@ private:
         if (filter.isTarget(&inst)) {
           retained.push_back(&inst);
         } else {
-          if (isNewNondet(inst))
+          if (isNewNondet(inst)) {
             toRemoveInstructions.insert(&inst);
-          else
+            if (CallInst *call = dyn_cast<CallInst>(&inst))
+              fillWriteOnlyArgs(call, toRemoveInstructions, ndvalfn);
+          } else {
             retained.push_back(&inst);
-          if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-            fillWriteOnlyArgs(call, toRemoveInstructions, ndvalfn);
           }
         }
       }
