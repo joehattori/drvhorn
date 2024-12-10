@@ -1296,10 +1296,9 @@ private:
 #define OF_PHANDLE_ARG_DEVNODE_INDEX 0
   void handleOfParsePhandleWithArgs(Module &m, Function *devNodeGetter) {
     LLVMContext &ctx = m.getContext();
-    Function *krefGet = m.getFunction("drvhorn.kref_get");
-    Type *krefType = krefGet->getArg(0)->getType()->getPointerElementType();
     StringRef names[] = {"__of_parse_phandle_with_args",
                          "of_parse_phandle_with_args_map"};
+    Constant *ofNodeGet = m.getFunction("of_node_get");
     for (StringRef name : names) {
       Function *f = m.getFunction(name);
       if (!f)
@@ -1307,22 +1306,39 @@ private:
       f->deleteBody();
       f->setName("drvhorn." + name);
       Argument *outArg = f->getArg(f->arg_size() - 1);
-      BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
-      IRBuilder<> b(blk);
+      BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+      BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+      BasicBlock *store = BasicBlock::Create(ctx, "store", f);
+      BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+      IRBuilder<> b(entry);
+      Value *isArgNull = b.CreateIsNull(outArg);
+      b.CreateCondBr(isArgNull, ret, body);
+
+      b.SetInsertPoint(body);
       Value *devNode = b.CreateCall(devNodeGetter);
-      StructType *devNodeType =
-          cast<StructType>(devNode->getType()->getPointerElementType());
-      Value *krefPtr = b.CreateInBoundsGEP(
-          devNodeType, devNode,
-          gepIndicesToStruct(devNodeType, krefType).getValue());
-      b.CreateCall(krefGet, krefPtr);
+      FunctionType *ofNodeGetType =
+          FunctionType::get(devNode->getType(), devNode->getType(), false);
+      if (ofNodeGet->getType() != ofNodeGetType->getPointerTo())
+        ofNodeGet =
+            ConstantExpr::getBitCast(ofNodeGet, ofNodeGetType->getPointerTo());
+      b.CreateCall(ofNodeGetType, ofNodeGet, devNode);
+      Value *isNodeNull = b.CreateIsNull(devNode);
+      b.CreateCondBr(isNodeNull, ret, store);
+
+      b.SetInsertPoint(store);
       Value *devNodeGEP = b.CreateInBoundsGEP(
           outArg->getType()->getPointerElementType(), outArg,
           {b.getInt64(0), b.getInt32(OF_PHANDLE_ARG_DEVNODE_INDEX)});
       b.CreateStore(devNode, devNodeGEP);
-      Value *ok = b.CreateIsNotNull(devNode);
-      Value *ret = b.CreateSelect(ok, b.getInt32(0), b.getInt32(-EINVAL));
-      b.CreateRet(ret);
+      b.CreateBr(ret);
+
+      b.SetInsertPoint(ret);
+      PHINode *phi = b.CreatePHI(f->getReturnType(), 3);
+      phi->addIncoming(b.getInt32(0), entry);
+      phi->addIncoming(b.getInt32(-ENOENT), body);
+      phi->addIncoming(b.getInt32(0), store);
+      b.CreateRet(phi);
     }
   }
 
