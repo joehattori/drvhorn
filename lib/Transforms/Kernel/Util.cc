@@ -236,6 +236,8 @@ Type *getGEPType(StructType *s, ArrayRef<Value *> indices) {
 }
 
 bool embedsStruct(const StructType *s, const Type *target) {
+  if (equivTypes(s, target))
+    return true;
   for (unsigned i = 0; i < s->getNumElements(); i++) {
     const Type *elemType = s->getElementType(i);
     if (equivTypes(elemType, target))
