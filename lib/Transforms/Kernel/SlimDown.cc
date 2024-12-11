@@ -21,6 +21,17 @@ using namespace llvm;
 
 namespace seahorn {
 
+static bool embedsStructIndirect(Type *type, Type *inner) {
+  if (ArrayType *arr = dyn_cast<ArrayType>(type)) {
+    return embedsStructIndirect(arr->getElementType(), inner);
+  } else if (PointerType *ptr = dyn_cast<PointerType>(type)) {
+    return embedsStructIndirect(ptr->getElementType(), inner);
+  } else if (StructType *st = dyn_cast<StructType>(type)) {
+    return embedsStruct(st, inner);
+  }
+  return false;
+}
+
 struct Acceptor : public InstVisitor<Acceptor> {
   Acceptor(DenseSet<const Instruction *> &targets,
            DenseSet<const Value *> &underlyingLoadedPtrs)
@@ -74,7 +85,6 @@ public:
     const DenseSet<const CallInst *> &ignoreList = trivialFwnodeGetters(m);
     buildGenerators(m, ignoreList);
     buildTargetArgs(m);
-    // buildIndirectTargetArgs(m);
 
     for (Function &f : m) {
       // First, track return insts.
@@ -262,17 +272,6 @@ private:
            embedsStructIndirect(t, devPtrType);
   }
 
-  bool embedsStructIndirect(Type *type, Type *inner) {
-    if (ArrayType *arr = dyn_cast<ArrayType>(type)) {
-      return embedsStructIndirect(arr->getElementType(), inner);
-    } else if (PointerType *ptr = dyn_cast<PointerType>(type)) {
-      return embedsStructIndirect(ptr->getElementType(), inner);
-    } else if (StructType *st = dyn_cast<StructType>(type)) {
-      return embedsStruct(st, inner);
-    }
-    return false;
-  }
-
   void recordInst(Instruction *inst) {
     targets.insert(inst);
     for (BasicBlock *blk : predecessors(inst->getParent())) {
@@ -381,27 +380,6 @@ private:
           continue;
         refcountGenerators.insert(call);
         workList.push_back(call->getFunction());
-      }
-    }
-  }
-
-  void buildIndirectTargetArgs(const Module &m) {
-    for (const Function &f : m) {
-      for (const Instruction &inst : instructions(f)) {
-        if (const StoreInst *store = dyn_cast<StoreInst>(&inst)) {
-          const Value *val = store->getValueOperand();
-          if (const Argument *arg = dyn_cast<Argument>(
-                  getUnderlyingObject(store->getPointerOperand()))) {
-            SmallVector<const Value *> underlyingVals;
-            getUnderlyingObjects(val, underlyingVals, nullptr, 0);
-            bool isGen = any_of(underlyingVals, [this](const Value *v) {
-              return isa<CallInst>(v) &&
-                     refcountGenerators.count(cast<CallInst>(v));
-            });
-            if (isGen)
-              targetArgs.insert(arg);
-          }
-        }
       }
     }
   }
@@ -590,12 +568,19 @@ private:
     Function *f = extractCalledFunction(call);
     if (!f || f->getName().startswith("drvhorn."))
       return;
+    StructType *devType =
+        StructType::getTypeByName(call->getContext(), "struct.device");
     for (Argument &arg : f->args()) {
       if (!arg.hasAttribute(Attribute::WriteOnly))
         continue;
       Value *argVal = call->getArgOperand(arg.getArgNo())->stripPointerCasts();
       if (Instruction *inst = dyn_cast<Instruction>(argVal)) {
         if (toRemove.count(inst))
+          continue;
+      }
+      if (StructType *s =
+              dyn_cast<StructType>(arg.getType()->getPointerElementType())) {
+        if (embedsStruct(s, devType))
           continue;
       }
       Value *ndVal = nondetValue(argVal->getType()->getPointerElementType(),
