@@ -277,11 +277,12 @@ private:
         {"of_get_next_child", 1, 0},
         {"of_get_next_available_child", 1, 0},
         {"of_get_parent", None, 0},
+        {"of_graph_get_next_endpoint", 1, None},
     };
 
     LLVMContext &ctx = m.getContext();
     Constant *ofNodeGet = m.getFunction("of_node_get");
-    Function *ofNodePut = m.getFunction("of_node_put");
+    Constant *ofNodePut = m.getFunction("of_node_put");
     Function *devNodeGetter = nullptr;
     for (const FinderInfo &info : finders) {
       Function *f = m.getFunction(info.name);
@@ -312,6 +313,8 @@ private:
 
       b.SetInsertPoint(body);
       Value *devNode = b.CreateCall(devNodeGetter);
+      if (devNode->getType() != devNodeType->getPointerTo())
+        devNode = b.CreateBitCast(devNode, devNodeType->getPointerTo());
       FunctionType *ofNodeGetType = FunctionType::get(
           devNodeType->getPointerTo(), devNodeType->getPointerTo(), false);
       if (ofNodeGet->getType() != ofNodeGetType->getPointerTo())
@@ -329,9 +332,12 @@ private:
       }
       if (info.putNodeIndex.hasValue()) {
         Value *from = f->getArg(info.putNodeIndex.getValue());
-        if (from->getType() != ofNodePut->getArg(0)->getType())
-          from = b.CreateBitCast(from, ofNodePut->getArg(0)->getType());
-        b.CreateCall(ofNodePut, from);
+        FunctionType *ofNodePutType = FunctionType::get(
+            Type::getVoidTy(ctx), devNodeType->getPointerTo(), false);
+        if (ofNodePut->getType() != ofNodePutType->getPointerTo())
+          ofNodePut = ConstantExpr::getBitCast(ofNodePut,
+                                               ofNodePutType->getPointerTo());
+        b.CreateCall(ofNodePutType, ofNodePut, from);
       }
       b.CreateRet(retPhi);
     }
