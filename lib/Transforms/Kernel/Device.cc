@@ -1399,6 +1399,7 @@ private:
         "mdiobus_scan",
         "clk_get",
         "clk_put",
+        "of_clk_add_hw_provider",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))
