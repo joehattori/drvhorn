@@ -278,6 +278,7 @@ private:
         {"of_get_next_available_child", 1, 0},
         {"of_get_parent", None, 0},
         {"of_graph_get_next_endpoint", 1, None},
+        {"of_irq_find_parent", None, 0},
     };
 
     LLVMContext &ctx = m.getContext();
