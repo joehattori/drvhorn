@@ -277,6 +277,9 @@ private:
         {"of_get_next_child", 1, 0},
         {"of_get_next_available_child", 1, 0},
         {"of_get_parent", None, 0},
+        {"of_get_next_parent", 0, 0},
+        {"of_find_all_nodes", 0, None},
+        {"of_get_next_cpu_node", 0, None},
         {"of_graph_get_next_endpoint", 1, None},
         {"of_irq_find_parent", None, 0},
     };
