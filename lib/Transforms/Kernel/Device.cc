@@ -199,7 +199,7 @@ public:
     killSomeFunctions(m);
     handleDeviceLink(m);
     handleDeviceAllocation(m, devInit, updateIndex, checkPointAttr);
-    handleDevmFunctions(m);
+    handleDevmFunctions(m, checkPointAttr);
     handleCDevDeviceAdd(m);
     handleCDevDeviceDel(m);
     handleDeviceWakeupEnable(m, checkPointAttr);
@@ -583,8 +583,8 @@ private:
     return f;
   }
 
-  void handleDevmFunctions(Module &m) {
-    handleDevmAddAction(m);
+  void handleDevmFunctions(Module &m, Attribute checkPointAttr) {
+    handleDevmAddAction(m, checkPointAttr);
 
     StringRef names[] = {
         "__devres_alloc_node",
@@ -601,7 +601,7 @@ private:
     }
   }
 
-  void handleDevmAddAction(Module &m) {
+  void handleDevmAddAction(Module &m, Attribute checkPointAttr) {
     Function *f = m.getFunction("__devm_add_action");
     if (!f)
       return;
@@ -616,6 +616,7 @@ private:
       if (action->getArg(0)->getType() != data->getType())
         data = b.CreateBitCast(data, action->getArg(0)->getType());
       b.CreateCall(action, data);
+      action->addFnAttr(checkPointAttr);
       call->replaceAllUsesWith(b.getInt32(0));
       call->eraseFromParent();
     }
