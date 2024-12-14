@@ -1396,6 +1396,8 @@ private:
     StringRef names[] = {
         "device_add",
         "device_del",
+        "device_destroy", // TODO: device_destroy decrements the refcount, but
+                          // we don't have a way to get the target device.
         "kobject_uevent_env",
         "__of_translate_address",
         "of_count_phandle_with_args",
