@@ -265,23 +265,34 @@ private:
       Optional<size_t> returnIfNullArgIndex;
     };
     FinderInfo finders[] = {
+        // drivers/of/base.c
+        {"of_find_all_nodes", 0, None},
+        {"of_get_parent", None, 0},
+        {"of_get_next_parent", 0, 0},
+        {"of_get_next_child", 1, 0},
+        {"of_get_next_available_child", 1, 0},
+        {"of_get_next_cpu_node", 0, None},
+        {"of_get_compatible_child", None, 0},
+        {"of_get_child_by_name", None, 0},
         {"of_find_node_opts_by_path", None, None},
         {"of_find_node_by_name", 0, None},
         {"of_find_node_by_type", 0, None},
         {"of_find_compatible_node", 0, None},
-        {"of_find_node_by_phandle", None, None},
-        {"of_find_matching_node_and_match", 0, None},
         {"of_find_node_with_property", 0, None},
-        {"of_get_compatible_child", None, 0},
-        {"of_get_child_by_name", None, 0},
-        {"of_get_next_child", 1, 0},
-        {"of_get_next_available_child", 1, 0},
-        {"of_get_parent", None, 0},
-        {"of_get_next_parent", 0, 0},
-        {"of_find_all_nodes", 0, None},
-        {"of_get_next_cpu_node", 0, None},
-        {"of_graph_get_next_endpoint", 1, None},
+        {"of_find_matching_node_and_match", 0, None},
+        {"of_find_node_by_phandle", None, None},
+        {"of_find_next_cache_node", None, None},
+        // drivers/of/irq.c
         {"of_irq_find_parent", None, 0},
+        // drivers/of/property.c
+        {"of_graph_get_port_by_id", None, None},
+        {"of_graph_get_next_endpoint", 1, None},
+        {"of_graph_get_next_endpoint", 1, 0},
+        {"of_graph_get_endpoint_by_regs", None, None},
+        {"of_graph_get_port_parent", None, 0},
+        {"of_graph_get_remote_port_parent", None, None},
+        {"of_graph_get_remote_port", None, None},
+        {"of_graph_get_remote_node", None, None},
     };
 
     LLVMContext &ctx = m.getContext();
