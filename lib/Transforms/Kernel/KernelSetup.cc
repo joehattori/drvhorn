@@ -297,9 +297,9 @@ private:
   //   %1 = icmp ugt %struct.a* %0, inttoptr (i64 -4096 to %struct.a*)
   // This code may be evaluated to true even if %0 is a valid pointer.
   // We replace the IS_ERR check with comparison to 0, i.e.
-  //   %1 = icmp ult %struct.a* %0, inttoptr (i64 0 to %struct.a*)
+  //   %1 = icmp eq %struct.a* %0, inttoptr (i64 0 to %struct.a*)
   void handleIsErr(Module &m) {
-    auto isTarget = [](ICmpInst *icmp) {
+    auto isErr = [](ICmpInst *icmp) {
       if (icmp->getPredicate() == CmpInst::ICMP_UGT) {
         if (ConstantExpr *ci = dyn_cast<ConstantExpr>(icmp->getOperand(1))) {
           if (ci->getOpcode() == Instruction::IntToPtr) {
@@ -313,21 +313,51 @@ private:
       return false;
     };
 
+    auto isPtrErr = [](const PtrToIntInst *ptrToInt) {
+      if (!ptrToInt->getDestTy()->isIntegerTy(64) ||
+          !ptrToInt->getFunction()->getReturnType()->isIntegerTy(32))
+        return false;
+      DenseSet<const User *> visited;
+      SmallVector<const User *> users;
+      users.push_back(ptrToInt);
+      while (!users.empty()) {
+        const User *user = users.pop_back_val();
+        if (isa<ReturnInst>(user)) {
+          return true;
+        } else if (isa<PtrToIntInst, TruncInst, PHINode, SelectInst>(user)) {
+          for (const User *u : user->users())
+            if (visited.insert(u).second)
+              users.push_back(u);
+        }
+      }
+      return false;
+    };
+
     SmallVector<Instruction *> toRemove;
     for (Function &f : m) {
       for (Instruction &inst : instructions(f)) {
         if (ICmpInst *icmp = dyn_cast<ICmpInst>(&inst)) {
-          if (isTarget(icmp)) {
+          if (isErr(icmp)) {
             icmp->setPredicate(CmpInst::ICMP_EQ);
             Constant *rhs =
                 Constant::getNullValue(icmp->getOperand(0)->getType());
             icmp->setOperand(1, rhs);
           }
         }
+        // inttoptr should be the result of ERR_PTR macro.
         if (IntToPtrInst *intToPtr = dyn_cast<IntToPtrInst>(&inst)) {
           Constant *null = Constant::getNullValue(intToPtr->getDestTy());
           toRemove.push_back(intToPtr);
           intToPtr->replaceAllUsesWith(null);
+        }
+        if (PtrToIntInst *ptrToInt = dyn_cast<PtrToIntInst>(&inst)) {
+          if (isPtrErr(ptrToInt)) {
+            IRBuilder<> b(ptrToInt);
+            // All errors are represented as -1.
+            Value *zero = b.getInt64(-1);
+            ptrToInt->replaceAllUsesWith(zero);
+            toRemove.push_back(ptrToInt);
+          }
         }
       }
     }
