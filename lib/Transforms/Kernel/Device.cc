@@ -196,7 +196,7 @@ public:
                         checkPointAttr);
     handleDeviceFinders(m, updateIndex, checkPointAttr);
     Function *devInit = handleDeviceInitialize(m);
-    killSomeFunctions(m);
+    ignoreSomeFunctions(m);
     handleDeviceLink(m);
     handleDeviceAllocation(m, devInit, updateIndex, checkPointAttr);
     handleDevmFunctions(m, checkPointAttr);
@@ -1403,7 +1403,7 @@ private:
     b.CreateRet(ret);
   }
 
-  void killSomeFunctions(Module &m) {
+  void ignoreSomeFunctions(Module &m) {
     StringRef names[] = {
         "device_add",
         "device_del",
@@ -1416,7 +1416,6 @@ private:
         "of_irq_parse_raw",
         "of_irq_parse_one",
         "of_platform_populate",
-        "drm_of_component_match_add",
         "class_for_each_device",
         "mdiobus_scan",
         "clk_get",
