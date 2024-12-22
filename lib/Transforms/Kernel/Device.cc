@@ -293,6 +293,9 @@ private:
         {"of_graph_get_remote_port_parent", None, None},
         {"of_graph_get_remote_port", None, None},
         {"of_graph_get_remote_node", None, None},
+        // drivers/regulator/core.c
+        {"of_get_regulator", None, None},
+        {"of_get_child_regulator", None, None},
     };
 
     LLVMContext &ctx = m.getContext();
