@@ -1157,11 +1157,6 @@ private:
 
     b.SetInsertPoint(body);
     b.CreateCall(getDeviceType, getDevice, dev);
-    // Value *isInitGEP =
-    //     b.CreateInBoundsGEP(retType, dev,
-    //                         {b.getInt64(0), b.getInt32(DEV_KOBJ_INDEX),
-    //                          b.getInt32(KOBJECT_ISINIT_INDEX)});
-    // b.CreateStore(b.getInt8(0), isInitGEP);
     b.CreateBr(ret);
 
     b.SetInsertPoint(ret);
@@ -1424,6 +1419,8 @@ private:
         "clk_get",
         "clk_put",
         "of_clk_add_hw_provider",
+        "devm_of_clk_add_hw_provider",
+        "__devm_of_phy_provider_register",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))
