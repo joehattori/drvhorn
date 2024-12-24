@@ -213,6 +213,7 @@ public:
     stubFwnodeConnectionFindMatches(m);
 
     handleCpufreqGet(m, updateIndex, checkPointAttr);
+    handleRegulatorGet(m, updateIndex, checkPointAttr);
     return true;
   }
 
@@ -1513,6 +1514,68 @@ private:
 
     b.SetInsertPoint(ret);
     b.CreateRet(policy);
+  }
+
+  void handleRegulatorGet(Module &m, Function *updateIndex,
+                          Attribute checkPointAttr) {
+    auto getRegulatorDevTypeAndIndex =
+        [&m](StructType *regulatorType) -> std::pair<StructType *, unsigned> {
+      StructType *regulatorDevType =
+          StructType::getTypeByName(m.getContext(), "struct.regulator_dev");
+      for (unsigned i = 0; i < regulatorType->getNumElements(); i++) {
+        Type *elem = regulatorType->getElementType(i);
+        if (equivTypes(elem, regulatorDevType->getPointerTo()))
+          return {cast<StructType>(elem->getPointerElementType()), i};
+      }
+      return {nullptr, 0};
+    };
+
+    Function *f = m.getFunction("_regulator_get");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn._regulator_get");
+    LLVMContext &ctx = m.getContext();
+    f->addFnAttr(checkPointAttr);
+    StructType *regulatorType =
+        cast<StructType>(f->getReturnType()->getPointerElementType());
+    std::pair<StructType *, unsigned> regDevTypeAndIndex =
+        getRegulatorDevTypeAndIndex(regulatorType);
+    StructType *regulatorDevType = regDevTypeAndIndex.first;
+    unsigned regulatorDevIndex = regDevTypeAndIndex.second;
+
+    Function *gen =
+        buildStorageElemGenerator(m, regulatorDevType, updateIndex, {});
+
+    Function *krefGet = m.getFunction("drvhorn.kref_get");
+    Type *krefType = krefGet->getArg(0)->getType()->getPointerElementType();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
+
+    IRBuilder<> b(entry);
+    Value *regulatorDev = b.CreateCall(gen);
+    Value *isNull = b.CreateIsNull(regulatorDev);
+    b.CreateCondBr(isNull, ret, body);
+
+    b.SetInsertPoint(body);
+    Value *krefPtr = b.CreateInBoundsGEP(
+        regulatorDevType, regulatorDev,
+        gepIndicesToStruct(regulatorDevType, krefType).getValue());
+    b.CreateCall(krefGet, krefPtr);
+    AllocaInst *regulator = b.CreateAlloca(regulatorType);
+    Value *regulatorDevGEP =
+        b.CreateInBoundsGEP(regulatorType, regulator,
+                            {b.getInt64(0), b.getInt32(regulatorDevIndex)});
+    b.CreateStore(regulatorDev, regulatorDevGEP);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
+    PHINode *retPhi = b.CreatePHI(regulatorType->getPointerTo(), 2);
+    retPhi->addIncoming(ConstantPointerNull::get(regulatorType->getPointerTo()),
+                        entry);
+    retPhi->addIncoming(regulator, body);
+    b.CreateRet(retPhi);
   }
 };
 
