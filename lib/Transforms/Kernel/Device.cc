@@ -1420,8 +1420,11 @@ private:
         "clk_get",
         "clk_put",
         "of_clk_add_hw_provider",
+        // devm functions
         "devm_of_clk_add_hw_provider",
         "__devm_of_phy_provider_register",
+        "devm_regulator_get",
+        "devm_led_classdev_register_ext",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))
