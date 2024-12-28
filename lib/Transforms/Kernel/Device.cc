@@ -1421,10 +1421,17 @@ private:
         "clk_get",
         "clk_put",
         "of_clk_add_hw_provider",
-        // devm functions
+        // devm functions that confirmed to be refcount bug-free
         "devm_of_clk_add_hw_provider",
         "__devm_of_phy_provider_register",
         "devm_regulator_get",
+        "devm_regulator_get_exclusive",
+        "devm_regulator_get_enable_optional",
+        "devm_regulator_get_enable",
+        "devm_regulator_get_optional",
+        "devm_regulator_bulk_get",
+        "devm_regulator_bulk_get_exclusive",
+        "devm_regulator_bulk_get_const",
         "devm_led_classdev_register_ext",
         "devm_phy_create",
     };
