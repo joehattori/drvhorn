@@ -1432,6 +1432,7 @@ private:
         "devm_regulator_bulk_get",
         "devm_regulator_bulk_get_exclusive",
         "devm_regulator_bulk_get_const",
+        "devm_regulator_register",
         "devm_led_classdev_register_ext",
         "devm_phy_create",
     };
