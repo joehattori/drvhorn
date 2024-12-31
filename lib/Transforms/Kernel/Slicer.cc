@@ -484,11 +484,11 @@ private:
   }
 };
 
-class SlimDown : public ModulePass {
+class Slicer : public ModulePass {
 public:
   static char ID;
 
-  SlimDown() : ModulePass(ID) {}
+  Slicer() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
     updateLinkage(m);
@@ -508,7 +508,7 @@ public:
     au.setPreservesAll();
   }
 
-  virtual StringRef getPassName() const override { return "SlimDown"; }
+  virtual StringRef getPassName() const override { return "Slicer"; }
 
 private:
   void removeCompilerUsed(Module &m) {
@@ -811,6 +811,6 @@ private:
   }
 };
 
-char SlimDown::ID = 0;
-Pass *createSlimDownPass() { return new SlimDown(); }
+char Slicer::ID = 0;
+Pass *createSlicerPass() { return new Slicer(); }
 } // namespace seahorn

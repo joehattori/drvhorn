@@ -446,7 +446,7 @@ public:
         std::exit(1);
       }
       add(seahorn::createPromoteVerifierCallsPass());
-      add(seahorn::createSlimDownPass());
+      add(seahorn::createSlicerPass());
       add(seahorn::createHandleDevmPass());
       add(seahorn::createHandleInlineAsmPass());
       add(seahorn::createInitGlobalKrefsPass());

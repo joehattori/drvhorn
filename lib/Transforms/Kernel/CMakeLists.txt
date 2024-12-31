@@ -7,7 +7,7 @@ add_llvm_library(SeaTransformsKernel DISABLE_LLVM_LINK_LLVM_DYLIB
   Platform.cc
 
   Debug.cc
-  SlimDown.cc
+  Slicer.cc
   Device.cc
   Devm.cc
   Util.cc
