@@ -488,15 +488,17 @@ class Slicer : public ModulePass {
 public:
   static char ID;
 
-  Slicer() : ModulePass(ID) {}
+  Slicer(bool naive) : ModulePass(ID), naive(naive) {}
 
   bool runOnModule(Module &m) override {
     updateLinkage(m);
     removeCompilerUsed(m);
     runDCEPasses(m);
 
-    sliceModule(m);
-    runDCEPasses(m, 10);
+    if (!naive) {
+      sliceModule(m);
+      runDCEPasses(m, 10);
+    }
     replaceConstIntToPtrToNull(m);
     removeNotCalledFunctions(m);
     runDCEPasses(m, 20);
@@ -511,6 +513,8 @@ public:
   virtual StringRef getPassName() const override { return "Slicer"; }
 
 private:
+  bool naive;
+
   void removeCompilerUsed(Module &m) {
     if (GlobalVariable *compilerUsed = m.getNamedGlobal(COMPILER_USED_NAME)) {
       Type *ty = compilerUsed->getType();
@@ -812,5 +816,5 @@ private:
 };
 
 char Slicer::ID = 0;
-Pass *createSlicerPass() { return new Slicer(); }
+Pass *createSlicerPass(bool naive) { return new Slicer(naive); }
 } // namespace seahorn

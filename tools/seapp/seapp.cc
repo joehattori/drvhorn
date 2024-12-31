@@ -336,12 +336,16 @@ static llvm::cl::opt<std::string>
 
 static llvm::cl::opt<std::string>
     KernelOutDir("kernel-out-dir",
-                llvm::cl::desc("Output directory for the kernel LLVM IR"),
-                llvm::cl::init(""));
+                 llvm::cl::desc("Output directory for the kernel LLVM IR"),
+                 llvm::cl::init(""));
 
 static llvm::cl::opt<std::string> DriverList("driver-list",
                                              llvm::cl::desc("List of drivers"),
                                              llvm::cl::init(""));
+
+static llvm::cl::opt<bool> NaiveSlicing("naive-slicing",
+                                        llvm::cl::desc("Naive slicing"),
+                                        llvm::cl::init(false));
 
 namespace {
 enum class DriverType {
@@ -446,7 +450,7 @@ public:
         std::exit(1);
       }
       add(seahorn::createPromoteVerifierCallsPass());
-      add(seahorn::createSlicerPass());
+      add(seahorn::createSlicerPass(NaiveSlicing));
       add(seahorn::createHandleDevmPass());
       add(seahorn::createHandleInlineAsmPass());
       add(seahorn::createInitGlobalKrefsPass());
