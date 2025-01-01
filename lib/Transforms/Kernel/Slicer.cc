@@ -736,7 +736,13 @@ private:
     if (isNullChecked(before)) {
       Function *alloc = getOrCreateAlloc(*m);
       DataLayout dl(m);
-      uint64_t size = dl.getTypeAllocSize(elemType);
+      uint64_t size;
+      if (elemType->isIntegerTy(8))
+        // for i8*, we allocate 4096 bytes as this allocation might be kmalloc().
+        // TODO: the size should be calculated correctly.
+        size = 4096;
+      else
+        size = dl.getTypeAllocSize(elemType);
       Value *p = b.CreateCall(alloc, b.getInt64(size));
       call = b.CreateBitCast(p, type);
     } else {
