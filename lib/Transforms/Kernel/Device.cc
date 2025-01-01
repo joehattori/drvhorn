@@ -195,7 +195,7 @@ public:
     handleFwnodeFinders(m, fwnodePutter, updateIndex, fwnodeAttr,
                         checkPointAttr);
     handleDeviceFinders(m, updateIndex, checkPointAttr);
-    Function *devInit = handleDeviceInitialize(m);
+    Function *devInit = handleDeviceInitialize(m, checkPointAttr);
     ignoreSomeFunctions(m);
     handleDeviceLink(m);
     handleDeviceAllocation(m, devInit, updateIndex, checkPointAttr);
@@ -1208,7 +1208,7 @@ private:
     }
   }
 
-  Function *handleDeviceInitialize(Module &m) {
+  Function *handleDeviceInitialize(Module &m, Attribute checkPointAttr) {
     Function *f = m.getFunction("device_initialize");
     if (!f)
       return nullptr;
@@ -1227,7 +1227,41 @@ private:
         devType, dev, gepIndicesToStruct(devType, krefType).getValue());
     b.CreateCall(krefGet, krefGEP);
     b.CreateRetVoid();
+
+    for (CallInst *call : getCalls(f)) {
+      handleDeviceReleaseFunctions(call, checkPointAttr);
+    }
     return f;
+  }
+
+#define CLASS_DEV_RELEASE_INDEX 6
+  void handleDeviceReleaseFunctions(CallInst *call, Attribute checkPointAttr) {
+    LLVMContext &ctx = call->getContext();
+    StructType *classType = StructType::getTypeByName(ctx, "struct.class");
+    for (Instruction &inst : instructions(call->getFunction())) {
+      if (StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+        GlobalVariable *gv = dyn_cast<GlobalVariable>(
+            store->getValueOperand()->stripPointerCasts());
+        GEPOperator *clsGEP = dyn_cast<GEPOperator>(
+            store->getPointerOperand()->stripPointerCasts());
+        if (!gv || !equivTypes(gv->getValueType(), classType) || !clsGEP)
+          continue;
+        Function *devRelease = dyn_cast<Function>(
+            gv->getInitializer()
+                ->getAggregateElement(CLASS_DEV_RELEASE_INDEX)
+                ->stripPointerCasts());
+        if (!devRelease)
+          continue;
+        devRelease->setName("drvhorn." + devRelease->getName());
+        devRelease->addFnAttr(checkPointAttr);
+
+        IRBuilder<> b(call->getParent()->getTerminator());
+        Value *dev = call->getArgOperand(0);
+        if (dev->getType() != devRelease->getArg(0)->getType())
+          dev = b.CreateBitCast(dev, devRelease->getArg(0)->getType());
+        b.CreateCall(devRelease, dev);
+      }
+    }
   }
 
   void handleDeviceAllocation(Module &m, Function *devInit,
@@ -1435,6 +1469,8 @@ private:
         "devm_regulator_register",
         "devm_led_classdev_register_ext",
         "devm_phy_create",
+        // this function frees memory manually
+        "gpiochip_add_data_with_key",
     };
     for (StringRef name : names) {
       if (Function *f = m.getFunction(name))
