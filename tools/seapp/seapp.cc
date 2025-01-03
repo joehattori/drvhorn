@@ -450,7 +450,8 @@ public:
         std::exit(1);
       }
       add(seahorn::createPromoteVerifierCallsPass());
-      add(seahorn::createSlicerPass(NaiveSlicing));
+      if (!NaiveSlicing)
+        add(seahorn::createSlicerPass());
       add(seahorn::createHandleDevmPass());
       add(seahorn::createHandleInlineAsmPass());
       add(seahorn::createInitGlobalKrefsPass());

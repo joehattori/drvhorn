@@ -121,7 +121,7 @@ llvm::Pass *createKernelSetupPass();
 llvm::Pass *createHandleDevicesPass();
 llvm::Pass *createHandleDevmPass();
 llvm::Pass *createKernelDebugPass(llvm::StringRef outFileName);
-llvm::Pass *createSlicerPass(bool naive);
+llvm::Pass *createSlicerPass();
 llvm::Pass *createHandleNondetMallocPass();
 llvm::Pass *createIntoBinaryPass();
 llvm::Pass *createAssumeNonNullPass();

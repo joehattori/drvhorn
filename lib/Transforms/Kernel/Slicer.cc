@@ -488,17 +488,16 @@ class Slicer : public ModulePass {
 public:
   static char ID;
 
-  Slicer(bool naive) : ModulePass(ID), naive(naive) {}
+  Slicer() : ModulePass(ID) {}
 
   bool runOnModule(Module &m) override {
     updateLinkage(m);
     removeCompilerUsed(m);
-    runDCEPasses(m);
+    runDCEPasses(m, 1);
 
-    if (!naive) {
-      sliceModule(m);
-      runDCEPasses(m, 10);
-    }
+    sliceModule(m);
+    runDCEPasses(m, 10);
+
     replaceConstIntToPtrToNull(m);
     removeNotCalledFunctions(m);
     runDCEPasses(m, 20);
@@ -513,8 +512,6 @@ public:
   virtual StringRef getPassName() const override { return "Slicer"; }
 
 private:
-  bool naive;
-
   void removeCompilerUsed(Module &m) {
     if (GlobalVariable *compilerUsed = m.getNamedGlobal(COMPILER_USED_NAME)) {
       Type *ty = compilerUsed->getType();
@@ -656,7 +653,7 @@ private:
     }
   }
 
-  void runDCEPasses(Module &m, unsigned limit = 1) {
+  void runDCEPasses(Module &m, unsigned limit) {
     legacy::PassManager pm;
     pm.add(createVerifierPass(false));
     pm.add(createGlobalDCEPass());
@@ -738,7 +735,8 @@ private:
       DataLayout dl(m);
       uint64_t size;
       if (elemType->isIntegerTy(8))
-        // for i8*, we allocate 4096 bytes as this allocation might be kmalloc().
+        // for i8*, we allocate 4096 bytes as this allocation might be
+        // kmalloc().
         // TODO: the size should be calculated correctly.
         size = 4096;
       else
@@ -822,5 +820,5 @@ private:
 };
 
 char Slicer::ID = 0;
-Pass *createSlicerPass(bool naive) { return new Slicer(naive); }
+Pass *createSlicerPass() { return new Slicer(); }
 } // namespace seahorn
