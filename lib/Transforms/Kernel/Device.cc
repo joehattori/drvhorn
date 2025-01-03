@@ -14,9 +14,6 @@ using namespace llvm;
 
 namespace seahorn {
 
-#define DEV_KOBJ_INDEX 0
-#define KOBJECT_ISINIT_INDEX 7
-
 struct ContainerOfVisitor : InstVisitor<ContainerOfVisitor> {
 public:
   ContainerOfVisitor(Value *gep, Value *containerOfReplacer)
@@ -214,6 +211,7 @@ public:
 
     handleCpufreqGet(m, updateIndex, checkPointAttr);
     handleRegulatorGet(m, updateIndex, checkPointAttr);
+    handleLedRegister(m, updateIndex, checkPointAttr);
     return true;
   }
 
@@ -1234,8 +1232,47 @@ private:
     return f;
   }
 
-#define CLASS_DEV_RELEASE_INDEX 6
   void handleDeviceReleaseFunctions(CallInst *call, Attribute checkPointAttr) {
+    handleTypeDeviceReleaseFunctions(call, checkPointAttr);
+    handleClassDeviceReleaseFunctions(call, checkPointAttr);
+  }
+
+#define TYPE_DEV_RELEASE_INDEX 4
+  void handleTypeDeviceReleaseFunctions(CallInst *call,
+                                        Attribute checkPointAttr) {
+    LLVMContext &ctx = call->getContext();
+    StructType *deviceType =
+        StructType::getTypeByName(ctx, "struct.device_type");
+    for (Instruction &inst : instructions(call->getFunction())) {
+      if (StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+        GlobalVariable *gv = dyn_cast<GlobalVariable>(
+            store->getValueOperand()->stripPointerCasts());
+        GEPOperator *typeGEP = dyn_cast<GEPOperator>(
+            store->getPointerOperand()->stripPointerCasts());
+        if (!gv || !equivTypes(gv->getValueType(), deviceType) || !typeGEP)
+          continue;
+        Function *release =
+            dyn_cast<Function>(gv->getInitializer()
+                                   ->getAggregateElement(TYPE_DEV_RELEASE_INDEX)
+                                   ->stripPointerCasts());
+        if (!release)
+          continue;
+        release->setName("drvhorn." + release->getName());
+        release->addFnAttr(checkPointAttr);
+
+        // TODO: call when the refcount is 0.
+        IRBuilder<> b(call->getParent()->getTerminator());
+        Value *dev = call->getArgOperand(0);
+        if (dev->getType() != release->getArg(0)->getType())
+          dev = b.CreateBitCast(dev, release->getArg(0)->getType());
+        b.CreateCall(release, dev);
+      }
+    }
+  }
+
+#define CLASS_DEV_RELEASE_INDEX 6
+  void handleClassDeviceReleaseFunctions(CallInst *call,
+                                         Attribute checkPointAttr) {
     LLVMContext &ctx = call->getContext();
     StructType *classType = StructType::getTypeByName(ctx, "struct.class");
     for (Instruction &inst : instructions(call->getFunction())) {
@@ -1255,6 +1292,7 @@ private:
         devRelease->setName("drvhorn." + devRelease->getName());
         devRelease->addFnAttr(checkPointAttr);
 
+        // TODO: call when the refcount is 0.
         IRBuilder<> b(call->getParent()->getTerminator());
         Value *dev = call->getArgOperand(0);
         if (dev->getType() != devRelease->getArg(0)->getType())
@@ -1469,6 +1507,7 @@ private:
         "devm_regulator_register",
         "devm_led_classdev_register_ext",
         "devm_phy_create",
+        "devm_gpiochip_add_data_with_key",
         // this function frees memory manually
         "gpiochip_add_data_with_key",
     };
@@ -1625,6 +1664,42 @@ private:
                         entry);
     retPhi->addIncoming(regulator, body);
     b.CreateRet(retPhi);
+  }
+
+// handle led_classdev_register_ext since it calls led_classdev_next_name
+// which will be reduced to an infity loop and be a huge source of false
+// alarms.
+#define LED_CLASSDEV_DEVPTR_INDEX 12
+  void handleLedRegister(Module &m, Function *updateIndex,
+                         Attribute checkPointAttr) {
+    Function *f = m.getFunction("led_classdev_register_ext");
+    if (!f)
+      return;
+    f->deleteBody();
+    f->setName("drvhorn.led_classdev_register_ext");
+    f->addFnAttr(checkPointAttr);
+
+    Argument *ledClassDevArg = f->getArg(1);
+    StructType *ledClassDevType =
+        cast<StructType>(ledClassDevArg->getType()->getPointerElementType());
+    StructType *devType = cast<StructType>(
+        ledClassDevType->getElementType(LED_CLASSDEV_DEVPTR_INDEX)
+            ->getPointerElementType());
+    Function *devGetter =
+        deviceGetter(m, devType, {}, updateIndex, checkPointAttr);
+
+    LLVMContext &ctx = m.getContext();
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+
+    IRBuilder<> b(entry);
+    Value *dev = b.CreateCall(devGetter);
+    Value *devGEP = b.CreateInBoundsGEP(
+        ledClassDevType, ledClassDevArg,
+        {b.getInt64(0), b.getInt32(LED_CLASSDEV_DEVPTR_INDEX)});
+    b.CreateStore(dev, devGEP);
+    Value *isNull = b.CreateIsNull(dev);
+    Value *ret = b.CreateSelect(isNull, b.getInt32(-1), b.getInt32(0));
+    b.CreateRet(ret);
   }
 };
 
