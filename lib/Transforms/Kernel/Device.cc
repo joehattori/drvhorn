@@ -396,16 +396,25 @@ private:
 
     Argument *fwnode = f->getArg(0);
     LLVMContext &ctx = m.getContext();
-    BasicBlock *blk = BasicBlock::Create(ctx, "blk", f);
+    BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
+    BasicBlock *body = BasicBlock::Create(ctx, "body", f);
+    BasicBlock *ret = BasicBlock::Create(ctx, "ret", f);
     IntegerType *i8Type = Type::getInt8Ty(ctx);
 
-    IRBuilder<> b(blk);
+    IRBuilder<> b(entry);
+    Value *isNull = b.CreateIsNull(fwnode);
+    b.CreateCondBr(isNull, ret, body);
+
+    b.SetInsertPoint(body);
     Value *countGEP =
         b.CreateInBoundsGEP(fwnode->getType()->getPointerElementType(), fwnode,
                             {b.getInt64(0), b.getInt32(FWNODE_REFCOUNT_INDEX)});
     LoadInst *count = b.CreateLoad(i8Type, countGEP);
     Value *newCount = b.CreateSub(count, b.getInt8(1));
     b.CreateStore(newCount, countGEP);
+    b.CreateBr(ret);
+
+    b.SetInsertPoint(ret);
     b.CreateRetVoid();
     return f;
   }
