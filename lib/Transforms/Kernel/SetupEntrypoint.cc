@@ -38,19 +38,22 @@ void setupDevicePtr(Module &m, IRBuilder<> &b, Value *devPtr) {
 
   // setup of_node
   // TODO: this causes false positives
-  // const SmallVector<Value *> &devNodeIndices =
-  //     gepIndicesToStruct(
-  //         devType,
-  //         StructType::getTypeByName(ctx, "struct.device_node")->getPointerTo())
-  //         .getValue();
-  // Value *ofNodeGEP =
-  //     b.CreateInBoundsGEP(devType, devPtr, devNodeIndices, "of_node");
+  const SmallVector<Value *> &devNodeIndices =
+      gepIndicesToStruct(
+          devType,
+          StructType::getTypeByName(ctx, "struct.device_node")->getPointerTo())
+          .getValue();
+  Value *ofNodeGEP =
+      b.CreateInBoundsGEP(devType, devPtr, devNodeIndices, "of_node");
   // Function *devNodeGetter = m.getFunction("drvhorn.gen.devnode");
   // Value *ofNode = b.CreateCall(devNodeGetter);
   // if (ofNode->getType() != ofNodeGEP->getType()->getPointerElementType())
   //   ofNode =
-  //       b.CreateBitCast(ofNode, ofNodeGEP->getType()->getPointerElementType());
-  // b.CreateStore(ofNode, ofNodeGEP);
+  //       b.CreateBitCast(ofNode,
+  //       ofNodeGEP->getType()->getPointerElementType());
+  Value *ofNode = b.CreateAlloca(
+      ofNodeGEP->getType()->getPointerElementType()->getPointerElementType());
+  b.CreateStore(ofNode, ofNodeGEP);
 }
 
 void buildFailBlock(Module &m, BasicBlock *fail, BasicBlock *ret,

@@ -104,7 +104,7 @@ private:
     IRBuilder<> b(blk);
     if (fail->arg_size()) {
       Argument *instance = fail->arg_begin();
-      checkInstance(m, instance, b, ctx, krefType, krefChecker);
+      checkInstance(m, instance, b, ctx);
     }
 
     static const std::string storagePrefix = "drvhorn.storage.";
@@ -134,8 +134,7 @@ private:
   }
 
   void checkInstance(Module &m, Argument *instance, IRBuilder<> &b,
-                     LLVMContext &ctx, StructType *krefType,
-                     Function *krefChecker) {
+                     LLVMContext &ctx) {
     StructType *instanceType =
         cast<StructType>(instance->getType()->getPointerElementType());
     StructType *devType = StructType::getTypeByName(ctx, "struct.device");
@@ -154,9 +153,6 @@ private:
     if (!deviceGEP)
       return;
     devType = cast<StructType>(deviceGEP->getType()->getPointerElementType());
-    Value *krefGEP = b.CreateInBoundsGEP(
-        devType, deviceGEP, gepIndicesToStruct(devType, krefType).getValue());
-    b.CreateCall(krefChecker, krefGEP);
     if (Function *checker = getOrBuildAssertWakeup(m, devType))
       b.CreateCall(checker, deviceGEP);
   }
