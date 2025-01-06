@@ -458,8 +458,6 @@ public:
       add(seahorn::createAssertKrefsPass());
       add(llvm::createVerifierPass(true));
       add(seahorn::createAssumeNonNullPass());
-      /*add(seahorn::createIntoBinaryPass());*/
-      add(seahorn::createHandleNondetMallocPass());
       add(llvm::createCFGSimplificationPass());
       add(llvm::createVerifierPass(true));
       add(seahorn::createKernelDebugPass(kernelOut));

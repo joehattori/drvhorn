@@ -212,6 +212,29 @@ public:
     return true;
   }
 
+  bool visitICmpInst(ICmpInst &icmp) {
+    // struct list_head comparison is ignored as we model loop conditions as
+    // nondet.
+    StructType *listHeadType =
+        StructType::getTypeByName(icmp.getContext(), "struct.list_head");
+
+    auto isList = [listHeadType](const Value *v) {
+      const Value *base = getUnderlyingObject(v);
+      return equivTypes(v->getType(), listHeadType->getPointerTo()) ||
+             equivTypes(base->getType(), listHeadType->getPointerTo());
+    };
+
+    if (icmp.isEquality() &&
+        (isList(icmp.getOperand(0)) || isList(icmp.getOperand(1))))
+      return false;
+
+    bool isTarget =
+        all_of(icmp.operands(), [this](Value *v) { return visitValue(v); });
+    if (isTarget)
+      recordInst(&icmp);
+    return isTarget;
+  }
+
   bool visitInstruction(Instruction &inst) {
     bool isTarget =
         all_of(inst.operands(), [this](Value *v) { return visitValue(v); });
@@ -280,11 +303,18 @@ private:
   }
 
   bool isStoreTarget(const StoreInst &store) {
+    LLVMContext &ctx = store.getContext();
+    StructType *listHeadType =
+        StructType::getTypeByName(ctx, "struct.list_head");
+    const Value *val = store.getValueOperand();
+    // The store of struct list_head is ignored.
+    if (equivTypes(val->getType(), listHeadType->getPointerTo()))
+      return false;
+
     const Value *v = getUnderlyingObject(store.getPointerOperand());
     if (StructType *baseType =
             dyn_cast<StructType>(v->getType()->getPointerElementType())) {
-      StructType *deviceType = StructType::getTypeByName(
-          store.getModule()->getContext(), "struct.device");
+      StructType *deviceType = StructType::getTypeByName(ctx, "struct.device");
       if (embedsStruct(baseType, deviceType))
         return false;
     }
@@ -292,7 +322,7 @@ private:
       if (targetArgs.count(arg))
         return true;
       SmallVector<const Value *> underlyingVals;
-      getUnderlyingObjects(store.getValueOperand(), underlyingVals, nullptr, 0);
+      getUnderlyingObjects(val, underlyingVals, nullptr, 0);
       return any_of(underlyingVals, [this](const Value *v) {
         return refcountGenerators.count(dyn_cast<CallInst>(v));
       });
@@ -527,7 +557,7 @@ private:
           f.getName().startswith("__VERIFIER_") ||
           // might be used later
           f.getName().equals("drvhorn.kref_init") ||
-          f.getName().equals("drvhorn.malloc"))
+          f.getName().equals("drvhorn.alloc"))
         continue;
       f.setLinkage(GlobalValue::InternalLinkage);
     }
@@ -594,7 +624,7 @@ private:
 
   bool isNewNondet(const Instruction &inst) {
     return isa<CallInst, LoadInst, StoreInst, InsertElementInst,
-               InsertValueInst>(inst);
+               InsertValueInst, ICmpInst>(inst);
   }
 
   void sliceModule(Module &m) {
