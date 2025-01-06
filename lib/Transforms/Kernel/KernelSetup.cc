@@ -1,4 +1,5 @@
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -32,6 +33,7 @@ public:
     handleKmemCache(m, allocStub);
     handleIsErr(m);
     handleCpuPossibleMask(m);
+    handleGlobalListCmp(m);
     return true;
   }
 
@@ -391,6 +393,37 @@ private:
     }
 
     for (Instruction *inst : toRemove) {
+      inst->eraseFromParent();
+    }
+  }
+
+  void handleGlobalListCmp(Module &m) {
+    StructType *listHeadType =
+        StructType::getTypeByName(m.getContext(), "struct.list_head");
+
+    auto isBaseList = [listHeadType](const Value *v) {
+      const Value *base = getUnderlyingObject(v);
+      return equivTypes(v->getType(), listHeadType->getPointerTo()) ||
+             equivTypes(base->getType(), listHeadType->getPointerTo());
+    };
+
+    SmallVector<Instruction *> toRemove;
+    for (Function &f : m) {
+      for (Instruction &inst : instructions(f)) {
+        if (ICmpInst *cmp = dyn_cast<ICmpInst>(&inst)) {
+          if (!cmp->isEquality())
+            continue;
+          if (isBaseList(cmp->getOperand(0)) || isBaseList(cmp->getOperand(1)))
+            toRemove.push_back(cmp);
+        }
+      }
+    }
+
+    Function *ndBool = getOrCreateNdIntFn(m, 1);
+    for (Instruction *inst : toRemove) {
+      IRBuilder<> b(inst);
+      Value *nd = b.CreateCall(ndBool);
+      inst->replaceAllUsesWith(nd);
       inst->eraseFromParent();
     }
   }
