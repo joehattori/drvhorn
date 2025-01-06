@@ -84,6 +84,7 @@ private:
             std::string krefName =
                 "drvhorn.kref.arrayelem." + gv.getName().str();
             initializeTargetGv(elem, indices, krefName, b);
+            replaceNullCheckWithNondet(elem);
             ret = true;
           }
         }
@@ -122,6 +123,25 @@ private:
     Value *kref =
         b.CreateGEP(gv->getType()->getPointerElementType(), gv, gepIndices);
     b.CreateCall(krefInit, kref);
+  }
+
+  void replaceNullCheckWithNondet(GlobalVariable *elem) {
+    Module *m = elem->getParent();
+    Function *ndBool = getOrCreateNdIntFn(*m, 1);
+    SmallVector<ICmpInst *> nullChecks;
+    for (User *user : elem->users()) {
+      if (ICmpInst *icmp = dyn_cast<ICmpInst>(user)) {
+        if (icmp->getOperand(1) == ConstantPointerNull::get(elem->getType())) {
+          nullChecks.push_back(icmp);
+        }
+      }
+    }
+    for (ICmpInst *icmp : nullChecks) {
+      IRBuilder<> b(icmp);
+      Value *cond = b.CreateCall(ndBool);
+      icmp->replaceAllUsesWith(cond);
+      icmp->eraseFromParent();
+    }
   }
 
   Function *getNondetFn(Module *m, StructType *s) {
