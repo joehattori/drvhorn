@@ -1694,10 +1694,9 @@ private:
     b.CreateRet(retPhi);
   }
 
-// handle led_classdev_register_ext since it calls led_classdev_next_name
-// which will be reduced to an infity loop and be a huge source of false
-// alarms.
-#define LED_CLASSDEV_DEVPTR_INDEX 12
+  // handle led_classdev_register_ext since it calls led_classdev_next_name
+  // which will be reduced to an infity loop and be a huge source of false
+  // alarms.
   void handleLedRegister(Module &m, Function *updateIndex,
                          Attribute checkPointAttr) {
     Function *f = m.getFunction("led_classdev_register_ext");
@@ -1710,20 +1709,20 @@ private:
     Argument *ledClassDevArg = f->getArg(1);
     StructType *ledClassDevType =
         cast<StructType>(ledClassDevArg->getType()->getPointerElementType());
+    LLVMContext &ctx = m.getContext();
+    const Optional<SmallVector<Value *>> &gep(gepIndicesToStruct(
+        ledClassDevType,
+        StructType::getTypeByName(ctx, "struct.device")->getPointerTo()));
     StructType *devType = cast<StructType>(
-        ledClassDevType->getElementType(LED_CLASSDEV_DEVPTR_INDEX)
-            ->getPointerElementType());
+        getGEPType(ledClassDevType, *gep)->getPointerElementType());
     Function *devGetter =
         deviceGetter(m, devType, {}, updateIndex, checkPointAttr);
 
-    LLVMContext &ctx = m.getContext();
     BasicBlock *entry = BasicBlock::Create(ctx, "entry", f);
 
     IRBuilder<> b(entry);
     Value *dev = b.CreateCall(devGetter);
-    Value *devGEP = b.CreateInBoundsGEP(
-        ledClassDevType, ledClassDevArg,
-        {b.getInt64(0), b.getInt32(LED_CLASSDEV_DEVPTR_INDEX)});
+    Value *devGEP = b.CreateInBoundsGEP(ledClassDevType, ledClassDevArg, *gep);
     b.CreateStore(dev, devGEP);
     Value *isNull = b.CreateIsNull(dev);
     Value *ret = b.CreateSelect(isNull, b.getInt32(-1), b.getInt32(0));
