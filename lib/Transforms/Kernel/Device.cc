@@ -74,62 +74,62 @@ private:
   Value *nullContainerOf;
 };
 
-struct DeviceGEPGetter
-    : InstVisitor<DeviceGEPGetter, Optional<SmallVector<uint64_t>>> {
-public:
-  DeviceGEPGetter(Function *devInit) : devInit(devInit) {}
+struct DeviceGEP {
+  StructType *devType;
+  uint64_t index;
+};
 
-  Optional<SmallVector<uint64_t>> getGEPIndices(CallInst *allocCall) {
+struct DeviceGEPGetter : InstVisitor<DeviceGEPGetter, Optional<DeviceGEP>> {
+public:
+  DeviceGEPGetter() {}
+
+  Optional<DeviceGEP> getGEPIndices(CallInst *allocCall) {
     visited.clear();
     visited.insert(allocCall);
     prev = allocCall;
     for (User *user : allocCall->users()) {
-      if (Optional<SmallVector<uint64_t>> res = visitUser(user)) {
+      if (Optional<DeviceGEP> res = visitUser(user))
         return res;
-      }
     }
     return None;
   }
 
-  Optional<SmallVector<uint64_t>>
-  visitGetElementPtrInst(GetElementPtrInst &gep) {
-    SmallVector<uint64_t> indices;
-    for (Value *idx : gep.indices()) {
-      if (ConstantInt *cidx = dyn_cast<ConstantInt>(idx)) {
-        indices.push_back(cidx->getZExtValue());
-      } else {
-        return None;
-      }
-    }
+  Optional<DeviceGEP> visitGetElementPtrInst(GetElementPtrInst &gep) {
     for (User *user : gep.users()) {
-      if (Optional<SmallVector<uint64_t>> res = visitUser(user)) {
-        indices.append(*res);
-        return indices;
+      if (Optional<DeviceGEP> res = visitUser(user)) {
+        if (gep.getNumIndices() > 1)
+          errs() << "DeviceGEPGetter: unexpected number of indices in "
+                 << gep.getFunction()->getName() << ' ' << gep << "\n";
+        ConstantInt *cidx = dyn_cast<ConstantInt>(gep.idx_begin());
+        if (!cidx)
+          return None;
+        uint64_t idx = cidx->getZExtValue();
+        return DeviceGEP{res->devType, res->index + idx};
       }
     }
     return None;
   }
 
-  Optional<SmallVector<uint64_t>> visitBitCastInst(BitCastInst &bitcast) {
-    for (User *user : bitcast.users()) {
-      if (Optional<SmallVector<uint64_t>> res = visitUser(user)) {
-        return res;
+  Optional<DeviceGEP> visitBitCastInst(BitCastInst &bitcast) {
+    if (StructType *destTy = dyn_cast<StructType>(
+            bitcast.getDestTy()->getPointerElementType())) {
+      StructType *deviceType =
+          StructType::getTypeByName(destTy->getContext(), "struct.device");
+      if (embedsStruct(destTy, deviceType)) {
+        return DeviceGEP{destTy, 0};
       }
     }
     return None;
   }
 
-  Optional<SmallVector<uint64_t>> visitCallInst(CallInst &call) {
+  Optional<DeviceGEP> visitCallInst(CallInst &call) {
     Function *f = extractCalledFunction(call);
     if (!f)
       return None;
-    if (f == devInit) {
-      return SmallVector<uint64_t>{};
-    }
     User *argUser = prev;
     for (unsigned i = 0; i < call.arg_size(); i++) {
       if (call.getArgOperand(i) == argUser) {
-        if (Optional<SmallVector<uint64_t>> res = visitArg(f->getArg(i)))
+        if (Optional<DeviceGEP> res = visitArg(f->getArg(i)))
           return res;
         break;
       }
@@ -137,24 +137,21 @@ public:
     return None;
   }
 
-  Optional<SmallVector<uint64_t>> visitInstruction(Instruction &inst) {
-    return None;
-  }
+  Optional<DeviceGEP> visitInstruction(Instruction &inst) { return None; }
 
 private:
-  Function *devInit;
   DenseSet<const User *> visited;
   User *prev;
 
-  Optional<SmallVector<uint64_t>> visitArg(Argument *arg) {
+  Optional<DeviceGEP> visitArg(Argument *arg) {
     for (User *user : arg->users()) {
-      if (Optional<SmallVector<uint64_t>> res = visitUser(user))
+      if (Optional<DeviceGEP> res = visitUser(user))
         return res;
     }
     return None;
   }
 
-  Optional<SmallVector<uint64_t>> visitUser(User *user) {
+  Optional<DeviceGEP> visitUser(User *user) {
     if (!visited.insert(user).second)
       return None;
     prev = user;
@@ -162,9 +159,8 @@ private:
       return visit(inst);
     } else {
       for (User *u : user->users()) {
-        if (Optional<SmallVector<uint64_t>> res = visitUser(u)) {
+        if (Optional<DeviceGEP> res = visitUser(u))
           return res;
-        }
       }
       return None;
     }
@@ -1316,12 +1312,13 @@ private:
     if (!devInit)
       return;
     Function *alloc = getOrCreateAlloc(m);
-    DeviceGEPGetter getter(devInit);
+    DeviceGEPGetter getter;
     const DenseMap<uint64_t, SmallVector<StructType *>> &structsBySize =
         getStructsBySize(m);
     for (CallInst *call : getCalls(alloc)) {
+      Optional<DeviceGEP> devGEP = getter.getGEPIndices(call);
       StructType *allocatedDevType =
-          getCustomDevType(m, structsBySize, getter, call);
+          getCustomDevType(m, structsBySize, devGEP, call);
       if (!allocatedDevType)
         continue;
       Function *devAlloc = buildStorageElemGenerator(
@@ -1347,7 +1344,7 @@ private:
   StructType *getCustomDevType(
       Module &m,
       const DenseMap<uint64_t, SmallVector<StructType *>> &structsBySize,
-      DeviceGEPGetter &getter, CallInst *call) {
+      const Optional<DeviceGEP> &devGEP, CallInst *call) {
     DataLayout dl(&m);
     LLVMContext &ctx = m.getContext();
     StructType *devType = StructType::getTypeByName(ctx, "struct.device");
@@ -1360,14 +1357,13 @@ private:
           embedsStruct(directType, devType))
         return directType;
     }
-    Optional<SmallVector<uint64_t>> indices = getter.getGEPIndices(call);
-    if (!indices.hasValue())
+    if (!devGEP.hasValue())
       return nullptr;
     for (StructType *st : structsBySize.lookup(size)) {
-      if (hasDeviceAtIndices(st, *indices, devType))
+      if (hasDeviceAtIndices(st, *devGEP, dl))
         return st;
     }
-    return nullptr;
+    return createCustomDevType(size, *devGEP, dl);
   }
 
   StructType *directlyCastedType(CallInst *alloc) {
@@ -1381,18 +1377,41 @@ private:
     return nullptr;
   }
 
-  bool hasDeviceAtIndices(StructType *st, ArrayRef<uint64_t> indices,
-                          StructType *devType) {
-    for (uint64_t index : indices) {
-      if (st->getNumElements() <= index)
-        return false;
-      st = dyn_cast<StructType>(st->getElementType(index));
-      if (!st)
-        return false;
+  bool hasDeviceAtIndices(StructType *st, DeviceGEP deviceGEP, DataLayout &dl) {
+    if (!st)
+      return false;
+    for (Type *elemType : st->elements()) {
+      uint64_t elemSize = dl.getTypeAllocSize(elemType);
+      if (deviceGEP.index == 0)
+        return equivTypes(elemType, deviceGEP.devType);
+      if (elemSize > deviceGEP.index)
+        return hasDeviceAtIndices(dyn_cast<StructType>(elemType), deviceGEP,
+                                  dl);
+      if (elemSize == deviceGEP.index)
+        return equivTypes(elemType, deviceGEP.devType);
+      deviceGEP.index -= elemSize;
     }
-    // if the first field is struct device, the index 0 might not be collected.
-    return equivTypes(st, devType) ||
-           equivTypes(st->getElementType(0), devType);
+    return false;
+  }
+
+  StructType *createCustomDevType(uint64_t size, DeviceGEP devGEP,
+                                  DataLayout &dl) {
+    IntegerType *i8Ty = Type::getInt8Ty(devGEP.devType->getContext());
+    ArrayType *prePaddingType = nullptr;
+    if (devGEP.index)
+      prePaddingType = ArrayType::get(i8Ty, devGEP.index);
+    ArrayType *postPaddingType = nullptr;
+    uint64_t postSize =
+        size - devGEP.index - dl.getTypeAllocSize(devGEP.devType);
+    if (postSize)
+      postPaddingType = ArrayType::get(i8Ty, postSize);
+    SmallVector<Type *> elements;
+    if (prePaddingType)
+      elements.push_back(prePaddingType);
+    elements.push_back(devGEP.devType);
+    if (postPaddingType)
+      elements.push_back(postPaddingType);
+    return StructType::create(elements, "custom");
   }
 
 #define OF_PHANDLE_ARG_DEVNODE_INDEX 0
