@@ -288,6 +288,10 @@ private:
         {"of_graph_get_remote_port_parent", None, None},
         {"of_graph_get_remote_port", None, None},
         {"of_graph_get_remote_node", None, None},
+        // drivers/of/cpu.c
+        {"of_get_cpu_node", None, None},
+        {"of_cpu_device_node_get", None, None},
+        {"of_get_cpu_state_node", None, None},
         // drivers/regulator/core.c
         {"of_get_regulator", None, None},
         {"of_get_child_regulator", None, None},
@@ -1515,6 +1519,7 @@ private:
         "of_irq_parse_raw",
         "of_irq_parse_one",
         "of_platform_populate",
+        "of_cpu_node_to_id",
         "class_for_each_device",
         "mdiobus_scan",
         // clk
