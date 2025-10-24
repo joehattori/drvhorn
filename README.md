@@ -1,6 +1,7 @@
 DrvHorn is a tool to detect reference counting bugs in Linux kernel drivers, based on a CHC verification framework [SeaHorn](https://github.com/seahorn/seahorn).
 
 # Setup and Example Usage
+
 Users can use DrvHorn via Docker image we provided.
 
 ```shell
@@ -50,4 +51,22 @@ More detailed instructions can be found in the [seahorn repository](https://gith
 
 When users wish to analyze Linux kernel with a custom config, they need to build the Linux kernel into an LLVM bitcode file.
 After configuring the kernel, users can either apply [this patch](https://github.com/joehattori/drvhorn/blob/main/patches/gen-llvm-bc.patch) to the Linux kernel repository and run `make LLVM=-14 BUILD_BC=1` to obtain the LLVM file.
+
+# Evaluation
+
+For lightweight evaluation, we provided a simple script to run DrvHorn on multiple drivers in `./scripts/eval.sh`.
+
+```shell
+./scripts/eval.sh
+```
+
+As described above, `sat` indicates that refcount bugs are detected, and `unsat` indicates no bugs are found.
+
+For full evaluation on all platform drivers, download the LLVM bitcode file we provided [here](https://drive.google.com/file/d/1qIu_5Z9rING1phQ0vd7DC9VRv7B95F69/view?usp=sharing) and run:
+
+```shell
+./scripts/full-eval.sh --full-kernel-bc=path/to/full/kernel.bc
+```
+
+Users can also bulid the LLVM bitcode file by themselves by building the Linux kernel configured with `allyesconfig` into LLVM bitcode.
 
