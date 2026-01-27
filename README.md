@@ -54,13 +54,14 @@ After configuring the kernel, users can either apply [this patch](https://github
 
 # Evaluation
 
-For lightweight evaluation, we provided a simple script to run DrvHorn on multiple drivers in `./scripts/eval.sh`.
+For lightweight evaluation, we provided a simple script to run DrvHorn with a trimmed down kernel on multiple drivers in `./scripts/eval.sh`.
 
 ```shell
 ./scripts/eval.sh
 ```
 
-As described above, `sat` indicates that refcount bugs are detected, and `unsat` indicates no bugs are found.
+As described above, `sat` indicates that refcount bugs are detected, and `unsat` indicates no bugs are found (`acpi_wmi_driver` is an example of false positive - it reports `sat` but the expected behavior is `unsat`).
+This script will take about 5 minutes.
 
 For full evaluation on all platform drivers, download the LLVM bitcode file we provided [here](https://drive.google.com/file/d/1qIu_5Z9rING1phQ0vd7DC9VRv7B95F69/view?usp=sharing) and run:
 
@@ -68,5 +69,7 @@ For full evaluation on all platform drivers, download the LLVM bitcode file we p
 ./scripts/full-eval.sh --full-kernel-bc=path/to/full/kernel.bc
 ```
 
-Users can also bulid the LLVM bitcode file by themselves by building the Linux kernel configured with `allyesconfig` into LLVM bitcode.
+Users can also build the LLVM bitcode file by themselves by building the Linux kernel configured with `allyesconfig` into LLVM bitcode.
+Please note that this script will take about 3-4 days without parallelisation.
+We will provide an option to run the evaluation in parallel, but each thread will require about 10GB of free RAM.
 
